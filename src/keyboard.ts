@@ -1,8 +1,8 @@
 export interface KeyboardNavigatorCallbacks {
 	onNext: () => void;
 	onPrev: () => void;
-	onParentExpand: () => void;
-	onChildReduce: () => void;
+	onFastNext: () => void;
+	onFastPrev: () => void;
 	onClose: () => void;
 }
 
@@ -65,12 +65,12 @@ export class KeyboardNavigator {
 		}
 
 		if (evt.code === "ArrowUp" || evt.key === "ArrowUp") {
-			this.callbacks.onParentExpand();
+			this.callbacks.onFastPrev();
 			return;
 		}
 
 		if (evt.code === "ArrowDown" || evt.key === "ArrowDown") {
-			this.callbacks.onChildReduce();
+			this.callbacks.onFastNext();
 			return;
 		}
 	}

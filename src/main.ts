@@ -6,6 +6,7 @@ import { TOCComponent } from "./toc";
 
 export interface DynamicSlidesSettings {
 	transitionDuration: number; // in seconds
+	scrollDuration: number;
 }
 
 export interface DocumentStackFrame {
@@ -17,7 +18,8 @@ export interface DocumentStackFrame {
 }
 
 export const DEFAULT_SETTINGS: DynamicSlidesSettings = {
-	transitionDuration: 0.65
+	transitionDuration: 0.65,
+	scrollDuration: 1.0
 };
 
 export function computeDirection(
@@ -123,8 +125,10 @@ export default class DynamicSlidesPlugin extends Plugin {
 			() => {
 				this.cleanupNavigation();
 			},
-			this.settings.transitionDuration
+			this.settings.transitionDuration,
+			this.settings.scrollDuration * 1000
 		);
+		this.activeModal.setScrollDuration(this.settings.scrollDuration * 1000);
 
 		this.activeModal.setBreadcrumb(file.basename);
 		this.activeModal.onLinkClickCallback = (href: string) => {
@@ -143,13 +147,51 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.activeModal.setCounter(currentIdx, this.flatNodes.length);
 
 		this.keyboardNav = new KeyboardNavigator({
-			onNext: () => this.nextSlide(),
-			onPrev: () => this.prevSlide(),
-			onParentExpand: () => this.expandParent(),
-			onChildReduce: () => this.reduceChild(),
+			onNext: () => this.handleNextNavigation(),
+			onPrev: () => this.handlePrevNavigation(),
+			onFastNext: () => this.fastJumpNext(),
+			onFastPrev: () => this.fastJumpPrev(),
 			onClose: () => this.closePresentation()
 		});
 		this.keyboardNav.attach();
+	}
+
+	private handleNextNavigation() {
+		if (this.activeModal) {
+			const handled = this.activeModal.handleNext();
+			if (!handled) {
+				this.nextSlide();
+			}
+		} else {
+			this.nextSlide();
+		}
+	}
+
+	private handlePrevNavigation() {
+		if (this.activeModal) {
+			const handled = this.activeModal.handlePrev();
+			if (!handled) {
+				this.prevSlide();
+			}
+		} else {
+			this.prevSlide();
+		}
+	}
+
+	private fastJumpNext() {
+		if (this.activeModal) {
+			this.activeModal.closeMediaZoom(false);
+			this.activeModal.cancelScrollAnimation(false);
+		}
+		this.nextSlide();
+	}
+
+	private fastJumpPrev() {
+		if (this.activeModal) {
+			this.activeModal.closeMediaZoom(false);
+			this.activeModal.cancelScrollAnimation(false);
+		}
+		this.prevSlide('start');
 	}
 
 	private async handleInternalLinkClick(linkpath: string) {
@@ -178,7 +220,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.currentNode = this.rootNode;
 
 			if (this.activeModal && this.currentNode) {
-				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in');
+				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in', 'start');
 				const parentFrame = this.documentStack[this.documentStack.length - 1];
 				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
 				const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
@@ -193,11 +235,15 @@ export default class DynamicSlidesPlugin extends Plugin {
 		}
 	}
 
-	private goToNode(node: SectionNode, overrideDirection?: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump') {
+	private goToNode(
+		node: SectionNode,
+		overrideDirection?: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump',
+		enterFrom: 'start' | 'end' = 'start'
+	) {
 		const direction = overrideDirection ?? computeDirection(this.currentNode, node);
 		this.currentNode = node;
 		if (this.activeModal && this.currentNode) {
-			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, direction);
+			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, direction, enterFrom);
 			const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
 			this.activeModal.setCounter(currentIdx, this.flatNodes.length);
 		}
@@ -210,21 +256,21 @@ export default class DynamicSlidesPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx === -1 && this.flatNodes.length > 0) {
-			this.goToNode(this.flatNodes[0]);
+			this.goToNode(this.flatNodes[0], 'next', 'start');
 			return;
 		}
 		if (idx >= 0 && idx < this.flatNodes.length - 1) {
-			this.goToNode(this.flatNodes[idx + 1]);
+			this.goToNode(this.flatNodes[idx + 1], 'next', 'start');
 		} else if (idx === this.flatNodes.length - 1) {
 			new Notice("Fin de la présentation atteinte.");
 		}
 	}
 
-	private prevSlide() {
+	private prevSlide(enterFrom: 'start' | 'end' = 'end') {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx > 0) {
-			this.goToNode(this.flatNodes[idx - 1]);
+			this.goToNode(this.flatNodes[idx - 1], 'prev', enterFrom);
 		} else {
 			new Notice("Début de la présentation atteint.");
 		}
@@ -238,7 +284,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 				this.flatNodes = parentFrame.flatNodes;
 				this.rootNode = parentFrame.rootNode;
 				this.currentNode = parentFrame.currentNode;
-				this.goToNode(parentFrame.currentNode, 'zoom-out');
+				this.goToNode(parentFrame.currentNode, 'zoom-out', 'start');
 				const prevParent = this.documentStack[this.documentStack.length - 1];
 				if (this.activeModal) {
 					this.activeModal.setBreadcrumb(parentFrame.fileTitle, prevParent?.fileTitle);
@@ -250,7 +296,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 				return;
 			}
 		}
-		this.goToNode(this.currentNode.parent);
+		this.goToNode(this.currentNode.parent, 'zoom-out', 'start');
 	}
 
 	private reduceChild() {
@@ -258,7 +304,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			new Notice("Niveau le plus fin atteint.");
 			return;
 		}
-		this.goToNode(this.currentNode.children[0]);
+		this.goToNode(this.currentNode.children[0], 'zoom-in', 'start');
 	}
 
 	private closePresentation() {
@@ -306,6 +352,21 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 						this.plugin.settings.transitionDuration = roundedValue;
 						await this.plugin.saveSettings();
 						setting.setDesc(`Durée actuelle : ${roundedValue}s`);
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Durée du défilement fluide")
+			.setDesc("Ajuste la durée (en secondes) de l'animation de défilement vertical du texte de slide.")
+			.addSlider(slider =>
+				slider
+					.setLimits(0.5, 4.0, 0.1)
+					.setValue(this.plugin.settings.scrollDuration)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						const roundedValue = Math.round(value * 10) / 10;
+						this.plugin.settings.scrollDuration = roundedValue;
+						await this.plugin.saveSettings();
 					})
 			);
 	}
