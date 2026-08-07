@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-dynamic-slides",
+  "name": "Dynamic Section Slides",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Dynamic full-screen Markdown section slides with 2D keyboard navigation and hover TOC.",
+  "author": "Henri Jamet",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
