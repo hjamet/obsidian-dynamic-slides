@@ -136,7 +136,10 @@ export default class DynamicSlidesPlugin extends Plugin {
 		);
 		this.activeModal.setScrollDuration(this.settings.scrollDuration * 1000);
 
-		this.activeModal.setBreadcrumb(file.basename);
+		this.activeModal.setReturnButton(null);
+		this.activeModal.onReturnClickCallback = () => {
+			this.popDocumentStack();
+		};
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
 		};
@@ -208,10 +211,19 @@ export default class DynamicSlidesPlugin extends Plugin {
 	}
 
 	private async handleInternalLinkClick(linkpath: string) {
-		const targetFile = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.activeSourcePath);
+		const cleanPath = linkpath.split('#')[0].split('^')[0].trim();
+		let targetFile = this.app.metadataCache.getFirstLinkpathDest(cleanPath, this.activeSourcePath);
+		if (!targetFile) {
+			targetFile = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.activeSourcePath);
+		}
+		if (!targetFile) {
+			const allFiles = this.app.vault.getMarkdownFiles();
+			targetFile = allFiles.find(f => f.basename.toLowerCase() === cleanPath.toLowerCase() || f.name.toLowerCase() === cleanPath.toLowerCase()) || null;
+		}
+
 		if (targetFile && targetFile instanceof TFile) {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
-			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : this.activeSourcePath;
+			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : (this.activeSourcePath.split('/').pop()?.replace(/\.md$/, '') || "Note principale");
 
 			if (this.currentNode && this.rootNode) {
 				this.documentStack.push({
@@ -233,9 +245,10 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.currentNode = this.flatNodes.length > 1 ? this.flatNodes[1] : this.flatNodes[0];
 
 			if (this.activeModal && this.currentNode) {
+				this.activeModal.closeMediaZoom(false);
+				this.activeModal.cancelScrollAnimation(false);
 				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in', 'start');
-				const parentFrame = this.documentStack[this.documentStack.length - 1];
-				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
+				this.activeModal.setReturnButton(activeFileBasename);
 				this.updateSlideCounter();
 			}
 
@@ -243,8 +256,34 @@ export default class DynamicSlidesPlugin extends Plugin {
 				this.tocComp.update(this.currentNode, this.flatNodes);
 			}
 
-			new Notice(`Présentation du document : ${targetFile.basename}`);
+			new Notice(`Présentation de la note : ${targetFile.basename}`);
+		} else {
+			new Notice(`Fichier introuvable pour le lien : ${linkpath}`);
 		}
+	}
+
+	private popDocumentStack() {
+		if (this.documentStack.length === 0) return;
+		const parentFrame = this.documentStack.pop()!;
+		this.activeSourcePath = parentFrame.filePath;
+		this.flatNodes = parentFrame.flatNodes;
+		this.rootNode = parentFrame.rootNode;
+		this.currentNode = parentFrame.currentNode;
+
+		if (this.activeModal && this.currentNode) {
+			this.activeModal.closeMediaZoom(false);
+			this.activeModal.cancelScrollAnimation(false);
+			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-out', 'start');
+			const prevParent = this.documentStack[this.documentStack.length - 1];
+			this.activeModal.setReturnButton(prevParent ? prevParent.fileTitle : null);
+			this.updateSlideCounter();
+		}
+
+		if (this.tocComp && this.currentNode) {
+			this.tocComp.update(this.currentNode, this.flatNodes);
+		}
+
+		new Notice(`Retour à la note : ${parentFrame.fileTitle}`);
 	}
 
 	private goToNode(
@@ -280,27 +319,21 @@ export default class DynamicSlidesPlugin extends Plugin {
 	private prevSlide(enterFrom: 'start' | 'end' = 'end') {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
-		if (idx > 0) {
+		if (idx > 1) {
 			this.goToNode(this.flatNodes[idx - 1], 'prev', enterFrom);
-		} else {
-			new Notice("Début de la présentation atteint.");
+		} else if (idx === 1 || idx === 0) {
+			if (this.documentStack.length > 0) {
+				this.popDocumentStack();
+			} else {
+				new Notice("Début de la présentation atteint.");
+			}
 		}
 	}
 
 	private expandParent() {
 		if (!this.currentNode || !this.currentNode.parent) {
 			if (this.documentStack.length > 0) {
-				const parentFrame = this.documentStack.pop()!;
-				this.activeSourcePath = parentFrame.filePath;
-				this.flatNodes = parentFrame.flatNodes;
-				this.rootNode = parentFrame.rootNode;
-				this.currentNode = parentFrame.currentNode;
-				this.goToNode(parentFrame.currentNode, 'zoom-out', 'start');
-				const prevParent = this.documentStack[this.documentStack.length - 1];
-				if (this.activeModal) {
-					this.activeModal.setBreadcrumb(parentFrame.fileTitle, prevParent?.fileTitle);
-				}
-				new Notice(`Retour au document parent : ${parentFrame.fileTitle}`);
+				this.popDocumentStack();
 				return;
 			} else {
 				new Notice("Niveau supérieur racine atteint.");

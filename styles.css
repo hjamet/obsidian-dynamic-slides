@@ -210,7 +210,6 @@ body.is-dynamic-slides-active {
 	max-height: calc(100vh - 120px);
 	margin: auto;
 	overflow-y: auto;
-	scroll-behavior: smooth !important;
 	box-sizing: border-box;
 	padding: 2.5rem;
 	background-color: var(--background-primary-alt, var(--background-primary));
@@ -633,6 +632,47 @@ body.is-dynamic-slides-active {
 	border-color: var(--interactive-accent);
 	transform: scale(1.08);
 }
+
+/* Return Button for Document Stack Navigation (Orange Accent Badge) */
+.dynamic-slides-return-btn {
+	position: fixed;
+	top: 24px;
+	right: 24px;
+	z-index: 10005;
+	display: none;
+	align-items: center;
+	gap: 8px;
+	background: #ff7700;
+	color: #ffffff;
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	border-radius: 20px;
+	padding: 8px 18px;
+	font-size: 0.85rem;
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: 0 4px 16px rgba(255, 119, 0, 0.45);
+	transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, box-shadow 0.2s ease;
+	user-select: none;
+	max-width: 360px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.dynamic-slides-return-btn:hover {
+	transform: translateY(-2px);
+	background: #ff8c1a;
+	box-shadow: 0 6px 22px rgba(255, 119, 0, 0.65);
+}
+
+.dynamic-slides-return-btn:active {
+	transform: translateY(0);
+}
+
+.dynamic-slides-return-btn.is-visible {
+	display: flex;
+}
+
 
 
 

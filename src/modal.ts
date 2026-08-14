@@ -12,9 +12,11 @@ export class PresentationModal extends Component {
 	private hoverToggleBtnEl: HTMLButtonElement;
 	private contentEl: HTMLElement;
 	private counterEl: HTMLElement;
+	private returnBtnEl: HTMLElement;
 	private currentSlideComponent: Component | null = null;
 	private onCloseCallback?: () => void;
 	public onLinkClickCallback?: (href: string) => void;
+	public onReturnClickCallback?: () => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -36,6 +38,17 @@ export class PresentationModal extends Component {
 		this.scrollDurationMs = scrollDurationMs;
 
 		this.overlayEl = document.body.createDiv({ cls: "dynamic-slides-overlay" });
+
+		this.returnBtnEl = this.overlayEl.createEl("button", {
+			cls: "dynamic-slides-return-btn"
+		});
+		this.returnBtnEl.setAttribute("aria-label", "Revenir à la note parente");
+		this.returnBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			if (this.onReturnClickCallback) {
+				this.onReturnClickCallback();
+			}
+		});
 
 		const bottomLeftZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-left-zone" });
 		this.hoverToggleBtnEl = bottomLeftZone.createEl("button", {
@@ -100,7 +113,17 @@ export class PresentationModal extends Component {
 	}
 
 	public setBreadcrumb(currentTitle: string, parentTitle?: string) {
-		// Breadcrumb removed from minimal UI
+		this.setReturnButton(parentTitle || null);
+	}
+
+	public setReturnButton(parentTitle: string | null) {
+		if (parentTitle) {
+			this.returnBtnEl.setText(`↩ Revenir à ${parentTitle}`);
+			this.returnBtnEl.addClass("is-visible");
+		} else {
+			this.returnBtnEl.removeClass("is-visible");
+			this.returnBtnEl.setText("");
+		}
 	}
 
 	public canScrollDown(): boolean {
@@ -158,16 +181,17 @@ export class PresentationModal extends Component {
 
 			const startTime = performance.now();
 
-			const easeInOutCubic = (t: number): number => {
-				return t < 0.5
-					? 4 * t * t * t
-					: 1 - Math.pow(-2 * t + 2, 3) / 2;
+			// Pure symmetrical bell-curve easing (sinusoidal / half-period cosine)
+			// Yields a smooth symmetrical bell-shaped velocity profile v(t) = (π/2) * sin(π * t)
+			// with gentle, balanced acceleration and deceleration without sudden bursts.
+			const easeInOutSine = (t: number): number => {
+				return 0.5 * (1 - Math.cos(Math.PI * t));
 			};
 
 			const step = (currentTime: number) => {
 				const elapsed = currentTime - startTime;
-				const progress = Math.min(elapsed / durationMs, 1);
-				const easedProgress = easeInOutCubic(progress);
+				const progress = Math.min(1, Math.max(0, elapsed / durationMs));
+				const easedProgress = easeInOutSine(progress);
 
 				this.contentEl.scrollTop = startTop + distance * easedProgress;
 
