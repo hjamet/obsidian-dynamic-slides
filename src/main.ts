@@ -144,6 +144,12 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
 		};
+		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
+			const targetNode = this.flatNodes.find(n => n.id === nodeId);
+			if (targetNode) {
+				this.goToNode(targetNode, 'zoom-in', 'start');
+			}
+		};
 
 		this.activeModal.open(this.currentNode, this.activeSourcePath);
 

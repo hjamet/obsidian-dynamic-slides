@@ -272,8 +272,27 @@ body.is-dynamic-slides-active {
 	color: var(--text-accent) !important;
 	font-size: 1.15rem !important;
 	font-weight: 600;
-	margin-top: 1rem;
+	margin-top: 0.85rem;
 	margin-bottom: 0.35rem;
+	cursor: pointer;
+	display: inline-block;
+	width: fit-content;
+	max-width: 100%;
+	padding: 4px 10px;
+	margin-left: -10px;
+	border-radius: 6px;
+	transition: color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+	user-select: none;
+}
+
+.dynamic-slides-child-heading:hover {
+	color: var(--interactive-accent) !important;
+	background-color: var(--background-modifier-hover);
+	transform: translateX(6px);
+}
+
+.dynamic-slides-child-heading:active {
+	transform: translateX(3px) scale(0.98);
 }
 
 .dynamic-slides-media-zoom-overlay {

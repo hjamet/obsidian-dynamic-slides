@@ -17,6 +17,7 @@ export class PresentationModal extends Component {
 	private onCloseCallback?: () => void;
 	public onLinkClickCallback?: (href: string) => void;
 	public onReturnClickCallback?: () => void;
+	public onChildHeadingClickCallback?: (nodeId: string) => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -42,7 +43,7 @@ export class PresentationModal extends Component {
 		this.returnBtnEl = this.overlayEl.createEl("button", {
 			cls: "dynamic-slides-return-btn"
 		});
-		this.returnBtnEl.setAttribute("aria-label", "Revenir à la note parente");
+		this.returnBtnEl.setAttribute("aria-label", "Back to original note");
 		this.returnBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			if (this.onReturnClickCallback) {
@@ -70,6 +71,20 @@ export class PresentationModal extends Component {
 
 		this.contentEl.addEventListener('click', (evt) => {
 			const target = evt.target as HTMLElement;
+
+			const childHeadingEl = target.closest('.dynamic-slides-child-heading') as HTMLElement;
+			if (childHeadingEl) {
+				const nodeId = childHeadingEl.getAttribute('data-node-id');
+				if (nodeId) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					if (this.onChildHeadingClickCallback) {
+						this.onChildHeadingClickCallback(nodeId);
+					}
+					return;
+				}
+			}
+
 			const linkEl = target.closest('.internal-link') as HTMLElement;
 			if (linkEl) {
 				const href = linkEl.getAttribute('data-href') || linkEl.getAttribute('href');
@@ -118,7 +133,7 @@ export class PresentationModal extends Component {
 
 	public setReturnButton(parentTitle: string | null) {
 		if (parentTitle) {
-			this.returnBtnEl.setText(`↩ Revenir à ${parentTitle}`);
+			this.returnBtnEl.setText("↩ Back to original note");
 			this.returnBtnEl.addClass("is-visible");
 		} else {
 			this.returnBtnEl.removeClass("is-visible");
