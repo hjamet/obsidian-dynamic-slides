@@ -130,6 +130,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.app,
 			() => {
 				this.cleanupNavigation();
+				void this.jumpToCurrentSlideInEditor();
 			},
 			this.settings.transitionDuration,
 			this.settings.scrollDuration * 1000
@@ -353,10 +354,54 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 	private closePresentation() {
 		if (this.activeModal) {
-			this.activeModal.close();
+			const modal = this.activeModal;
 			this.activeModal = null;
+			modal.close();
+		} else {
+			this.cleanupNavigation();
+			void this.jumpToCurrentSlideInEditor();
 		}
-		this.cleanupNavigation();
+	}
+
+	private async jumpToCurrentSlideInEditor() {
+		if (!this.activeSourcePath) return;
+
+		const targetPath = this.activeSourcePath;
+		const targetLine = this.currentNode ? Math.max(0, this.currentNode.lineStart) : 0;
+
+		let view = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+		if (!view || !view.file || view.file.path !== targetPath) {
+			const targetFile = this.app.vault.getAbstractFileByPath(targetPath);
+			if (targetFile instanceof TFile) {
+				const leaves = this.app.workspace.getLeavesOfType("markdown");
+				const matchingLeaf = leaves.find(l => (l.view as MarkdownView)?.file?.path === targetPath);
+				if (matchingLeaf) {
+					this.app.workspace.setActiveLeaf(matchingLeaf, { focus: true });
+					view = matchingLeaf.view as MarkdownView;
+				} else {
+					const leaf = this.app.workspace.getLeaf(false);
+					await leaf.openFile(targetFile);
+					view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				}
+			}
+		}
+
+		if (view && view.editor) {
+			const editor = view.editor;
+			const totalLines = editor.lineCount();
+			const clampedLine = Math.min(Math.max(0, targetLine), Math.max(0, totalLines - 1));
+
+			editor.setCursor({ line: clampedLine, ch: 0 });
+			editor.scrollIntoView(
+				{
+					from: { line: clampedLine, ch: 0 },
+					to: { line: clampedLine, ch: 0 }
+				},
+				true
+			);
+			view.editor.focus();
+		}
 	}
 
 	private cleanupNavigation() {
