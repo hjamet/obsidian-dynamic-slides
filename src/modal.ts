@@ -1,6 +1,6 @@
 import { App, Component } from "obsidian";
 import { SectionNode } from "./parser";
-import { renderSlideContent, unloadSlideContent } from "./renderer";
+import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
 
 export const SCROLL_PHASE = -1;
@@ -254,7 +254,7 @@ export class PresentationModal extends Component {
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
 
 			const isTable = targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null;
-			const isMermaid = targetMedia.matches(".mermaid, svg.mermaid, .block-language-mermaid") || targetMedia.querySelector(".mermaid, svg.mermaid") !== null;
+			const isMermaid = targetMedia.matches(".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid']") || targetMedia.querySelector(".mermaid, svg.mermaid, [class*='block-language-mermaid']") !== null;
 			const isCode = !isMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
 
 			if (isTable) {
@@ -263,9 +263,14 @@ export class PresentationModal extends Component {
 			} else if (isCode) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
 				wrapper.appendChild(clone);
+			} else if (isMermaid) {
+				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-mermaid" });
+				wrapper.appendChild(clone);
+				enhanceMermaidSvgElements(wrapper);
 			} else {
-				// Images and Mermaid / SVG
-				this.zoomContentEl.appendChild(clone);
+				// Images and other media
+				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-image" });
+				wrapper.appendChild(clone);
 			}
 		}
 	}

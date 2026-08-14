@@ -117,8 +117,14 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 		this.rootNode = parsed.root;
 		this.flatNodes = parsed.flatNodes;
-		const cursorLine = view.editor.getCursor().line;
-		this.currentNode = findCurrentSectionNode(this.flatNodes, cursorLine);
+
+		// Toujours démarrer systématiquement à la slide 1 (première vraie section de contenu),
+		// jamais à la slide 0 (vue d'ensemble) ni à la position du curseur / précédente.
+		if (this.flatNodes.length > 1) {
+			this.currentNode = this.flatNodes[1];
+		} else {
+			this.currentNode = this.flatNodes[0];
+		}
 
 		this.activeModal = new PresentationModal(
 			this.app,
@@ -143,8 +149,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.activeModal.setTOC(this.tocComp);
 		this.tocComp.update(this.currentNode, this.flatNodes);
 
-		const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-		this.activeModal.setCounter(currentIdx, this.flatNodes.length);
+		this.updateSlideCounter();
 
 		this.keyboardNav = new KeyboardNavigator({
 			onNext: () => this.handleNextNavigation(),
@@ -154,6 +159,14 @@ export default class DynamicSlidesPlugin extends Plugin {
 			onClose: () => this.closePresentation()
 		});
 		this.keyboardNav.attach();
+	}
+
+	private updateSlideCounter() {
+		if (!this.activeModal || !this.currentNode) return;
+		const total = this.flatNodes.length > 1 ? this.flatNodes.length - 1 : 1;
+		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
+		const current = this.flatNodes.length > 1 ? idx : 1;
+		this.activeModal.setCounter(current, total);
 	}
 
 	private handleNextNavigation() {
@@ -217,14 +230,13 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.activeSourcePath = targetFile.path;
 			this.rootNode = parsed.root;
 			this.flatNodes = parsed.flatNodes;
-			this.currentNode = this.rootNode;
+			this.currentNode = this.flatNodes.length > 1 ? this.flatNodes[1] : this.flatNodes[0];
 
 			if (this.activeModal && this.currentNode) {
 				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in', 'start');
 				const parentFrame = this.documentStack[this.documentStack.length - 1];
 				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
-				const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-				this.activeModal.setCounter(currentIdx, this.flatNodes.length);
+				this.updateSlideCounter();
 			}
 
 			if (this.tocComp && this.currentNode) {
@@ -244,8 +256,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.currentNode = node;
 		if (this.activeModal && this.currentNode) {
 			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, direction, enterFrom);
-			const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-			this.activeModal.setCounter(currentIdx, this.flatNodes.length);
+			this.updateSlideCounter();
 		}
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes);

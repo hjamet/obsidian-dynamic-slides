@@ -322,6 +322,17 @@ body.is-dynamic-slides-active {
     display: none !important;
 }
 
+.dynamic-slides-content.is-only-zoomable-slide {
+	max-width: 95vw !important;
+	width: 95vw !important;
+	max-height: calc(100vh - 80px) !important;
+	display: flex !important;
+	flex-direction: column !important;
+	justify-content: center !important;
+	align-items: center !important;
+	padding: 2rem !important;
+}
+
 .dynamic-slides-content.is-only-zoomable-slide img,
 .dynamic-slides-content.is-only-zoomable-slide pre,
 .dynamic-slides-content.is-only-zoomable-slide table,
@@ -333,9 +344,27 @@ body.is-dynamic-slides-active {
     box-sizing: border-box !important;
 }
 
-.dynamic-slides-content.is-only-zoomable-slide img,
-.dynamic-slides-content.is-only-zoomable-slide svg {
+.dynamic-slides-content.is-only-zoomable-slide .block-language-mermaid,
+.dynamic-slides-content.is-only-zoomable-slide .mermaid {
+    width: 100% !important;
+    max-width: 100% !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide img {
     height: auto !important;
+    max-height: calc(100vh - 140px) !important;
+    object-fit: contain !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide svg,
+.dynamic-slides-content.is-only-zoomable-slide .mermaid svg {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: calc(100vh - 140px) !important;
     object-fit: contain !important;
 }
 
@@ -377,6 +406,74 @@ body.is-dynamic-slides-active {
     max-width: 100%;
     max-height: 100%;
     overflow: auto;
+}
+
+/* Mermaid Diagram Zoom Wrapper */
+.dynamic-slides-zoom-mermaid {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 24px;
+	box-sizing: border-box;
+	overflow: auto;
+}
+
+.dynamic-slides-zoom-mermaid .block-language-mermaid,
+.dynamic-slides-zoom-mermaid .mermaid {
+	width: 100% !important;
+	height: 100% !important;
+	max-width: 100% !important;
+	max-height: 100% !important;
+	display: flex !important;
+	justify-content: center !important;
+	align-items: center !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	background: transparent !important;
+}
+
+.dynamic-slides-zoom-mermaid svg,
+.dynamic-slides-media-zoom-content svg.mermaid,
+.dynamic-slides-media-zoom-content .mermaid svg,
+.dynamic-slides-media-zoom-content .block-language-mermaid svg {
+	width: 100% !important;
+	height: 100% !important;
+	max-width: 100% !important;
+	max-height: 100% !important;
+	min-width: 75% !important;
+	object-fit: contain !important;
+	display: block !important;
+}
+
+/* Gantt charts specific enhancement for full-screen readability */
+.dynamic-slides-zoom-mermaid svg.gantt,
+.dynamic-slides-zoom-mermaid svg[id*="mermaid-"] {
+	min-width: 85% !important;
+}
+
+/* Image Zoom Wrapper */
+.dynamic-slides-zoom-image {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 16px;
+	box-sizing: border-box;
+}
+
+.dynamic-slides-zoom-image img {
+	max-width: 100% !important;
+	max-height: 100% !important;
+	width: auto !important;
+	height: auto !important;
+	object-fit: contain !important;
 }
 
 .dynamic-slides-zoom-code {
