@@ -61,6 +61,24 @@ export function enhanceMermaidSvgElements(containerEl: HTMLElement) {
 	});
 }
 
+export function enhanceIframeElements(containerEl: HTMLElement) {
+	const iframes = containerEl.querySelectorAll<HTMLIFrameElement>("iframe");
+	iframes.forEach((iframe) => {
+		iframe.setAttribute("allowfullscreen", "true");
+		if (!iframe.getAttribute("allow")) {
+			iframe.setAttribute("allow", "fullscreen; autoplay; encrypted-media; picture-in-picture");
+		}
+		const parentP = iframe.closest("p");
+		if (parentP && parentP.children.length === 1 && parentP.textContent?.trim() === "") {
+			parentP.style.margin = "0";
+			parentP.style.padding = "0";
+			parentP.style.width = "100%";
+			parentP.style.display = "flex";
+			parentP.style.justifyContent = "center";
+		}
+	});
+}
+
 export async function renderSlideContent(
 	app: App,
 	markdown: string,
@@ -73,6 +91,7 @@ export async function renderSlideContent(
 	parentComponent.addChild(slideComponent);
 	await MarkdownRenderer.render(app, markdown, containerEl, sourcePath, slideComponent);
 	enhanceMermaidSvgElements(containerEl);
+	enhanceIframeElements(containerEl);
 	return slideComponent;
 }
 

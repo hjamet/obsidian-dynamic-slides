@@ -70,7 +70,7 @@ export class PresentationModal extends Component {
 				return;
 			}
 
-			const zoomableEl = target.closest('img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*="block-language-"]') as HTMLElement;
+			const zoomableEl = target.closest('iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*="block-language-"]') as HTMLElement;
 			if (zoomableEl) {
 				const zoomableList = this.detectMediaElements();
 				const matchedEl = zoomableList.find(item => item === zoomableEl || item.contains(zoomableEl));
@@ -203,7 +203,7 @@ export class PresentationModal extends Component {
 	public detectMediaElements(): HTMLElement[] {
 		if (!this.contentEl) return [];
 		const raw = Array.from(
-			this.contentEl.querySelectorAll<HTMLElement>("img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']")
+			this.contentEl.querySelectorAll<HTMLElement>("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']")
 		);
 		const filtered = raw.filter(el => {
 			return !raw.some(other => other !== el && other.contains(el));
@@ -216,7 +216,7 @@ export class PresentationModal extends Component {
 		if (!this.contentEl) return false;
 		const clone = this.contentEl.cloneNode(true) as HTMLElement;
 		clone.querySelectorAll("h1, h2, h3, h4, h5, h6, .dynamic-slides-child-heading").forEach(el => el.remove());
-		clone.querySelectorAll("img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']").forEach(el => el.remove());
+		clone.querySelectorAll("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']").forEach(el => el.remove());
 		const text = clone.textContent?.trim() || "";
 		return text.length === 0;
 	}
@@ -240,11 +240,25 @@ export class PresentationModal extends Component {
 			if (!animated) {
 				this.zoomOverlayEl.style.animation = "none";
 			}
-			this.zoomContentEl = this.zoomOverlayEl.createDiv({ cls: "dynamic-slides-media-zoom-content" });
-			this.zoomOverlayEl.addEventListener("click", (evt) => {
+			const closeBtn = this.zoomOverlayEl.createEl("button", {
+				cls: "dynamic-slides-zoom-close-btn",
+				text: "✕"
+			});
+			closeBtn.setAttribute("aria-label", "Fermer le zoom");
+			closeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
+			});
+
+			this.zoomContentEl = this.zoomOverlayEl.createDiv({ cls: "dynamic-slides-media-zoom-content" });
+			this.zoomOverlayEl.addEventListener("click", (evt) => {
+				const target = evt.target as HTMLElement;
+				if (target === this.zoomOverlayEl || target === this.zoomContentEl || target.closest(".dynamic-slides-zoom-close-btn")) {
+					evt.stopPropagation();
+					this.closeMediaZoom(true);
+					this.activeZoomIndex = -1;
+				}
 			});
 		}
 
@@ -253,11 +267,26 @@ export class PresentationModal extends Component {
 			const targetMedia = zoomableElements[index];
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
 
-			const isTable = targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null;
-			const isMermaid = targetMedia.matches(".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid']") || targetMedia.querySelector(".mermaid, svg.mermaid, [class*='block-language-mermaid']") !== null;
-			const isCode = !isMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
+			const isIframe = targetMedia.tagName.toLowerCase() === "iframe" || targetMedia.querySelector("iframe") !== null;
+			const isTable = !isIframe && (targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null);
+			const isMermaid = !isIframe && (targetMedia.matches(".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid']") || targetMedia.querySelector(".mermaid, svg.mermaid, [class*='block-language-mermaid']") !== null);
+			const isCode = !isIframe && !isMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
 
-			if (isTable) {
+			if (isIframe) {
+				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-iframe" });
+				let iframeEl = clone;
+				if (clone.tagName.toLowerCase() !== "iframe") {
+					const nested = clone.querySelector("iframe");
+					if (nested) {
+						iframeEl = nested as HTMLElement;
+					}
+				}
+				if (iframeEl instanceof HTMLIFrameElement || iframeEl.tagName.toLowerCase() === "iframe") {
+					iframeEl.setAttribute("allowfullscreen", "true");
+					iframeEl.setAttribute("allow", "fullscreen; autoplay; encrypted-media; picture-in-picture");
+				}
+				wrapper.appendChild(iframeEl);
+			} else if (isTable) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-table" });
 				wrapper.appendChild(clone);
 			} else if (isCode) {
@@ -290,8 +319,12 @@ export class PresentationModal extends Component {
 				elToClose.remove();
 			}
 		}
-		const isOnlyZoomable = this.contentEl?.hasClass("is-only-zoomable-slide");
-		if (!isOnlyZoomable && this.contentEl) {
+		try {
+			window.focus();
+		} catch (e) {
+			// ignore
+		}
+		if (this.contentEl) {
 			this.contentEl.style.opacity = '1';
 		}
 	}
@@ -514,11 +547,7 @@ export class PresentationModal extends Component {
 			}
 		} else {
 			this.activeZoomIndex = -1;
-			if (isOnlyZoomable) {
-				if (this.contentEl) this.contentEl.style.opacity = '0';
-			} else {
-				if (this.contentEl) this.contentEl.style.opacity = '1';
-			}
+			if (this.contentEl) this.contentEl.style.opacity = '1';
 		}
 	}
 
