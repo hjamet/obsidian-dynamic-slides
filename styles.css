@@ -504,6 +504,7 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-content.is-only-zoomable-slide .block-language-mermaid,
+.dynamic-slides-content.is-only-zoomable-slide [class*="mermaid"],
 .dynamic-slides-content.is-only-zoomable-slide .mermaid {
     width: 100% !important;
     max-width: 100% !important;
@@ -519,11 +520,14 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-content.is-only-zoomable-slide svg,
-.dynamic-slides-content.is-only-zoomable-slide .mermaid svg {
+.dynamic-slides-content.is-only-zoomable-slide .mermaid svg,
+.dynamic-slides-content.is-only-zoomable-slide [class*="mermaid"] svg,
+.dynamic-slides-content.is-only-zoomable-slide .block-language-mermaid svg {
     width: 100% !important;
     height: auto !important;
-    max-width: 100% !important;
+    max-width: 90vw !important;
     max-height: calc(100vh - 140px) !important;
+    min-width: 75vw !important;
     object-fit: contain !important;
 }
 
@@ -582,7 +586,12 @@ body.is-dynamic-slides-active {
 	overflow: auto;
 }
 
+.dynamic-slides-zoom-mermaid > *,
+.dynamic-slides-zoom-mermaid div,
+.dynamic-slides-zoom-mermaid pre,
 .dynamic-slides-zoom-mermaid .block-language-mermaid,
+.dynamic-slides-zoom-mermaid [class*="block-language-"],
+.dynamic-slides-zoom-mermaid [class*="mermaid"],
 .dynamic-slides-zoom-mermaid .mermaid {
 	width: 100% !important;
 	height: 100% !important;
@@ -594,25 +603,36 @@ body.is-dynamic-slides-active {
 	margin: 0 !important;
 	padding: 0 !important;
 	background: transparent !important;
+	flex: 1 1 100% !important;
 }
 
 .dynamic-slides-zoom-mermaid svg,
+.dynamic-slides-media-zoom-content svg,
 .dynamic-slides-media-zoom-content svg.mermaid,
 .dynamic-slides-media-zoom-content .mermaid svg,
-.dynamic-slides-media-zoom-content .block-language-mermaid svg {
+.dynamic-slides-media-zoom-content [class*="mermaid"] svg,
+.dynamic-slides-media-zoom-content .block-language-mermaid svg,
+.dynamic-slides-zoom-image svg {
 	width: 100% !important;
-	height: 100% !important;
-	max-width: 100% !important;
-	max-height: 100% !important;
-	min-width: 75% !important;
+	height: auto !important;
+	max-width: 90vw !important;
+	max-height: 85vh !important;
+	min-width: 75vw !important;
 	object-fit: contain !important;
 	display: block !important;
+	margin: auto !important;
 }
 
 /* Gantt charts specific enhancement for full-screen readability */
 .dynamic-slides-zoom-mermaid svg.gantt,
-.dynamic-slides-zoom-mermaid svg[id*="mermaid-"] {
-	min-width: 85% !important;
+.dynamic-slides-zoom-mermaid svg[aria-roledescription="gantt"],
+.dynamic-slides-zoom-mermaid svg[id*="mermaid-"],
+.dynamic-slides-media-zoom-content svg.gantt,
+.dynamic-slides-media-zoom-content svg[aria-roledescription="gantt"] {
+	min-width: 85vw !important;
+	width: 100% !important;
+	max-width: 92vw !important;
+	max-height: 85vh !important;
 }
 
 /* Image Zoom Wrapper */

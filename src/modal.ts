@@ -162,7 +162,7 @@ export class PresentationModal extends Component {
 				return;
 			}
 
-			const zoomableEl = target.closest('iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*="block-language-"]') as HTMLElement;
+			const zoomableEl = target.closest('iframe, img, svg, .mermaid, [class*="mermaid"], [class*="language-mermaid"], [class*="block-language-"], pre, table') as HTMLElement;
 			if (zoomableEl) {
 				const zoomableList = this.detectMediaElements();
 				const matchedEl = zoomableList.find(item => item === zoomableEl || item.contains(zoomableEl));
@@ -374,7 +374,7 @@ export class PresentationModal extends Component {
 	public detectMediaElements(): HTMLElement[] {
 		if (!this.contentEl) return [];
 		const raw = Array.from(
-			this.contentEl.querySelectorAll<HTMLElement>("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']")
+			this.contentEl.querySelectorAll<HTMLElement>("iframe, img, svg, .mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-'], pre, table")
 		);
 		const filtered = raw.filter(el => {
 			return !raw.some(other => other !== el && other.contains(el));
@@ -387,7 +387,7 @@ export class PresentationModal extends Component {
 		if (!this.contentEl) return false;
 		const clone = this.contentEl.cloneNode(true) as HTMLElement;
 		clone.querySelectorAll("h1, h2, h3, h4, h5, h6, .dynamic-slides-child-heading").forEach(el => el.remove());
-		clone.querySelectorAll("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']").forEach(el => el.remove());
+		clone.querySelectorAll("iframe, img, svg, .mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-'], pre, table").forEach(el => el.remove());
 		const text = clone.textContent?.trim() || "";
 		return text.length === 0;
 	}
@@ -440,8 +440,13 @@ export class PresentationModal extends Component {
 
 			const isIframe = targetMedia.tagName.toLowerCase() === "iframe" || targetMedia.querySelector("iframe") !== null;
 			const isTable = !isIframe && (targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null);
-			const isMermaid = !isIframe && (targetMedia.matches(".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid']") || targetMedia.querySelector(".mermaid, svg.mermaid, [class*='block-language-mermaid']") !== null);
-			const isCode = !isIframe && !isMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
+			const isSvgOrMermaid = !isIframe && !isTable && (
+				targetMedia.tagName.toLowerCase() === "svg" ||
+				targetMedia.querySelector("svg") !== null ||
+				targetMedia.matches(".mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-mermaid']") ||
+				targetMedia.querySelector(".mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-mermaid']") !== null
+			);
+			const isCode = !isIframe && !isTable && !isSvgOrMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
 
 			if (isIframe) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-iframe" });
@@ -460,17 +465,18 @@ export class PresentationModal extends Component {
 			} else if (isTable) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-table" });
 				wrapper.appendChild(clone);
-			} else if (isCode) {
-				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
-				wrapper.appendChild(clone);
-			} else if (isMermaid) {
+			} else if (isSvgOrMermaid) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-mermaid" });
 				wrapper.appendChild(clone);
 				enhanceMermaidSvgElements(wrapper);
+			} else if (isCode) {
+				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
+				wrapper.appendChild(clone);
 			} else {
 				// Images and other media
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-image" });
 				wrapper.appendChild(clone);
+				enhanceMermaidSvgElements(wrapper);
 			}
 		}
 	}
