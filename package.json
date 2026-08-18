@@ -4,7 +4,7 @@
   "description": "Dynamic full-screen Markdown section slides with 2D keyboard navigation and hover TOC.",
   "main": "main.js",
   "scripts": {
-    "dev": "node esbuild.config.mjs --watch",
+    "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production"
   },
   "keywords": [],

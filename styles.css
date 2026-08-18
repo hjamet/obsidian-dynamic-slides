@@ -306,7 +306,6 @@ body.is-dynamic-slides-active {
 	max-height: calc(100vh - 120px);
 	margin: auto;
 	overflow-y: auto;
-	scroll-behavior: smooth !important;
 	box-sizing: border-box;
 	padding: calc(2.5rem * clamp(0.75, var(--dynamic-slides-zoom, 1), 1.25));
 	background-color: var(--background-primary-alt, var(--background-primary));
@@ -391,20 +390,27 @@ body.is-dynamic-slides-active {
 	color: var(--text-accent) !important;
 	font-size: calc(1.15rem * var(--dynamic-slides-zoom, 1)) !important;
 	font-weight: 600;
-	margin-top: 1rem;
+	margin-top: 0.85rem;
 	margin-bottom: 0.35rem;
 	cursor: pointer;
-	padding: 4px 10px;
-	border-radius: 8px;
-	transition: background-color 0.15s ease, transform 0.15s ease, color 0.15s ease;
 	display: inline-block;
 	width: fit-content;
+	max-width: 100%;
+	padding: 4px 10px;
+	margin-left: -10px;
+	border-radius: 6px;
+	transition: color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+	user-select: none;
 }
 
 .dynamic-slides-child-heading:hover {
-	background-color: var(--background-modifier-hover);
 	color: var(--interactive-accent) !important;
+	background-color: var(--background-modifier-hover);
 	transform: translateX(6px);
+}
+
+.dynamic-slides-child-heading:active {
+	transform: translateX(3px) scale(0.98);
 }
 
 .dynamic-slides-media-zoom-overlay {
@@ -444,6 +450,7 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-content img,
+.dynamic-slides-content iframe,
 .dynamic-slides-content pre,
 .dynamic-slides-content table,
 .dynamic-slides-content .mermaid,
@@ -452,7 +459,19 @@ body.is-dynamic-slides-active {
     display: none !important;
 }
 
+.dynamic-slides-content.is-only-zoomable-slide {
+	max-width: 95vw !important;
+	width: 95vw !important;
+	max-height: calc(100vh - 80px) !important;
+	display: flex !important;
+	flex-direction: column !important;
+	justify-content: center !important;
+	align-items: center !important;
+	padding: 2rem !important;
+}
+
 .dynamic-slides-content.is-only-zoomable-slide img,
+.dynamic-slides-content.is-only-zoomable-slide iframe,
 .dynamic-slides-content.is-only-zoomable-slide pre,
 .dynamic-slides-content.is-only-zoomable-slide table,
 .dynamic-slides-content.is-only-zoomable-slide .mermaid,
@@ -463,9 +482,48 @@ body.is-dynamic-slides-active {
     box-sizing: border-box !important;
 }
 
-.dynamic-slides-content.is-only-zoomable-slide img,
-.dynamic-slides-content.is-only-zoomable-slide svg {
+.dynamic-slides-content.is-only-zoomable-slide iframe {
+    width: 95vw !important;
+    height: 85vh !important;
+    max-width: 95vw !important;
+    max-height: calc(100vh - 130px) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    box-shadow: var(--shadow-l, 0 10px 30px rgba(0, 0, 0, 0.3)) !important;
+    background-color: var(--background-primary);
+}
+
+.dynamic-slides-content.is-only-zoomable-slide p:has(> iframe),
+.dynamic-slides-content.is-only-zoomable-slide div:has(> iframe) {
+    width: 100% !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide .block-language-mermaid,
+.dynamic-slides-content.is-only-zoomable-slide .mermaid {
+    width: 100% !important;
+    max-width: 100% !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide img {
     height: auto !important;
+    max-height: calc(100vh - 140px) !important;
+    object-fit: contain !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide svg,
+.dynamic-slides-content.is-only-zoomable-slide .mermaid svg {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: calc(100vh - 140px) !important;
     object-fit: contain !important;
 }
 
@@ -485,6 +543,7 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-media-zoom-content img,
+.dynamic-slides-media-zoom-content iframe,
 .dynamic-slides-media-zoom-content svg,
 .dynamic-slides-media-zoom-content .mermaid {
     display: block !important;
@@ -507,6 +566,74 @@ body.is-dynamic-slides-active {
     max-width: 100%;
     max-height: 100%;
     overflow: auto;
+}
+
+/* Mermaid Diagram Zoom Wrapper */
+.dynamic-slides-zoom-mermaid {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 24px;
+	box-sizing: border-box;
+	overflow: auto;
+}
+
+.dynamic-slides-zoom-mermaid .block-language-mermaid,
+.dynamic-slides-zoom-mermaid .mermaid {
+	width: 100% !important;
+	height: 100% !important;
+	max-width: 100% !important;
+	max-height: 100% !important;
+	display: flex !important;
+	justify-content: center !important;
+	align-items: center !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	background: transparent !important;
+}
+
+.dynamic-slides-zoom-mermaid svg,
+.dynamic-slides-media-zoom-content svg.mermaid,
+.dynamic-slides-media-zoom-content .mermaid svg,
+.dynamic-slides-media-zoom-content .block-language-mermaid svg {
+	width: 100% !important;
+	height: 100% !important;
+	max-width: 100% !important;
+	max-height: 100% !important;
+	min-width: 75% !important;
+	object-fit: contain !important;
+	display: block !important;
+}
+
+/* Gantt charts specific enhancement for full-screen readability */
+.dynamic-slides-zoom-mermaid svg.gantt,
+.dynamic-slides-zoom-mermaid svg[id*="mermaid-"] {
+	min-width: 85% !important;
+}
+
+/* Image Zoom Wrapper */
+.dynamic-slides-zoom-image {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 16px;
+	box-sizing: border-box;
+}
+
+.dynamic-slides-zoom-image img {
+	max-width: 100% !important;
+	max-height: 100% !important;
+	width: auto !important;
+	height: auto !important;
+	object-fit: contain !important;
 }
 
 .dynamic-slides-zoom-code {
@@ -655,6 +782,98 @@ body.is-dynamic-slides-active {
 	transform: translateY(0);
 }
 
+/* Iframe Zoom Wrapper */
+.dynamic-slides-zoom-iframe {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 0;
+	box-sizing: border-box;
+}
+
+.dynamic-slides-zoom-iframe iframe,
+.dynamic-slides-media-zoom-content iframe {
+	width: 95vw !important;
+	height: 85vh !important;
+	max-width: 95vw !important;
+	max-height: 85vh !important;
+	border: none !important;
+	border-radius: 8px !important;
+	box-shadow: var(--shadow-l, 0 10px 30px rgba(0, 0, 0, 0.3)) !important;
+	background-color: var(--background-primary);
+}
+
+.dynamic-slides-zoom-close-btn {
+	position: absolute;
+	top: 16px;
+	right: 16px;
+	z-index: 100010;
+	background: var(--background-secondary-alt, var(--background-secondary));
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.1rem;
+	font-weight: bold;
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: all 0.2s ease;
+	backdrop-filter: blur(10px);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.dynamic-slides-zoom-close-btn:hover {
+	color: var(--text-normal);
+	border-color: var(--interactive-accent);
+	transform: scale(1.08);
+}
+
+/* Return Button for Document Stack Navigation (Orange Accent Badge) */
+.dynamic-slides-return-btn {
+	position: fixed;
+	top: 24px;
+	right: 24px;
+	z-index: 10005;
+	display: none;
+	align-items: center;
+	gap: 8px;
+	background: #ff7700;
+	color: #ffffff;
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	border-radius: 20px;
+	padding: 8px 18px;
+	font-size: 0.85rem;
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: 0 4px 16px rgba(255, 119, 0, 0.45);
+	transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, box-shadow 0.2s ease;
+	user-select: none;
+	max-width: 360px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.dynamic-slides-return-btn:hover {
+	transform: translateY(-2px);
+	background: #ff8c1a;
+	box-shadow: 0 6px 22px rgba(255, 119, 0, 0.65);
+}
+
+.dynamic-slides-return-btn:active {
+	transform: translateY(0);
+}
+
+.dynamic-slides-return-btn.is-visible {
+	display: flex;
+}
 
 
 

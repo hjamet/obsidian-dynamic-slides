@@ -12,22 +12,31 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = (process.argv[2] === "production");
-const vaultPluginDir = "C:\\Users\\hjamet\\Documents\\VoiceNotes\\.obsidian\\plugins\\obsidian-dynamic-slides";
+const userProfile = process.env.USERPROFILE || "C:\\Users\\Jamet";
+const primaryVaultPluginDir = path.join(userProfile, "Documents", "VoiceNotes", ".obsidian", "plugins", "obsidian-dynamic-slides");
+const fallbackVaultPluginDir = "C:\\Users\\hjamet\\Documents\\VoiceNotes\\.obsidian\\plugins\\obsidian-dynamic-slides";
 
 function copyToVault() {
-	try {
-		if (!fs.existsSync(vaultPluginDir)) {
-			fs.mkdirSync(vaultPluginDir, { recursive: true });
-		}
-		const filesToCopy = ["main.js", "manifest.json", "styles.css"];
-		for (const file of filesToCopy) {
-			if (fs.existsSync(file)) {
-				fs.copyFileSync(file, path.join(vaultPluginDir, file));
+	const dirs = [primaryVaultPluginDir];
+	if (fallbackVaultPluginDir !== primaryVaultPluginDir && fs.existsSync("C:\\Users\\hjamet\\Documents\\VoiceNotes")) {
+		dirs.push(fallbackVaultPluginDir);
+	}
+
+	for (const dir of dirs) {
+		try {
+			if (!fs.existsSync(dir)) {
+				fs.mkdirSync(dir, { recursive: true });
 			}
+			const filesToCopy = ["main.js", "manifest.json", "styles.css"];
+			for (const file of filesToCopy) {
+				if (fs.existsSync(file)) {
+					fs.copyFileSync(file, path.join(dir, file));
+				}
+			}
+			console.log(`[esbuild] Copied build outputs to ${dir}`);
+		} catch (err) {
+			console.error(`[esbuild] Error copying files to ${dir}:`, err);
 		}
-		console.log(`[esbuild] Copied build outputs to ${vaultPluginDir}`);
-	} catch (err) {
-		console.error("[esbuild] Error copying files to vault plugin dir:", err);
 	}
 }
 

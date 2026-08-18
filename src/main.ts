@@ -129,6 +129,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.app,
 			() => {
 				this.cleanupNavigation();
+				void this.jumpToCurrentSlideInEditor();
 			},
 			this.settings.transitionDuration,
 			this.settings.scrollDuration * 1000,
@@ -142,8 +143,18 @@ export default class DynamicSlidesPlugin extends Plugin {
 		};
 
 		this.activeModal.setBreadcrumb(file.basename);
+		this.activeModal.setReturnButton(null);
+		this.activeModal.onReturnClickCallback = () => {
+			this.popDocumentStack();
+		};
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
+		};
+		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
+			const targetNode = this.flatNodes.find(n => n.id === nodeId);
+			if (targetNode) {
+				this.goToNode(targetNode, 'zoom-in', 'start');
+			}
 		};
 		this.activeModal.onSectionClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
@@ -160,8 +171,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.activeModal.setTOC(this.tocComp);
 		this.tocComp.update(this.currentNode, this.flatNodes);
 
-		const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-		this.activeModal.setCounter(currentIdx, this.flatNodes.length);
+		this.updateSlideCounter();
 
 		this.keyboardNav = new KeyboardNavigator({
 			onNext: () => this.handleNextNavigation(),
@@ -186,6 +196,14 @@ export default class DynamicSlidesPlugin extends Plugin {
 			}
 		});
 		this.keyboardNav.attach();
+	}
+
+	private updateSlideCounter() {
+		if (!this.activeModal || !this.currentNode) return;
+		const total = this.flatNodes.length > 1 ? this.flatNodes.length - 1 : 1;
+		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
+		const current = this.flatNodes.length > 1 ? idx : 1;
+		this.activeModal.setCounter(current, total);
 	}
 
 	private handleNextNavigation() {
@@ -246,10 +264,18 @@ export default class DynamicSlidesPlugin extends Plugin {
 			return;
 		}
 
-		const targetFile = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.activeSourcePath);
+		const cleanPath = linkpath.split('#')[0].split('^')[0].trim();
+		let targetFile = this.app.metadataCache.getFirstLinkpathDest(cleanPath, this.activeSourcePath);
+		if (!targetFile) {
+			targetFile = this.app.metadataCache.getFirstLinkpathDest(linkpath, this.activeSourcePath);
+		}
+		if (!targetFile) {
+			const allFiles = this.app.vault.getMarkdownFiles();
+			targetFile = allFiles.find(f => f.basename.toLowerCase() === cleanPath.toLowerCase() || f.name.toLowerCase() === cleanPath.toLowerCase()) || null;
+		}
 		if (targetFile && targetFile instanceof TFile) {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
-			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : this.activeSourcePath;
+			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : (this.activeSourcePath.split('/').pop()?.replace(/\.md$/, '') || "Note principale");
 
 			// If link targets the current file itself with an anchor e.g. Note#Heading
 			if (targetFile.path === this.activeSourcePath && linkpath.includes("#")) {
@@ -287,7 +313,6 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.activeSourcePath = targetFile.path;
 			this.rootNode = parsed.root;
 			this.flatNodes = parsed.flatNodes;
-
 			let initialNode: SectionNode | null = null;
 			if (linkpath.includes("#")) {
 				const anchorQuery = linkpath.split("#")[1].trim().toLowerCase();
@@ -303,22 +328,48 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.currentNode = initialNode || ((this.flatNodes.length > 1) ? this.flatNodes[1] : this.rootNode);
 
 			if (this.activeModal && this.currentNode) {
+				this.activeModal.closeMediaZoom(false);
+				this.activeModal.cancelScrollAnimation(false);
 				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in', 'start');
 				const parentFrame = this.documentStack[this.documentStack.length - 1];
 				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
-				const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-				this.activeModal.setCounter(currentIdx, this.flatNodes.length);
-				this.activeModal.showSubNoteBanner(targetFile.basename, () => this.returnToParentPresentation());
+				this.activeModal.setReturnButton(parentFrame ? parentFrame.fileTitle : null);
+				this.updateSlideCounter();
+				this.activeModal.showSubNoteBanner(targetFile.basename, () => this.popDocumentStack());
 			}
 
 			if (this.tocComp && this.currentNode) {
 				this.tocComp.update(this.currentNode, this.flatNodes);
 			}
 
-			new Notice(`Présentation du document : ${targetFile.basename}`);
+			new Notice(`Présentation de la note : ${targetFile.basename}`);
 		} else {
-			new Notice("Section introuvable dans la présentation.");
+			new Notice(`Fichier ou section introuvable pour le lien : ${linkpath}`);
 		}
+	}
+
+	private popDocumentStack() {
+		if (this.documentStack.length === 0) return;
+		const parentFrame = this.documentStack.pop()!;
+		this.activeSourcePath = parentFrame.filePath;
+		this.flatNodes = parentFrame.flatNodes;
+		this.rootNode = parentFrame.rootNode;
+		this.currentNode = parentFrame.currentNode;
+
+		if (this.activeModal && this.currentNode) {
+			this.activeModal.closeMediaZoom(false);
+			this.activeModal.cancelScrollAnimation(false);
+			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-out', 'start');
+			const prevParent = this.documentStack[this.documentStack.length - 1];
+			this.activeModal.setReturnButton(prevParent ? prevParent.fileTitle : null);
+			this.updateSlideCounter();
+		}
+
+		if (this.tocComp && this.currentNode) {
+			this.tocComp.update(this.currentNode, this.flatNodes);
+		}
+
+		new Notice(`Retour à la note : ${parentFrame.fileTitle}`);
 	}
 
 	private goToNode(
@@ -330,8 +381,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		this.currentNode = node;
 		if (this.activeModal && this.currentNode) {
 			this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, direction, enterFrom);
-			const currentIdx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id) + 1;
-			this.activeModal.setCounter(currentIdx, this.flatNodes.length);
+			this.updateSlideCounter();
 		}
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes);
@@ -358,7 +408,11 @@ export default class DynamicSlidesPlugin extends Plugin {
 		if (idx > 0) {
 			this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
 		} else {
-			new Notice("Début de la présentation atteint.");
+			if (this.documentStack.length > 0) {
+				this.popDocumentStack();
+			} else {
+				new Notice("Début de la présentation atteint.");
+			}
 		}
 	}
 
@@ -386,7 +440,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 	private expandParent() {
 		if (!this.currentNode || !this.currentNode.parent) {
 			if (this.documentStack.length > 0) {
-				this.returnToParentPresentation();
+				this.popDocumentStack();
 				return;
 			} else {
 				new Notice("Niveau supérieur racine atteint.");
@@ -406,10 +460,54 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 	private closePresentation() {
 		if (this.activeModal) {
-			this.activeModal.close();
+			const modal = this.activeModal;
 			this.activeModal = null;
+			modal.close();
+		} else {
+			this.cleanupNavigation();
+			void this.jumpToCurrentSlideInEditor();
 		}
-		this.cleanupNavigation();
+	}
+
+	private async jumpToCurrentSlideInEditor() {
+		if (!this.activeSourcePath) return;
+
+		const targetPath = this.activeSourcePath;
+		const targetLine = this.currentNode ? Math.max(0, this.currentNode.lineStart) : 0;
+
+		let view = this.app.workspace.getActiveViewOfType(MarkdownView);
+
+		if (!view || !view.file || view.file.path !== targetPath) {
+			const targetFile = this.app.vault.getAbstractFileByPath(targetPath);
+			if (targetFile instanceof TFile) {
+				const leaves = this.app.workspace.getLeavesOfType("markdown");
+				const matchingLeaf = leaves.find(l => (l.view as MarkdownView)?.file?.path === targetPath);
+				if (matchingLeaf) {
+					this.app.workspace.setActiveLeaf(matchingLeaf, { focus: true });
+					view = matchingLeaf.view as MarkdownView;
+				} else {
+					const leaf = this.app.workspace.getLeaf(false);
+					await leaf.openFile(targetFile);
+					view = this.app.workspace.getActiveViewOfType(MarkdownView);
+				}
+			}
+		}
+
+		if (view && view.editor) {
+			const editor = view.editor;
+			const totalLines = editor.lineCount();
+			const clampedLine = Math.min(Math.max(0, targetLine), Math.max(0, totalLines - 1));
+
+			editor.setCursor({ line: clampedLine, ch: 0 });
+			editor.scrollIntoView(
+				{
+					from: { line: clampedLine, ch: 0 },
+					to: { line: clampedLine, ch: 0 }
+				},
+				true
+			);
+			view.editor.focus();
+		}
 	}
 
 	private cleanupNavigation() {

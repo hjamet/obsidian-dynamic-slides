@@ -90,22 +90,22 @@ export function parseMarkdownSections(
 		headingNodes.push(node);
 	}
 
+	const flatNodes: SectionNode[] = [rootNode, ...headingNodes];
+	flatNodes.forEach((n, idx) => {
+		n.flatIndex = idx;
+	});
+
 	for (const node of headingNodes) {
 		if (node.children.length > 0) {
 			const intro = lines.slice(node.lineStart, node.children[0].lineStart).join("\n");
 			const childHeadings = node.children
-				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}">${c.title}</div>`)
+				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex}">${c.title}</div>`)
 				.join("\n");
 			node.contentMarkdown = `${intro}\n${childHeadings}`;
 		} else {
 			node.contentMarkdown = lines.slice(node.lineStart, node.lineEnd + 1).join("\n");
 		}
 	}
-
-	const flatNodes: SectionNode[] = [rootNode, ...headingNodes];
-	flatNodes.forEach((n, idx) => {
-		n.flatIndex = idx;
-	});
 
 	return {
 		root: rootNode,
