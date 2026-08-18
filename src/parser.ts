@@ -94,7 +94,7 @@ export function parseMarkdownSections(
 		if (node.children.length > 0) {
 			const intro = lines.slice(node.lineStart, node.children[0].lineStart).join("\n");
 			const childHeadings = node.children
-				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}">${c.title}</div>`)
+				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}">${c.title}</div>`)
 				.join("\n");
 			node.contentMarkdown = `${intro}\n${childHeadings}`;
 		} else {
