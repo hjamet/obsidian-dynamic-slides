@@ -30,6 +30,12 @@ export class PresentationModal extends Component {
 	private activeZoomIndex: number = -1;
 	private zoomOverlayEl: HTMLElement | null = null;
 	private zoomContentEl: HTMLElement | null = null;
+	private hasCompletedAllSteps: boolean = false;
+
+	private zoomLevel: number = 1.0;
+	private zoomMinusBtnEl!: HTMLButtonElement;
+	private zoomPlusBtnEl!: HTMLButtonElement;
+	private zoomValueBtnEl!: HTMLButtonElement;
 
 	constructor(app: App, onClose?: () => void, transitionDuration: number = 0.65, scrollDurationMs: number = 1000) {
 		super();
@@ -63,6 +69,42 @@ export class PresentationModal extends Component {
 				this.tocComp.toggleSidebar();
 			}
 		});
+
+		// Bottom-right floating zoom toolbar
+		const bottomRightZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-right-zone" });
+		const zoomToolbar = bottomRightZone.createDiv({ cls: "dynamic-slides-zoom-toolbar" });
+
+		this.zoomMinusBtnEl = zoomToolbar.createEl("button", {
+			text: "−",
+			cls: "dynamic-slides-zoom-btn"
+		});
+		this.zoomMinusBtnEl.setAttribute("aria-label", "Zoom arrière (Ctrl -)");
+		this.zoomMinusBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.zoomOut();
+		});
+
+		this.zoomValueBtnEl = zoomToolbar.createEl("button", {
+			text: "100%",
+			cls: "dynamic-slides-zoom-value"
+		});
+		this.zoomValueBtnEl.setAttribute("aria-label", "Réinitialiser le zoom (Ctrl 0)");
+		this.zoomValueBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.resetZoom();
+		});
+
+		this.zoomPlusBtnEl = zoomToolbar.createEl("button", {
+			text: "+",
+			cls: "dynamic-slides-zoom-btn"
+		});
+		this.zoomPlusBtnEl.setAttribute("aria-label", "Zoom avant (Ctrl +)");
+		this.zoomPlusBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.zoomIn();
+		});
+
+		this.updateZoomUI();
 
 		this.mainAreaEl = this.overlayEl.createDiv({ cls: "dynamic-slides-main-area" });
 		this.contentEl = this.mainAreaEl.createDiv({ cls: "dynamic-slides-content" });
@@ -98,7 +140,21 @@ export class PresentationModal extends Component {
 				return;
 			}
 
-			const zoomableEl = target.closest('iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*="block-language-"]') as HTMLElement;
+			if (target.closest('.callout-icon, .svg-icon, .dynamic-slides-child-heading, .internal-link')) return;
+
+			const selector = [
+				"iframe",
+				"img:not(.emoji):not(.svg-icon)",
+				".mermaid",
+				"svg.mermaid",
+				".block-language-mermaid",
+				"div[class*='block-language-mermaid']",
+				"pre",
+				"table",
+				"[class*='block-language-']:not(.callout)"
+			].join(", ");
+
+			const zoomableEl = target.closest(selector) as HTMLElement;
 			if (zoomableEl) {
 				const zoomableList = this.detectMediaElements();
 				const matchedEl = zoomableList.find(item => item === zoomableEl || item.contains(zoomableEl));
@@ -241,10 +297,30 @@ export class PresentationModal extends Component {
 
 	public detectMediaElements(): HTMLElement[] {
 		if (!this.contentEl) return [];
+		const selector = [
+			"iframe",
+			"img:not(.emoji):not(.svg-icon)",
+			".mermaid",
+			"svg.mermaid",
+			".block-language-mermaid",
+			"div[class*='block-language-mermaid']",
+			"pre",
+			"table",
+			"[class*='block-language-']:not(.callout)"
+		].join(", ");
 		const raw = Array.from(
-			this.contentEl.querySelectorAll<HTMLElement>("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']")
+			this.contentEl.querySelectorAll<HTMLElement>(selector)
 		);
 		const filtered = raw.filter(el => {
+			if (
+				el.closest(".callout-icon") ||
+				el.closest(".dynamic-slides-toc-fold-icon") ||
+				el.classList.contains("callout-icon") ||
+				el.classList.contains("svg-icon") ||
+				el.classList.contains("emoji")
+			) {
+				return false;
+			}
 			return !raw.some(other => other !== el && other.contains(el));
 		});
 		this.mediaElements = filtered;
@@ -255,7 +331,18 @@ export class PresentationModal extends Component {
 		if (!this.contentEl) return false;
 		const clone = this.contentEl.cloneNode(true) as HTMLElement;
 		clone.querySelectorAll("h1, h2, h3, h4, h5, h6, .dynamic-slides-child-heading").forEach(el => el.remove());
-		clone.querySelectorAll("iframe, img, .mermaid, svg.mermaid, .block-language-mermaid, pre, table, [class*='block-language-']").forEach(el => el.remove());
+		const selector = [
+			"iframe",
+			"img:not(.emoji):not(.svg-icon)",
+			".mermaid",
+			"svg.mermaid",
+			".block-language-mermaid",
+			"div[class*='block-language-mermaid']",
+			"pre",
+			"table",
+			"[class*='block-language-']:not(.callout)"
+		].join(", ");
+		clone.querySelectorAll(selector).forEach(el => el.remove());
 		const text = clone.textContent?.trim() || "";
 		return text.length === 0;
 	}
@@ -369,6 +456,10 @@ export class PresentationModal extends Component {
 	}
 
 	public handleNext(): boolean {
+		if (this.hasCompletedAllSteps) {
+			return false;
+		}
+
 		const wasAnimating = this.currentScrollAnimId !== null;
 		if (wasAnimating) {
 			this.cancelScrollAnimation(true);
@@ -395,9 +486,12 @@ export class PresentationModal extends Component {
 			// 3. Last Zoom Item (activeZoomIndex === mediaElements.length - 1): close zoom overlay and return false IMMEDIATELY.
 			if (this.isMediaZoomActive() || this.activeZoomIndex === mediaElements.length - 1) {
 				this.closeMediaZoom(true);
+				this.activeZoomIndex = -1;
+				this.hasCompletedAllSteps = true;
 				return false;
 			}
 
+			this.hasCompletedAllSteps = true;
 			return false;
 		}
 
@@ -412,6 +506,7 @@ export class PresentationModal extends Component {
 				// Step 4: After closing last zoom item, proceeds to next slide!
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
+				this.hasCompletedAllSteps = true;
 				return false;
 			}
 		}
@@ -430,10 +525,13 @@ export class PresentationModal extends Component {
 		}
 
 		// Step 4: No media elements and cannot scroll down -> proceed to next slide
+		this.hasCompletedAllSteps = true;
 		return false;
 	}
 
 	public handlePrev(): boolean {
+		this.hasCompletedAllSteps = false;
+
 		const wasAnimating = this.currentScrollAnimId !== null;
 		if (wasAnimating) {
 			this.cancelScrollAnimation(true);
@@ -493,9 +591,47 @@ export class PresentationModal extends Component {
 		return false;
 	}
 
+	public zoomIn(): void {
+		this.setZoom(this.zoomLevel + 0.1);
+	}
+
+	public zoomOut(): void {
+		this.setZoom(this.zoomLevel - 0.1);
+	}
+
+	public resetZoom(): void {
+		this.setZoom(1.0);
+	}
+
+	public setZoom(level: number): void {
+		const rounded = Math.round(level * 10) / 10;
+		const clamped = Math.max(0.7, Math.min(1.5, rounded));
+		this.zoomLevel = clamped;
+		this.overlayEl.style.setProperty("--dynamic-slides-zoom", `${this.zoomLevel}`);
+		this.updateZoomUI();
+	}
+
+	public getZoom(): number {
+		return this.zoomLevel;
+	}
+
+	private updateZoomUI(): void {
+		if (this.zoomValueBtnEl) {
+			this.zoomValueBtnEl.setText(`${Math.round(this.zoomLevel * 100)}%`);
+		}
+		if (this.zoomMinusBtnEl) {
+			this.zoomMinusBtnEl.disabled = this.zoomLevel <= 0.75;
+		}
+		if (this.zoomPlusBtnEl) {
+			this.zoomPlusBtnEl.disabled = this.zoomLevel >= 1.45;
+		}
+	}
+
 	public async open(initialNode: SectionNode, sourcePath: string) {
 		document.body.addClass("is-dynamic-slides-active");
 		this.overlayEl.style.setProperty('--dynamic-slides-duration', `${this.transitionDuration}s`);
+		this.overlayEl.style.setProperty('--dynamic-slides-zoom', `${this.zoomLevel}`);
+		this.updateZoomUI();
 		this.load();
 
 		try {
@@ -516,6 +652,7 @@ export class PresentationModal extends Component {
 		enterFromArg: 'start' | 'end' = 'start'
 	) {
 		this.cancelScrollAnimation(false);
+		this.hasCompletedAllSteps = false;
 
 		let direction: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump' = 'jump';
 		let enterFrom: 'start' | 'end' = 'start';
@@ -528,16 +665,12 @@ export class PresentationModal extends Component {
 			enterFrom = enterFromArg;
 		}
 
-		if (this.contentEl) {
-			this.contentEl.style.opacity = '0';
-		}
-
 		this.closeMediaZoom(false);
 		this.activeZoomIndex = -1;
 		if (this.contentEl) {
 			this.contentEl.scrollTop = 0;
 			this.contentEl.removeClass("is-only-zoomable-slide");
-			this.contentEl.style.opacity = '0';
+			this.contentEl.style.removeProperty("opacity");
 		}
 
 		if (this.currentSlideComponent) {
@@ -579,14 +712,11 @@ export class PresentationModal extends Component {
 			} else if (this.canScrollDown() || this.contentEl.scrollHeight > this.contentEl.clientHeight) {
 				this.contentEl.scrollTop = this.contentEl.scrollHeight;
 				this.activeZoomIndex = SCROLL_PHASE;
-				if (this.contentEl) this.contentEl.style.opacity = '1';
 			} else {
 				this.activeZoomIndex = -1;
-				if (this.contentEl) this.contentEl.style.opacity = '1';
 			}
 		} else {
 			this.activeZoomIndex = -1;
-			if (this.contentEl) this.contentEl.style.opacity = '1';
 		}
 	}
 

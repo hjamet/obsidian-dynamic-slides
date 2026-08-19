@@ -4,6 +4,9 @@ export interface KeyboardNavigatorCallbacks {
 	onFastNext: () => void;
 	onFastPrev: () => void;
 	onClose: () => void;
+	onZoomIn?: () => void;
+	onZoomOut?: () => void;
+	onResetZoom?: () => void;
 }
 
 export class KeyboardNavigator {
@@ -31,6 +34,34 @@ export class KeyboardNavigator {
 	}
 
 	private handleKeyDown(evt: KeyboardEvent) {
+		// Zoom shortcuts: Ctrl + + / Ctrl + - / Ctrl + 0 (or Cmd + ...)
+		if (evt.ctrlKey || evt.metaKey) {
+			if (evt.key === "+" || evt.key === "=" || evt.code === "Equal" || evt.code === "NumpadAdd") {
+				evt.preventDefault();
+				evt.stopPropagation();
+				if (this.callbacks.onZoomIn) {
+					this.callbacks.onZoomIn();
+				}
+				return;
+			}
+			if (evt.key === "-" || evt.key === "_" || evt.code === "Minus" || evt.code === "NumpadSubtract") {
+				evt.preventDefault();
+				evt.stopPropagation();
+				if (this.callbacks.onZoomOut) {
+					this.callbacks.onZoomOut();
+				}
+				return;
+			}
+			if (evt.key === "0" || evt.code === "Digit0" || evt.code === "Numpad0") {
+				evt.preventDefault();
+				evt.stopPropagation();
+				if (this.callbacks.onResetZoom) {
+					this.callbacks.onResetZoom();
+				}
+				return;
+			}
+		}
+
 		const handledKeys = [
 			"ArrowRight",
 			"ArrowLeft",

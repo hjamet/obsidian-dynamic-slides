@@ -166,7 +166,10 @@ export default class DynamicSlidesPlugin extends Plugin {
 			onPrev: () => this.handlePrevNavigation(),
 			onFastNext: () => this.fastJumpNext(),
 			onFastPrev: () => this.fastJumpPrev(),
-			onClose: () => this.closePresentation()
+			onClose: () => this.closePresentation(),
+			onZoomIn: () => this.activeModal?.zoomIn(),
+			onZoomOut: () => this.activeModal?.zoomOut(),
+			onResetZoom: () => this.activeModal?.resetZoom()
 		});
 		this.keyboardNav.attach();
 	}
@@ -313,11 +316,11 @@ export default class DynamicSlidesPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx === -1 && this.flatNodes.length > 0) {
-			this.goToNode(this.flatNodes[0], 'next', 'start');
+			this.goToNode(this.flatNodes[0], undefined, 'start');
 			return;
 		}
 		if (idx >= 0 && idx < this.flatNodes.length - 1) {
-			this.goToNode(this.flatNodes[idx + 1], 'next', 'start');
+			this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
 		} else if (idx === this.flatNodes.length - 1) {
 			new Notice("Fin de la présentation atteinte.");
 		}
@@ -327,7 +330,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx > 1) {
-			this.goToNode(this.flatNodes[idx - 1], 'prev', enterFrom);
+			this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
 		} else if (idx === 1 || idx === 0) {
 			if (this.documentStack.length > 0) {
 				this.popDocumentStack();
