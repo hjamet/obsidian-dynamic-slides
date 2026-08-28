@@ -7,6 +7,7 @@ import { TOCComponent } from "./toc";
 export interface DynamicSlidesSettings {
 	transitionDuration: number; // in seconds
 	scrollDuration: number;
+	zoomLevel: number; // 0.7 to 2.0 (1.0 = 100%)
 }
 
 export interface DocumentStackFrame {
@@ -19,7 +20,8 @@ export interface DocumentStackFrame {
 
 export const DEFAULT_SETTINGS: DynamicSlidesSettings = {
 	transitionDuration: 0.65,
-	scrollDuration: 1.0
+	scrollDuration: 1.0,
+	zoomLevel: 1.0
 };
 
 export function computeDirection(
@@ -117,13 +119,10 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 		this.rootNode = parsed.root;
 		this.flatNodes = parsed.flatNodes;
-
-		// Toujours démarrer systématiquement à la slide 1 (première vraie section de contenu),
-		// jamais à la slide 0 (vue d'ensemble) ni à la position du curseur / précédente.
-		if (this.flatNodes.length > 1) {
+		const cursorLine = view.editor.getCursor().line;
+		this.currentNode = findCurrentSectionNode(this.flatNodes, cursorLine);
+		if (this.currentNode && this.currentNode.level === 0 && this.flatNodes.length > 1) {
 			this.currentNode = this.flatNodes[1];
-		} else {
-			this.currentNode = this.flatNodes[0];
 		}
 
 		this.activeModal = new PresentationModal(
@@ -133,10 +132,17 @@ export default class DynamicSlidesPlugin extends Plugin {
 				void this.jumpToCurrentSlideInEditor();
 			},
 			this.settings.transitionDuration,
-			this.settings.scrollDuration * 1000
+			this.settings.scrollDuration * 1000,
+			this.settings.zoomLevel || 1.0
 		);
 		this.activeModal.setScrollDuration(this.settings.scrollDuration * 1000);
 
+		this.activeModal.onZoomChangeCallback = (newZoom: number) => {
+			this.settings.zoomLevel = newZoom;
+			void this.saveSettings();
+		};
+
+		this.activeModal.setBreadcrumb(file.basename);
 		this.activeModal.setReturnButton(null);
 		this.activeModal.onReturnClickCallback = () => {
 			this.popDocumentStack();
@@ -145,6 +151,12 @@ export default class DynamicSlidesPlugin extends Plugin {
 			void this.handleInternalLinkClick(href);
 		};
 		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
+			const targetNode = this.flatNodes.find(n => n.id === nodeId);
+			if (targetNode) {
+				this.goToNode(targetNode, 'zoom-in', 'start');
+			}
+		};
+		this.activeModal.onSectionClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
 			if (targetNode) {
 				this.goToNode(targetNode, 'zoom-in', 'start');
@@ -167,9 +179,26 @@ export default class DynamicSlidesPlugin extends Plugin {
 			onFastNext: () => this.fastJumpNext(),
 			onFastPrev: () => this.fastJumpPrev(),
 			onClose: () => this.closePresentation(),
-			onZoomIn: () => this.activeModal?.zoomIn(),
-			onZoomOut: () => this.activeModal?.zoomOut(),
-			onResetZoom: () => this.activeModal?.resetZoom()
+			onZoomIn: () => {
+				if (this.activeModal) {
+					this.activeModal.zoomIn();
+				}
+			},
+			onZoomOut: () => {
+				if (this.activeModal) {
+					this.activeModal.zoomOut();
+				}
+			},
+			onZoomReset: () => {
+				if (this.activeModal) {
+					this.activeModal.resetZoom();
+				}
+			},
+			onResetZoom: () => {
+				if (this.activeModal) {
+					this.activeModal.resetZoom();
+				}
+			}
 		});
 		this.keyboardNav.attach();
 	}
@@ -221,6 +250,25 @@ export default class DynamicSlidesPlugin extends Plugin {
 	}
 
 	private async handleInternalLinkClick(linkpath: string) {
+		// Handle local anchors of the current note (#Heading or #^block)
+		if (linkpath.startsWith("#")) {
+			const anchorQuery = linkpath.substring(1).trim().toLowerCase();
+			const targetNode = this.flatNodes.find(n => {
+				const titleLower = n.title.toLowerCase().trim();
+				return titleLower === anchorQuery ||
+					titleLower.replace(/^[#\s\d\.\-_]+/, '') === anchorQuery.replace(/^[#\s\d\.\-_]+/, '') ||
+					titleLower.includes(anchorQuery) ||
+					anchorQuery.includes(titleLower);
+			}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery));
+
+			if (targetNode) {
+				this.goToNode(targetNode, 'zoom-in', 'start');
+			} else {
+				new Notice("Section introuvable dans la présentation.");
+			}
+			return;
+		}
+
 		const cleanPath = linkpath.split('#')[0].split('^')[0].trim();
 		let targetFile = this.app.metadataCache.getFirstLinkpathDest(cleanPath, this.activeSourcePath);
 		if (!targetFile) {
@@ -230,10 +278,28 @@ export default class DynamicSlidesPlugin extends Plugin {
 			const allFiles = this.app.vault.getMarkdownFiles();
 			targetFile = allFiles.find(f => f.basename.toLowerCase() === cleanPath.toLowerCase() || f.name.toLowerCase() === cleanPath.toLowerCase()) || null;
 		}
-
 		if (targetFile && targetFile instanceof TFile) {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
 			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : (this.activeSourcePath.split('/').pop()?.replace(/\.md$/, '') || "Note principale");
+
+			// If link targets the current file itself with an anchor e.g. Note#Heading
+			if (targetFile.path === this.activeSourcePath && linkpath.includes("#")) {
+				const anchorQuery = linkpath.split("#")[1].trim().toLowerCase();
+				const targetNode = this.flatNodes.find(n => {
+					const titleLower = n.title.toLowerCase().trim();
+					return titleLower === anchorQuery ||
+						titleLower.replace(/^[#\s\d\.\-_]+/, '') === anchorQuery.replace(/^[#\s\d\.\-_]+/, '') ||
+						titleLower.includes(anchorQuery) ||
+						anchorQuery.includes(titleLower);
+				}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery));
+
+				if (targetNode) {
+					this.goToNode(targetNode, 'zoom-in', 'start');
+				} else {
+					new Notice("Section introuvable dans la présentation.");
+				}
+				return;
+			}
 
 			if (this.currentNode && this.rootNode) {
 				this.documentStack.push({
@@ -252,14 +318,29 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.activeSourcePath = targetFile.path;
 			this.rootNode = parsed.root;
 			this.flatNodes = parsed.flatNodes;
-			this.currentNode = this.flatNodes.length > 1 ? this.flatNodes[1] : this.flatNodes[0];
+			let initialNode: SectionNode | null = null;
+			if (linkpath.includes("#")) {
+				const anchorQuery = linkpath.split("#")[1].trim().toLowerCase();
+				initialNode = this.flatNodes.find(n => {
+					const titleLower = n.title.toLowerCase().trim();
+					return titleLower === anchorQuery ||
+						titleLower.replace(/^[#\s\d\.\-_]+/, '') === anchorQuery.replace(/^[#\s\d\.\-_]+/, '') ||
+						titleLower.includes(anchorQuery) ||
+						anchorQuery.includes(titleLower);
+				}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery)) || null;
+			}
+
+			this.currentNode = initialNode || ((this.flatNodes.length > 1) ? this.flatNodes[1] : this.rootNode);
 
 			if (this.activeModal && this.currentNode) {
 				this.activeModal.closeMediaZoom(false);
 				this.activeModal.cancelScrollAnimation(false);
 				this.activeModal.updateSlide(this.currentNode, this.activeSourcePath, 'zoom-in', 'start');
-				this.activeModal.setReturnButton(activeFileBasename);
+				const parentFrame = this.documentStack[this.documentStack.length - 1];
+				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
+				this.activeModal.setReturnButton(parentFrame ? parentFrame.fileTitle : null);
 				this.updateSlideCounter();
+				this.activeModal.showSubNoteBanner(targetFile.basename, () => this.popDocumentStack());
 			}
 
 			if (this.tocComp && this.currentNode) {
@@ -268,7 +349,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 			new Notice(`Présentation de la note : ${targetFile.basename}`);
 		} else {
-			new Notice(`Fichier introuvable pour le lien : ${linkpath}`);
+			new Notice(`Fichier ou section introuvable pour le lien : ${linkpath}`);
 		}
 	}
 
@@ -329,15 +410,36 @@ export default class DynamicSlidesPlugin extends Plugin {
 	private prevSlide(enterFrom: 'start' | 'end' = 'end') {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
-		if (idx > 1) {
+		if (idx > 0) {
 			this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
-		} else if (idx === 1 || idx === 0) {
+		} else {
 			if (this.documentStack.length > 0) {
 				this.popDocumentStack();
 			} else {
 				new Notice("Début de la présentation atteint.");
 			}
 		}
+	}
+
+	private returnToParentPresentation() {
+		if (this.documentStack.length === 0) return;
+
+		const parentFrame = this.documentStack.pop()!;
+		this.activeSourcePath = parentFrame.filePath;
+		this.flatNodes = parentFrame.flatNodes;
+		this.rootNode = parentFrame.rootNode;
+		this.currentNode = parentFrame.currentNode;
+
+		this.goToNode(parentFrame.currentNode, 'zoom-out', 'start');
+
+		if (this.activeModal) {
+			if (this.documentStack.length > 0) {
+				this.activeModal.showSubNoteBanner(parentFrame.fileTitle, () => this.returnToParentPresentation());
+			} else {
+				this.activeModal.hideSubNoteBanner();
+			}
+		}
+		new Notice(`Retour au document principal : ${parentFrame.fileTitle}`);
 	}
 
 	private expandParent() {
@@ -465,6 +567,22 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 						const roundedValue = Math.round(value * 10) / 10;
 						this.plugin.settings.scrollDuration = roundedValue;
 						await this.plugin.saveSettings();
+					})
+			);
+
+		const zoomSetting = new Setting(containerEl)
+			.setName("Niveau de zoom / échelle par défaut")
+			.setDesc(`Échelle actuelle : ${Math.round((this.plugin.settings.zoomLevel || 1.0) * 100)}%`)
+			.addSlider(slider =>
+				slider
+					.setLimits(0.7, 2.0, 0.05)
+					.setValue(this.plugin.settings.zoomLevel || 1.0)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						const roundedValue = Math.round(value * 100) / 100;
+						this.plugin.settings.zoomLevel = roundedValue;
+						await this.plugin.saveSettings();
+						zoomSetting.setDesc(`Échelle actuelle : ${Math.round(roundedValue * 100)}%`);
 					})
 			);
 	}

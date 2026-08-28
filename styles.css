@@ -598,8 +598,10 @@ body.is-dynamic-slides-active {
     object-fit: contain !important;
 }
 
+.dynamic-slides-content.is-only-zoomable-slide svg,
 .dynamic-slides-content.is-only-zoomable-slide .mermaid svg,
 .dynamic-slides-content.is-only-zoomable-slide svg.mermaid,
+.dynamic-slides-content.is-only-zoomable-slide [class*="mermaid"] svg,
 .dynamic-slides-content.is-only-zoomable-slide .block-language-mermaid svg,
 .dynamic-slides-content.is-only-zoomable-slide div[class*="block-language-mermaid"] svg {
     width: 100% !important;
@@ -687,17 +689,12 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-zoom-mermaid svg,
-.dynamic-slides-media-zoom-content .mermaid svg,
+.dynamic-slides-media-zoom-content svg,
 .dynamic-slides-media-zoom-content svg.mermaid,
-.dynamic-slides-media-zoom-content .block-language-mermaid svg {
-    width: 100% !important;
-    height: auto !important;
-    max-width: 90vw !important;
-    max-height: 85vh !important;
-    min-width: 75vw !important;
-    object-fit: contain !important;
-    display: block !important;
-    margin: auto !important;
+.dynamic-slides-media-zoom-content .mermaid svg,
+.dynamic-slides-media-zoom-content [class*="mermaid"] svg,
+.dynamic-slides-media-zoom-content .block-language-mermaid svg,
+.dynamic-slides-zoom-image svg {
 }
 
 /* Gantt charts specific enhancement for full-screen readability */

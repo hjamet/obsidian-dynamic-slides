@@ -7,6 +7,7 @@ export interface KeyboardNavigatorCallbacks {
 	onZoomIn?: () => void;
 	onZoomOut?: () => void;
 	onResetZoom?: () => void;
+	onZoomReset?: () => void;
 }
 
 export class KeyboardNavigator {
@@ -34,30 +35,37 @@ export class KeyboardNavigator {
 	}
 
 	private handleKeyDown(evt: KeyboardEvent) {
-		// Zoom shortcuts: Ctrl + + / Ctrl + - / Ctrl + 0 (or Cmd + ...)
-		if (evt.ctrlKey || evt.metaKey) {
-			if (evt.key === "+" || evt.key === "=" || evt.code === "Equal" || evt.code === "NumpadAdd") {
+		// Check for Zoom shortcuts first (+, -, 0 / Ctrl+=, Ctrl+-, Ctrl+0)
+		if (
+			evt.code === "Equal" || evt.key === "+" || evt.key === "=" || evt.code === "NumpadAdd"
+		) {
+			if (this.callbacks.onZoomIn) {
 				evt.preventDefault();
 				evt.stopPropagation();
-				if (this.callbacks.onZoomIn) {
-					this.callbacks.onZoomIn();
-				}
+				this.callbacks.onZoomIn();
 				return;
 			}
-			if (evt.key === "-" || evt.key === "_" || evt.code === "Minus" || evt.code === "NumpadSubtract") {
+		}
+
+		if (
+			evt.code === "Minus" || evt.key === "-" || evt.key === "_" || evt.code === "NumpadSubtract"
+		) {
+			if (this.callbacks.onZoomOut) {
 				evt.preventDefault();
 				evt.stopPropagation();
-				if (this.callbacks.onZoomOut) {
-					this.callbacks.onZoomOut();
-				}
+				this.callbacks.onZoomOut();
 				return;
 			}
-			if (evt.key === "0" || evt.code === "Digit0" || evt.code === "Numpad0") {
+		}
+
+		if (
+			evt.code === "Digit0" || evt.key === "0" || evt.code === "Numpad0"
+		) {
+			const resetFn = this.callbacks.onZoomReset || this.callbacks.onResetZoom;
+			if (resetFn) {
 				evt.preventDefault();
 				evt.stopPropagation();
-				if (this.callbacks.onResetZoom) {
-					this.callbacks.onResetZoom();
-				}
+				resetFn();
 				return;
 			}
 		}
