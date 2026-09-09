@@ -3,6 +3,19 @@ import { App, Component, MarkdownRenderer } from "obsidian";
 export function enhanceSvgDimensions(svg: SVGSVGElement) {
 	if (!svg) return;
 
+	// Do NOT enhance callout icons, UI icons, or emoji
+	if (
+		svg.closest(".callout-icon") ||
+		svg.closest(".callout") ||
+		svg.closest(".dynamic-slides-toc-fold-icon") ||
+		svg.closest(".dynamic-slides-subnote-banner") ||
+		svg.classList.contains("callout-icon") ||
+		svg.classList.contains("svg-icon") ||
+		svg.classList.contains("emoji")
+	) {
+		return;
+	}
+
 	// Check if viewBox is missing, empty, or zeroed
 	let viewBox = svg.getAttribute("viewBox");
 	let hasValidViewBox = false;
@@ -73,35 +86,51 @@ export function enhanceSvgDimensions(svg: SVGSVGElement) {
 export function enhanceMermaidSvgElements(containerEl: HTMLElement) {
 	if (!containerEl) return;
 
-	// Collect all SVG elements (including containerEl itself if it is an SVG)
-	const svgs: SVGSVGElement[] = [];
-	if (containerEl.tagName && containerEl.tagName.toLowerCase() === "svg") {
-		svgs.push(containerEl as unknown as SVGSVGElement);
+	// Is this a dedicated zoom mermaid container?
+	const isZoomMermaid = containerEl.classList.contains("dynamic-slides-zoom-mermaid") ||
+		containerEl.closest(".dynamic-slides-zoom-mermaid") !== null;
+
+	if (isZoomMermaid) {
+		const wrappers = containerEl.querySelectorAll<HTMLElement>(
+			".mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-mermaid'], pre, div"
+		);
+		wrappers.forEach((wrapper) => {
+			if (wrapper.closest(".callout")) return;
+			wrapper.style.setProperty("width", "100%", "important");
+			wrapper.style.setProperty("max-width", "100%", "important");
+			wrapper.style.setProperty("height", "100%", "important");
+			wrapper.style.setProperty("max-height", "100%", "important");
+			wrapper.style.setProperty("display", "flex", "important");
+			wrapper.style.setProperty("justify-content", "center", "important");
+			wrapper.style.setProperty("align-items", "center", "important");
+			wrapper.style.setProperty("margin", "0", "important");
+			wrapper.style.setProperty("padding", "0", "important");
+			wrapper.style.setProperty("background", "transparent", "important");
+		});
+
+		containerEl.querySelectorAll<SVGSVGElement>("svg").forEach((svg) => {
+			enhanceSvgDimensions(svg);
+		});
+		return;
 	}
-	containerEl.querySelectorAll<SVGSVGElement>("svg").forEach((svg) => {
-		svgs.push(svg);
-	});
 
-	svgs.forEach((svg) => {
-		enhanceSvgDimensions(svg);
-	});
-
-	// For all containers (block-language-mermaid, mermaid, pre, div, p) inside containerEl,
-	// clear any restrictive max-width / width inline styles so the SVG can scale to 100%
-	const wrappers = containerEl.querySelectorAll<HTMLElement>(
-		"div, pre, p, span, .mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-']"
+	// Normal slide content: ONLY target mermaid containers!
+	const mermaidContainers = containerEl.querySelectorAll<HTMLElement>(
+		".mermaid, svg.mermaid, .block-language-mermaid, div[class*='block-language-mermaid'], [class*='language-mermaid']"
 	);
-	wrappers.forEach((wrapper) => {
-		wrapper.style.setProperty("width", "100%", "important");
-		wrapper.style.setProperty("max-width", "100%", "important");
-		wrapper.style.setProperty("height", "100%", "important");
-		wrapper.style.setProperty("max-height", "100%", "important");
-		wrapper.style.setProperty("display", "flex", "important");
-		wrapper.style.setProperty("justify-content", "center", "important");
-		wrapper.style.setProperty("align-items", "center", "important");
-		wrapper.style.setProperty("margin", "0", "important");
-		wrapper.style.setProperty("padding", "0", "important");
-		wrapper.style.setProperty("background", "transparent", "important");
+
+	mermaidContainers.forEach((container) => {
+		if (container.closest(".callout")) return;
+		container.style.setProperty("width", "100%", "important");
+		container.style.setProperty("max-width", "100%", "important");
+
+		const svgs = container.tagName.toLowerCase() === "svg"
+			? [container as unknown as SVGSVGElement]
+			: Array.from(container.querySelectorAll<SVGSVGElement>("svg"));
+
+		svgs.forEach((svg) => {
+			enhanceSvgDimensions(svg);
+		});
 	});
 }
 
