@@ -19,7 +19,7 @@ export function parseMarkdownSections(
 	if (!headings || headings.length === 0) {
 		const rootNode: SectionNode = {
 			id: "node-root",
-			title: "0. Document complet",
+			title: "0. Full document",
 			level: 0,
 			lineStart: 0,
 			lineEnd: Math.max(0, lines.length - 1),
@@ -37,7 +37,7 @@ export function parseMarkdownSections(
 
 	const rootNode: SectionNode = {
 		id: "node-root",
-		title: "0. Document complet",
+		title: "0. Full document",
 		level: 0,
 		lineStart: 0,
 		lineEnd: lines.length - 1,

@@ -77,7 +77,7 @@ export class PresentationModal extends Component {
 
 		const bottomLeftZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-left-zone" });
 		this.hoverToggleBtnEl = bottomLeftZone.createEl("button", {
-			text: "☰ Table des matières",
+			text: "☰ Table of contents",
 			cls: "dynamic-slides-toc-hover-toggle"
 		});
 		this.hoverToggleBtnEl.setAttribute("aria-label", "Toggle TOC");
@@ -96,8 +96,8 @@ export class PresentationModal extends Component {
 			cls: "dynamic-slides-zoom-btn zoom-out",
 			text: "−"
 		});
-		this.zoomOutBtnEl.setAttribute("aria-label", "Zoom arrière (-10%)");
-		this.zoomOutBtnEl.setAttribute("title", "Zoom arrière (-10%) [Touche -]");
+		this.zoomOutBtnEl.setAttribute("aria-label", "Zoom out (-10%)");
+		this.zoomOutBtnEl.setAttribute("title", "Zoom out (-10%) [Key -]");
 		this.zoomOutBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.zoomOut();
@@ -107,8 +107,8 @@ export class PresentationModal extends Component {
 			cls: "dynamic-slides-zoom-value",
 			text: `${Math.round(this.zoomLevel * 100)}%`
 		});
-		this.zoomValueBtnEl.setAttribute("aria-label", "Réinitialiser le zoom (100%)");
-		this.zoomValueBtnEl.setAttribute("title", "Réinitialiser le zoom à 100% [Touche 0]");
+		this.zoomValueBtnEl.setAttribute("aria-label", "Reset zoom (100%)");
+		this.zoomValueBtnEl.setAttribute("title", "Reset zoom to 100% [Key 0]");
 		this.zoomValueBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.resetZoom();
@@ -118,8 +118,8 @@ export class PresentationModal extends Component {
 			cls: "dynamic-slides-zoom-btn zoom-in",
 			text: "+"
 		});
-		this.zoomInBtnEl.setAttribute("aria-label", "Zoom avant (+10%)");
-		this.zoomInBtnEl.setAttribute("title", "Zoom avant (+10%) [Touche +]");
+		this.zoomInBtnEl.setAttribute("aria-label", "Zoom in (+10%)");
+		this.zoomInBtnEl.setAttribute("title", "Zoom in (+10%) [Key +]");
 		this.zoomInBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.zoomIn();
@@ -268,11 +268,11 @@ export class PresentationModal extends Component {
 
 		this.subNoteBannerEl = this.overlayEl.createDiv({ cls: "dynamic-slides-subnote-banner" });
 
-		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-tag", text: "Sous-note" });
+		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-tag", text: "Sub-note" });
 		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-title", text: noteTitle });
 		const returnBtn = this.subNoteBannerEl.createEl("button", {
 			cls: "dynamic-slides-subnote-return-btn",
-			text: "Revenir à la présentation principale"
+			text: "Return to main presentation"
 		});
 
 		returnBtn.addEventListener("click", (evt) => {
@@ -461,7 +461,7 @@ export class PresentationModal extends Component {
 				cls: "dynamic-slides-zoom-close-btn",
 				text: "✕"
 			});
-			closeBtn.setAttribute("aria-label", "Fermer le zoom");
+			closeBtn.setAttribute("aria-label", "Close zoom");
 			closeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
 				this.closeMediaZoom(true);

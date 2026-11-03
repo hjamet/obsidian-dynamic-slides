@@ -50,7 +50,7 @@ export class TOCComponent {
 	public updateToggleBtnText(): void {
 		if (this.toggleBtnEl) {
 			if (this.isCollapsed()) {
-				this.toggleBtnEl.setText("☰ Table des matières");
+				this.toggleBtnEl.setText("☰ Table of contents");
 			} else {
 				this.toggleBtnEl.setText("◀ TOC");
 			}

@@ -26,7 +26,7 @@
 - **In-Slide Anchor Jumps**: Clicking `#Section` links or child section cards navigates directly to target sections with directional zoom animations.
 
 ### 4. Interactive Table of Contents (Hover TOC)
-- **Collapsible Sidebar**: Hovering over the bottom-left corner of the screen reveals the Table of Contents toggle button (`☰ Table des matières`).
+- **Collapsible Sidebar**: Hovering over the bottom-left corner of the screen reveals the Table of Contents toggle button (`☰ Table of contents`).
 - **Live Tree Structure**: Displays the active document tree with folding indicators (`▼` / `▶`), auto-scrolls to the current slide, and highlights the active section.
 
 ### 5. Responsive Diagrams & Embeds
@@ -101,7 +101,7 @@ npm run dev
 ### Manual Installation in Obsidian
 1. Build the project (`npm run build`).
 2. Copy `manifest.json`, `main.js`, and `styles.css` into your Obsidian vault:
-   `<VaultFolder>/.obsidian/plugins/obsidian-dynamic-slides/`
+   `<VaultFolder>/.obsidian/plugins/dynamic-section-slides/`
 3. Reload Obsidian and enable **Dynamic Section Slides** under **Settings → Community Plugins**.
 
 ---

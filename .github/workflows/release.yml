@@ -3,8 +3,9 @@ name: Release Plugin
 on:
   push:
     branches:
-      - main
+      - master
     tags:
+      - '1.*.*'
       - 'v*.*.*'
 
 permissions:
@@ -25,10 +26,10 @@ jobs:
         run: npm ci
 
       - name: Build Plugin
-        run: npm run build production
+        run: npm run build
 
       - name: Create Pre-release Tag
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/master'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -39,7 +40,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
-          prerelease: ${{ github.ref == 'refs/heads/main' }}
+          prerelease: ${{ github.ref == 'refs/heads/master' }}
           files: |
             main.js
             manifest.json

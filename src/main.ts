@@ -91,19 +91,19 @@ export default class DynamicSlidesPlugin extends Plugin {
 	private startPresentation() {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view) {
-			new Notice("Aucune note Markdown active pour la présentation.");
+			new Notice("No active Markdown note for presentation.");
 			return;
 		}
 
 		const file = view.file;
 		if (!file) {
-			new Notice("Fichier introuvable.");
+			new Notice("File not found.");
 			return;
 		}
 
 		const markdownText = view.editor.getValue();
 		if (!markdownText.trim()) {
-			new Notice("Note vide : impossible de démarrer la présentation.");
+			new Notice("Empty note: cannot start presentation.");
 			return;
 		}
 
@@ -114,7 +114,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		const parsed = parseMarkdownSections(markdownText, cache?.headings);
 
 		if (parsed.error === "no_headings") {
-			new Notice("Note sans en-tête H1-H6 : affichage de la note complète en slide unique.");
+			new Notice("Note without H1–H6 headings: presenting entire note as a single slide.");
 		}
 
 		this.rootNode = parsed.root;
@@ -264,7 +264,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			if (targetNode) {
 				this.goToNode(targetNode, 'zoom-in', 'start');
 			} else {
-				new Notice("Section introuvable dans la présentation.");
+				new Notice("Section not found in presentation.");
 			}
 			return;
 		}
@@ -280,7 +280,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		}
 		if (targetFile && targetFile instanceof TFile) {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
-			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : (this.activeSourcePath.split('/').pop()?.replace(/\.md$/, '') || "Note principale");
+			const activeFileBasename = (currentFile instanceof TFile) ? currentFile.basename : (this.activeSourcePath.split('/').pop()?.replace(/\.md$/, '') || "Main note");
 
 			// If link targets the current file itself with an anchor e.g. Note#Heading
 			if (targetFile.path === this.activeSourcePath && linkpath.includes("#")) {
@@ -296,7 +296,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 				if (targetNode) {
 					this.goToNode(targetNode, 'zoom-in', 'start');
 				} else {
-					new Notice("Section introuvable dans la présentation.");
+					new Notice("Section not found in presentation.");
 				}
 				return;
 			}
@@ -347,9 +347,9 @@ export default class DynamicSlidesPlugin extends Plugin {
 				this.tocComp.update(this.currentNode, this.flatNodes);
 			}
 
-			new Notice(`Présentation de la note : ${targetFile.basename}`);
+			new Notice(`Presenting note: ${targetFile.basename}`);
 		} else {
-			new Notice(`Fichier ou section introuvable pour le lien : ${linkpath}`);
+			new Notice(`File or section not found for link: ${linkpath}`);
 		}
 	}
 
@@ -374,7 +374,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			this.tocComp.update(this.currentNode, this.flatNodes);
 		}
 
-		new Notice(`Retour à la note : ${parentFrame.fileTitle}`);
+		new Notice(`Return to note: ${parentFrame.fileTitle}`);
 	}
 
 	private goToNode(
@@ -403,7 +403,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 		if (idx >= 0 && idx < this.flatNodes.length - 1) {
 			this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
 		} else if (idx === this.flatNodes.length - 1) {
-			new Notice("Fin de la présentation atteinte.");
+			new Notice("End of presentation reached.");
 		}
 	}
 
@@ -416,7 +416,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 			if (this.documentStack.length > 0) {
 				this.popDocumentStack();
 			} else {
-				new Notice("Début de la présentation atteint.");
+				new Notice("Beginning of presentation reached.");
 			}
 		}
 	}
@@ -439,7 +439,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 				this.activeModal.hideSubNoteBanner();
 			}
 		}
-		new Notice(`Retour au document principal : ${parentFrame.fileTitle}`);
+		new Notice(`Return to main document: ${parentFrame.fileTitle}`);
 	}
 
 	private expandParent() {
@@ -448,7 +448,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 				this.popDocumentStack();
 				return;
 			} else {
-				new Notice("Niveau supérieur racine atteint.");
+				new Notice("Reached top-level root section.");
 				return;
 			}
 		}
@@ -457,7 +457,7 @@ export default class DynamicSlidesPlugin extends Plugin {
 
 	private reduceChild() {
 		if (!this.currentNode || this.currentNode.children.length === 0) {
-			new Notice("Niveau le plus fin atteint.");
+			new Notice("Reached deepest section level.");
 			return;
 		}
 		this.goToNode(this.currentNode.children[0], 'zoom-in', 'start');
@@ -540,8 +540,8 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		const setting = new Setting(containerEl)
-			.setName("Durée des animations de transition")
-			.setDesc(`Durée actuelle : ${this.plugin.settings.transitionDuration}s`)
+			.setName("Transition animation duration")
+			.setDesc(`Current duration: ${this.plugin.settings.transitionDuration}s`)
 			.addSlider(slider =>
 				slider
 					.setLimits(0.2, 1.5, 0.05)
@@ -551,13 +551,13 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 						const roundedValue = Math.round(value * 100) / 100;
 						this.plugin.settings.transitionDuration = roundedValue;
 						await this.plugin.saveSettings();
-						setting.setDesc(`Durée actuelle : ${roundedValue}s`);
+						setting.setDesc(`Current duration: ${roundedValue}s`);
 					})
 			);
 
 		new Setting(containerEl)
-			.setName("Durée du défilement fluide")
-			.setDesc("Ajuste la durée (en secondes) de l'animation de défilement vertical du texte de slide.")
+			.setName("Smooth scroll duration")
+			.setDesc("Adjust the vertical scrolling animation duration (in seconds) for slide text.")
 			.addSlider(slider =>
 				slider
 					.setLimits(0.5, 4.0, 0.1)
@@ -571,8 +571,8 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 			);
 
 		const zoomSetting = new Setting(containerEl)
-			.setName("Niveau de zoom / échelle par défaut")
-			.setDesc(`Échelle actuelle : ${Math.round((this.plugin.settings.zoomLevel || 1.0) * 100)}%`)
+			.setName("Default zoom / scale level")
+			.setDesc(`Current scale: ${Math.round((this.plugin.settings.zoomLevel || 1.0) * 100)}%`)
 			.addSlider(slider =>
 				slider
 					.setLimits(0.7, 2.0, 0.05)
@@ -582,7 +582,7 @@ export class DynamicSlidesSettingTab extends PluginSettingTab {
 						const roundedValue = Math.round(value * 100) / 100;
 						this.plugin.settings.zoomLevel = roundedValue;
 						await this.plugin.saveSettings();
-						zoomSetting.setDesc(`Échelle actuelle : ${Math.round(roundedValue * 100)}%`);
+						zoomSetting.setDesc(`Current scale: ${Math.round(roundedValue * 100)}%`);
 					})
 			);
 	}

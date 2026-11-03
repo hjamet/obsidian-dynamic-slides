@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-dynamic-slides",
+  "name": "dynamic-section-slides",
   "version": "1.2.0",
   "description": "Dynamic full-screen Markdown section slides with 2D keyboard navigation and hover TOC.",
   "main": "main.js",
