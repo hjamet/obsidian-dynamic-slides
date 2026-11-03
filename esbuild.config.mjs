@@ -12,7 +12,7 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = (process.argv[2] === "production");
-const defaultVaultPath = process.env.OBSIDIAN_VAULT_PATH || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, "Documents", "VoiceNotes") : "");
+const defaultVaultPath = process.env.OBSIDIAN_VAULT_PATH || "";
 const pluginDestDir = defaultVaultPath && fs.existsSync(defaultVaultPath)
 	? path.join(defaultVaultPath, ".obsidian", "plugins", "dynamic-section-slides")
 	: null;
