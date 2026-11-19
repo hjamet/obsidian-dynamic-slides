@@ -41,6 +41,8 @@ const SKIP_CLASS_LIST = [
 	"callout-fold",
 	"svg-icon",
 	"slideflow-selection-toolbar",
+	"slideflow-link-dirty-badge",
+	"slideflow-comments-rail",
 ];
 
 function shouldSkipElement(el: HTMLElement, mode: "current" | "old", checkLiveVisibility: boolean): boolean {

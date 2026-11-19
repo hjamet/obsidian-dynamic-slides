@@ -1432,9 +1432,11 @@ mark.slideflow-comment-mark {
 	transition: background-color 0.14s ease, border-color 0.14s ease;
 }
 
-mark.slideflow-comment-mark:hover {
+mark.slideflow-comment-mark:hover,
+mark.slideflow-comment-mark.is-hovered-from-rail {
 	background-color: rgba(250, 204, 21, 0.48) !important;
 	border-bottom-color: #d97706;
+	box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.28);
 }
 
 .theme-dark mark.slideflow-comment-mark {
@@ -1442,9 +1444,11 @@ mark.slideflow-comment-mark:hover {
 	border-bottom-color: rgba(251, 191, 36, 0.65);
 }
 
-.theme-dark mark.slideflow-comment-mark:hover {
+.theme-dark mark.slideflow-comment-mark:hover,
+.theme-dark mark.slideflow-comment-mark.is-hovered-from-rail {
 	background-color: rgba(250, 204, 21, 0.36) !important;
 	border-bottom-color: #fbbf24;
+	box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.25);
 }
 
 mark.slideflow-comment-mark.is-failed {
@@ -2359,4 +2363,250 @@ mark.slideflow-comment-mark.is-failed {
 	font-family: var(--font-monospace);
 	font-size: 0.82rem;
 	line-height: 1.45;
+}
+
+/* ==========================================================================
+   Right-Side Compact Comment Icons Rail + Hover Preview Popover (Antigravity-style)
+   ========================================================================== */
+
+.slideflow-comments-rail {
+	position: fixed;
+	right: 20px;
+	top: 50%;
+	transform: translateY(-50%);
+	z-index: 100120;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	max-height: 70vh;
+	overflow-y: auto;
+	padding: 6px 4px;
+	box-sizing: border-box;
+	user-select: none;
+	transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.slideflow-comments-rail::-webkit-scrollbar {
+	width: 0;
+	height: 0;
+}
+
+.dynamic-slides-overlay.is-comment-modal-open .slideflow-comments-rail,
+.dynamic-slides-overlay.is-review-drawer-open .slideflow-comments-rail {
+	opacity: 0;
+	pointer-events: none;
+}
+
+.slideflow-rail-icon-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	border: 1px solid rgba(217, 119, 6, 0.4) !important;
+	background: var(--background-secondary-alt, var(--background-secondary)) !important;
+	color: #b45309 !important;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	margin: 0;
+	cursor: pointer;
+	flex-shrink: 0;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12) !important;
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.theme-dark .slideflow-rail-icon-btn {
+	border-color: rgba(251, 191, 36, 0.42) !important;
+	color: #fbbf24 !important;
+}
+
+.slideflow-rail-icon-btn:hover,
+.slideflow-rail-icon-btn.is-active {
+	transform: scale(1.1);
+	background: rgba(250, 204, 21, 0.22) !important;
+	border-color: #d97706 !important;
+	color: #92400e !important;
+	box-shadow: 0 6px 18px rgba(217, 119, 6, 0.24) !important;
+}
+
+.theme-dark .slideflow-rail-icon-btn:hover,
+.theme-dark .slideflow-rail-icon-btn.is-active {
+	background: rgba(250, 204, 21, 0.24) !important;
+	border-color: #fbbf24 !important;
+	color: #fde68a !important;
+}
+
+.slideflow-rail-icon-btn.is-failed {
+	border-color: rgba(220, 38, 38, 0.55) !important;
+	color: #dc2626 !important;
+}
+
+.theme-dark .slideflow-rail-icon-btn.is-failed {
+	border-color: rgba(239, 68, 68, 0.6) !important;
+	color: #f87171 !important;
+}
+
+.slideflow-rail-popover {
+	position: fixed;
+	z-index: 100150;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	padding: 10px 12px 11px 12px;
+	box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.08);
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	box-sizing: border-box;
+	animation: slideFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+	user-select: text;
+}
+
+.slideflow-rail-popover::before,
+.slideflow-rail-popover::after {
+	content: "";
+	position: absolute;
+	top: -8px;
+	bottom: -8px;
+	width: 14px;
+}
+
+.slideflow-rail-popover::before {
+	left: -14px;
+}
+
+.slideflow-rail-popover::after {
+	right: -14px;
+}
+
+.slideflow-rail-popover.is-failed {
+	border-left: 3px solid #dc2626;
+}
+
+.slideflow-rail-popover-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	user-select: none;
+}
+
+.slideflow-rail-popover-badges {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	flex-wrap: wrap;
+	min-width: 0;
+}
+
+.slideflow-rail-scope-pill {
+	font-size: 0.67rem;
+	font-weight: 600;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+}
+
+.slideflow-rail-diff-pill {
+	font-size: 0.67rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+}
+
+.slideflow-rail-failed-pill {
+	font-size: 0.67rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(220, 38, 38, 0.14);
+	color: #dc2626;
+	text-transform: uppercase;
+}
+
+.theme-dark .slideflow-rail-failed-pill {
+	background: rgba(239, 68, 68, 0.22);
+	color: #fca5a5;
+}
+
+.slideflow-rail-popover-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.slideflow-rail-action-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 8px;
+	height: auto;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border) !important;
+	background: var(--background-secondary) !important;
+	color: var(--text-normal) !important;
+	font-size: 0.72rem;
+	font-weight: 600;
+	cursor: pointer;
+	box-shadow: none !important;
+	transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.slideflow-rail-action-btn.is-edit:hover {
+	border-color: var(--interactive-accent) !important;
+	color: var(--text-accent) !important;
+	background: var(--background-modifier-hover) !important;
+}
+
+.slideflow-rail-action-btn.is-delete:hover {
+	border-color: #ef4444 !important;
+	color: #ef4444 !important;
+	background: rgba(239, 68, 68, 0.1) !important;
+}
+
+.slideflow-rail-popover-quote {
+	font-size: 0.76rem;
+	font-style: italic;
+	color: var(--text-muted);
+	padding: 4px 8px;
+	border-left: 2px solid rgba(217, 119, 6, 0.65);
+	background: rgba(250, 204, 21, 0.08);
+	border-radius: 4px;
+	line-height: 1.38;
+	word-break: break-word;
+}
+
+.slideflow-rail-popover-body {
+	font-size: 0.87rem;
+	line-height: 1.48;
+	color: var(--text-normal);
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 220px;
+	overflow-y: auto;
+}
+
+/* Subtle modified indicator dot on internal links pointing to notes in unread_baselines.json */
+.slideflow-link-dirty-badge {
+	display: inline-block;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background-color: #22c55e;
+	margin-left: 5px;
+	vertical-align: middle;
+	box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+	pointer-events: none;
 }

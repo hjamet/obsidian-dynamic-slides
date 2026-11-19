@@ -67,6 +67,7 @@ export class ReviewDrawer {
 	public open(options: ReviewDrawerOpenOptions): void {
 		this.close(false);
 		this.isOpenFlag = true;
+		this.parentEl.addClass("is-review-drawer-open");
 		this.comments = [...options.comments];
 		this.directCliEnabled = options.directCliEnabled;
 		this.cliDisplayName = options.cliDisplayName || "CLI";
@@ -459,6 +460,7 @@ export class ReviewDrawer {
 
 	public close(invokeCallback: boolean = true): void {
 		this.confirmModal.close();
+		this.parentEl.removeClass("is-review-drawer-open");
 		if (!this.isOpenFlag && !this.backdropEl) return;
 		this.isOpenFlag = false;
 		window.removeEventListener("keydown", this.boundKeyHandler, true);

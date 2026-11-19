@@ -23,6 +23,7 @@ import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
 import { ReviewDrawer } from "./reviewDrawer";
 import { ConfirmOverlayModal } from "./confirmModal";
+import { SlideCommentsRail } from "./slideCommentsRail";
 import {
 	DEFAULT_CLI_COMMAND,
 	getCliDisplayName,
@@ -95,6 +96,7 @@ export default class SlideFlowPlugin extends Plugin {
 	private commentModal: CommentOverlayModal | null = null;
 	private reviewDrawer: ReviewDrawer | null = null;
 	private exitConfirmModal: ConfirmOverlayModal | null = null;
+	private slideCommentsRail: SlideCommentsRail | null = null;
 
 	private baselinesStore!: BaselinesStore;
 	public reviewStore!: ReviewStore;
@@ -326,6 +328,12 @@ export default class SlideFlowPlugin extends Plugin {
 			this.currentNode.title
 		);
 		this.activeModal.applyCommentHighlights(slideComments);
+		this.slideCommentsRail?.update(slideComments);
+		this.activeModal.decorateModifiedInternalLinks((href: string) => {
+			const targetFile = this.resolveLinkTargetFile(href, this.activeSourcePath);
+			if (!targetFile || targetFile.extension.toLowerCase() !== "md") return false;
+			return this.baselinesStore.hasUnreadBaseline(targetFile.path);
+		});
 	}
 
 	private refreshAllActiveUI(): void {
@@ -531,6 +539,7 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onZoomChangeCallback = (newZoom: number) => {
 			this.settings.zoomLevel = newZoom;
 			void this.saveSettings();
+			window.setTimeout(() => this.slideCommentsRail?.positionRail(), 260);
 		};
 		this.activeModal.setBreadcrumb(file.basename);
 		this.activeModal.setReturnButton(null);
@@ -572,6 +581,23 @@ export default class SlideFlowPlugin extends Plugin {
 
 		const overlayEl = this.activeModal.getOverlayElement();
 		this.exitConfirmModal = new ConfirmOverlayModal(overlayEl);
+
+		this.slideCommentsRail = new SlideCommentsRail(overlayEl, {
+			onEditComment: (comment: ReviewComment, anchorRect?: AnchorRect | null) => {
+				this.openEditCommentById(comment.id, anchorRect);
+			},
+			onDeleteComment: async (commentId: string) => {
+				await this.reviewStore.deleteComment(commentId);
+				this.refreshAllActiveUI();
+				new Notice("Comment deleted.");
+			},
+			getSlideContainer: () => {
+				if (!this.activeModal) return null;
+				return this.activeModal.isMediaZoomActive()
+					? this.activeModal.getZoomContentElement()
+					: this.activeModal.getContentElement();
+			},
+		});
 
 		this.commentModal = new CommentOverlayModal(overlayEl, this.voiceService, {
 			onSubmit: async (commentText: string, editingId?: string) => {
@@ -817,6 +843,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private openCommentModal(startWithVoice: boolean, explicitRange?: Range | null) {
 		if (!this.commentModal || !this.currentNode || !this.activeModal) return;
+		this.slideCommentsRail?.hidePopoverImmediate();
 
 		const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
 		const noteTitle =
@@ -943,6 +970,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private toggleReviewDrawer() {
 		if (!this.reviewDrawer) return;
+		this.slideCommentsRail?.hidePopoverImmediate();
 		if (this.reviewDrawer.isOpen()) {
 			this.reviewDrawer.close(true);
 		} else {
@@ -1095,6 +1123,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private openEditCommentById(commentId: string, anchorRect?: AnchorRect | null): void {
 		if (!this.commentModal || !this.activeModal) return;
+		this.slideCommentsRail?.hidePopoverImmediate();
 		const comment = this.reviewStore.getAll().find((c) => c.id === commentId);
 		if (!comment) return;
 
@@ -1474,6 +1503,10 @@ export default class SlideFlowPlugin extends Plugin {
 		if (this.reviewDrawer) {
 			this.reviewDrawer.close(false);
 			this.reviewDrawer = null;
+		}
+		if (this.slideCommentsRail) {
+			this.slideCommentsRail.destroy();
+			this.slideCommentsRail = null;
 		}
 		if (this.activeModal) {
 			const modal = this.activeModal;

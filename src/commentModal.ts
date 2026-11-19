@@ -74,6 +74,7 @@ export class CommentOverlayModal {
 	public open(ctx: CommentModalContext): void {
 		this.close(false);
 		this.isOpenFlag = true;
+		this.parentEl.addClass("is-comment-modal-open");
 		this.isBusyTranscribing = false;
 		this.editingId = ctx.editingComment ? ctx.editingComment.id : null;
 
@@ -448,6 +449,7 @@ export class CommentOverlayModal {
 
 	public close(invokeOnCloseCallback: boolean = true): void {
 		this.parentEl.removeClass("is-comment-docked-right");
+		this.parentEl.removeClass("is-comment-modal-open");
 		if (!this.isOpenFlag && !this.cardEl) return;
 		this.isOpenFlag = false;
 		this.stopRecTimer();

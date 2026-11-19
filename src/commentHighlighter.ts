@@ -22,7 +22,23 @@ export interface SelectionAnchorSnippet {
 }
 
 const IGNORED_ANCESTOR_SELECTOR =
-	".dynamic-slides-child-heading, .copy-code-button, .slideflow-selection-toolbar, .slideflow-deleted-sections-title, .callout-icon, .callout-fold, script, style, button";
+	".dynamic-slides-child-heading, .copy-code-button, .slideflow-selection-toolbar, .slideflow-deleted-sections-title, .slideflow-link-dirty-badge, .callout-icon, .callout-fold, script, style, button";
+
+// Structural HTML containers where inserting an inline <mark> child creates broken anonymous layout boxes (e.g. extra table cells inside <tr>!)
+const STRUCTURAL_CONTAINER_TAGS = new Set([
+	"table",
+	"thead",
+	"tbody",
+	"tfoot",
+	"tr",
+	"colgroup",
+	"ul",
+	"ol",
+	"dl",
+	"select",
+]);
+
+const BLOCK_BOUNDARY_SELECTOR = "td, th, p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, tr";
 
 /**
  * Unwraps any previously injected `.slideflow-comment-mark` elements inside `containerEl`
@@ -45,6 +61,7 @@ function collectTextSegments(containerEl: HTMLElement): { fullText: string; segm
 	const segments: TextSegment[] = [];
 	const parts: string[] = [];
 	let offset = 0;
+	let prevBlockBoundary: Element | null = null;
 
 	const walker = document.createTreeWalker(containerEl, NodeFilter.SHOW_TEXT, {
 		acceptNode(node: Node): number {
@@ -53,6 +70,9 @@ function collectTextSegments(containerEl: HTMLElement): { fullText: string; segm
 			}
 			const parentEl = node.parentElement;
 			if (!parentEl) return NodeFilter.FILTER_REJECT;
+			if (STRUCTURAL_CONTAINER_TAGS.has(parentEl.tagName.toLowerCase())) {
+				return NodeFilter.FILTER_REJECT;
+			}
 			if (parentEl.closest(IGNORED_ANCESTOR_SELECTOR)) {
 				return NodeFilter.FILTER_REJECT;
 			}
@@ -68,6 +88,15 @@ function collectTextSegments(containerEl: HTMLElement): { fullText: string; segm
 	let current = walker.nextNode();
 	while (current) {
 		const textNode = current as Text;
+		const blockBoundary = textNode.parentElement?.closest(BLOCK_BOUNDARY_SELECTOR) || null;
+		// Insert a virtual whitespace separator between distinct table cells / blocks so cross-cell
+		// matches align with range.toString() WITHOUT wrapping inter-cell DOM text nodes in <tr>!
+		if (prevBlockBoundary && blockBoundary && blockBoundary !== prevBlockBoundary) {
+			parts.push(" ");
+			offset += 1;
+		}
+		prevBlockBoundary = blockBoundary;
+
 		const len = textNode.data.length;
 		segments.push({ node: textNode, start: offset, end: offset + len });
 		parts.push(textNode.data);
@@ -230,6 +259,7 @@ function wrapTextSlice(
 		const localStart = Math.max(0, origStart - seg.start);
 		const localEnd = Math.min(seg.node.data.length, origEnd - seg.start);
 		if (localEnd <= localStart) continue;
+		if (!seg.node.data.slice(localStart, localEnd).trim()) continue;
 
 		// Avoid double-wrapping already marked text from an overlapping comment
 		if (seg.node.parentElement?.closest("mark.slideflow-comment-mark")) {
