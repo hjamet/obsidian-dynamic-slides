@@ -313,13 +313,18 @@ export function extractZoomContext(
 	const isMermaid = Boolean(zoomContentEl.querySelector(".dynamic-slides-zoom-mermaid"));
 	const isImage = Boolean(zoomContentEl.querySelector(".dynamic-slides-zoom-image"));
 	const isIframe = Boolean(zoomContentEl.querySelector(".dynamic-slides-zoom-iframe"));
+	const pdfZoomEl = zoomContentEl.querySelector(".dynamic-slides-zoom-pdf") as HTMLElement | null;
 
 	let scopeLabel = "Zoom";
 	let currentText = "";
 	let oldText: string | null = null;
 	let hadDiff = false;
 
-	if (isTable) {
+	if (pdfZoomEl) {
+		scopeLabel = "Zoom · PDF";
+		const pdfRef = pdfZoomEl.getAttribute("data-pdf-source") || "[PDF document]";
+		currentText = pdfRef;
+	} else if (isTable) {
 		scopeLabel = "Zoom · Table";
 		const tableEl = zoomContentEl.querySelector("table") as HTMLTableElement | null;
 		if (tableEl) {

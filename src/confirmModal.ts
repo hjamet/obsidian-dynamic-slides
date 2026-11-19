@@ -78,7 +78,7 @@ export class ConfirmOverlayModal {
 		const leftGroup = actionsEl.createDiv({ cls: "slideflow-confirm-actions-left" });
 		if (options.discardLabel && options.onDiscard) {
 			const discardBtn = leftGroup.createEl("button", {
-				cls: "slideflow-confirm-btn is-danger-ghost",
+				cls: "slideflow-confirm-btn is-secondary",
 				text: options.discardLabel,
 				attr: { type: "button" },
 			});

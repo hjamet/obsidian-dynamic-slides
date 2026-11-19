@@ -1,16 +1,13 @@
 /**
- * ReviewStore — Review comment store for SlideFlow.
+ * ReviewStore — Persistent review comment store for SlideFlow (`.obsidian/plugins/slideflow/pending_reviews.json`).
  *
- * - Clipboard mode (`persistenceEnabled = false`):
- *   Purely session-ephemeral in memory; comments vanish between sessions once closed.
- *   Tracks `hasUncopiedChanges` so exiting with uncopied comments prompts a confirmation dialog.
- * - Direct CLI mode (`persistenceEnabled = true`):
- *   Persisted immediately to `.obsidian/plugins/slideflow/pending_reviews.json` so comments
- *   survive presentation closure and only vanish AFTER the CLI invocation succeeds (exit code 0).
+ * - Always persisted across sessions in BOTH Clipboard mode and Direct CLI (`agy`) mode so no comment
+ *   is ever lost on exit.
+ * - Clipboard mode: comments are cleared manually via "Clear queue" in the Review Queue (`R`).
+ * - Direct CLI (`agy`) mode: sent comments are automatically cleared ONLY after the CLI command
+ *   finishes with exit code 0.
  * - Clean XML export (`/one-shot` + `<slideflow_review>`) so Markdown code blocks, headings,
  *   and blockquotes inside notes never collide with the comment structure.
- * - Deduplicated grouping per `(notePath, contextKey)` with both `<previous_text>` and
- *   `<current_text>` whenever the commented zone contained a diff.
  */
 
 import { App } from "obsidian";
@@ -69,8 +66,6 @@ export class ReviewStore {
 	private app: App;
 	private pluginDir: string;
 	private comments: ReviewComment[] = [];
-	private persistenceEnabled: boolean = false;
-	private hasUncopiedChanges: boolean = false;
 
 	constructor(app: App, pluginDir: string) {
 		this.app = app;
@@ -81,45 +76,19 @@ export class ReviewStore {
 		return `${this.pluginDir}/pending_reviews.json`;
 	}
 
-	public setPersistenceEnabled(enabled: boolean): void {
-		this.persistenceEnabled = enabled;
-	}
-
-	public isPersistenceEnabled(): boolean {
-		return this.persistenceEnabled;
-	}
-
-	/**
-	 * Initializes comments for a new presentation session:
-	 * - In Direct CLI mode: loads persisted pending comments from disk.
-	 * - In Clipboard mode: starts completely clean in memory (ephemeral per session).
-	 */
-	public async initForSession(persistenceEnabled: boolean): Promise<ReviewComment[]> {
-		this.persistenceEnabled = persistenceEnabled;
-		if (!persistenceEnabled) {
-			this.comments = [];
-			this.hasUncopiedChanges = false;
-			return [];
-		}
-		return this.loadFromDisk();
-	}
-
 	public async loadFromDisk(): Promise<ReviewComment[]> {
 		const adapter = this.app.vault.adapter;
 		if (!(await adapter.exists(this.pendingFilePath))) {
 			this.comments = [];
-			this.hasUncopiedChanges = false;
 			return this.comments;
 		}
 		const raw = await adapter.read(this.pendingFilePath);
 		const parsed = JSON.parse(raw) as PendingReviewsFile;
 		this.comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
-		this.hasUncopiedChanges = this.comments.length > 0;
 		return this.comments;
 	}
 
-	private async persistIfEnabled(): Promise<void> {
-		if (!this.persistenceEnabled) return;
+	private async saveToDisk(): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		if (!(await adapter.exists(this.pluginDir))) {
 			await adapter.mkdir(this.pluginDir);
@@ -149,12 +118,12 @@ export class ReviewStore {
 		return this.comments.filter((c) => c.notePath === notePath).length;
 	}
 
-	public hasUncopiedOrUnsent(inFlightIds?: Set<string>): boolean {
-		if (this.comments.length === 0) return false;
-		if (this.persistenceEnabled) {
-			return this.comments.some((c) => !inFlightIds?.has(c.id));
-		}
-		return this.hasUncopiedChanges;
+	public hasUncopiedComments(): boolean {
+		return this.comments.some((c) => !c.copiedAt);
+	}
+
+	public hasUnsentComments(inFlightIds?: Set<string>): boolean {
+		return this.comments.some((c) => !inFlightIds?.has(c.id));
 	}
 
 	public async addComment(
@@ -167,8 +136,7 @@ export class ReviewStore {
 			createdAt: new Date().toISOString(),
 		};
 		this.comments.push(item);
-		this.hasUncopiedChanges = true;
-		await this.persistIfEnabled();
+		await this.saveToDisk();
 		return item;
 	}
 
@@ -178,8 +146,7 @@ export class ReviewStore {
 		target.commentText = newText.trim();
 		target.updatedAt = new Date().toISOString();
 		target.copiedAt = undefined;
-		this.hasUncopiedChanges = true;
-		await this.persistIfEnabled();
+		await this.saveToDisk();
 		return target;
 	}
 
@@ -187,10 +154,7 @@ export class ReviewStore {
 		const before = this.comments.length;
 		this.comments = this.comments.filter((c) => c.id !== id);
 		if (this.comments.length !== before) {
-			if (this.comments.length === 0) {
-				this.hasUncopiedChanges = false;
-			}
-			await this.persistIfEnabled();
+			await this.saveToDisk();
 			return true;
 		}
 		return false;
@@ -201,11 +165,8 @@ export class ReviewStore {
 		const before = this.comments.length;
 		this.comments = this.comments.filter((c) => !idSet.has(c.id));
 		const removed = before - this.comments.length;
-		if (this.comments.length === 0) {
-			this.hasUncopiedChanges = false;
-		}
 		if (removed > 0) {
-			await this.persistIfEnabled();
+			await this.saveToDisk();
 		}
 		return removed;
 	}
@@ -215,21 +176,14 @@ export class ReviewStore {
 		for (const c of this.comments) {
 			c.copiedAt = now;
 		}
-		this.hasUncopiedChanges = false;
-		await this.persistIfEnabled();
+		await this.saveToDisk();
 	}
 
-	public async discardAll(): Promise<number> {
+	public async clearAll(): Promise<number> {
 		const count = this.comments.length;
 		this.comments = [];
-		this.hasUncopiedChanges = false;
-		await this.persistIfEnabled();
+		await this.saveToDisk();
 		return count;
-	}
-
-	public resetInMemory(): void {
-		this.comments = [];
-		this.hasUncopiedChanges = false;
 	}
 
 	public getVaultBasePath(): string {

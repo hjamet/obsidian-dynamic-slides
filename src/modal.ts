@@ -1,9 +1,26 @@
-import { App, Component } from "obsidian";
+import { App, Component, MarkdownRenderer } from "obsidian";
+import * as fs from "fs";
+import * as path from "path";
 import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
 
 export const SCROLL_PHASE = -1;
+
+const MEDIA_SELECTOR = [
+	"iframe",
+	"img:not(.emoji):not(.svg-icon)",
+	".mermaid",
+	"svg.mermaid",
+	".block-language-mermaid",
+	"div[class*='block-language-mermaid']",
+	".pdf-embed",
+	".internal-embed[src$='.pdf' i]",
+	".internal-embed[src*='.pdf#' i]",
+	"pre",
+	"table",
+	"[class*='block-language-']:not(.callout)"
+].join(", ");
 
 export interface CockpitBarState {
 	hasNoteDiff: boolean;
@@ -34,6 +51,7 @@ export class PresentationModal extends Component {
 	private currentSlideComponent: Component | null = null;
 	private onCloseCallback?: () => void;
 	public onLinkClickCallback?: (href: string) => void;
+	public onExternalPdfLinkClickCallback?: (href: string) => void;
 	public onSectionClickCallback?: (nodeId: string) => void;
 	public onZoomChangeCallback?: (zoom: number) => void;
 	public onReturnClickCallback?: () => void;
@@ -70,6 +88,9 @@ export class PresentationModal extends Component {
 	private activeZoomIndex: number = -1;
 	private zoomOverlayEl: HTMLElement | null = null;
 	private zoomContentEl: HTMLElement | null = null;
+	private zoomSlideComponent: Component | null = null;
+	private activePdfBlobUrl: string | null = null;
+	private currentSourcePath: string = "";
 	private hasCompletedAllSteps: boolean = false;
 
 	private zoomLevel: number = 1.0;
@@ -257,21 +278,25 @@ export class PresentationModal extends Component {
 				return;
 			}
 
+			const extLinkEl = target.closest('a[href]') as HTMLAnchorElement | null;
+			if (extLinkEl) {
+				const href = extLinkEl.getAttribute('href') || '';
+				const cleanBeforeHash = href.split('#')[0].split('?')[0].toLowerCase();
+				if (cleanBeforeHash.endsWith('.pdf')) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					if (/^file:\/\//i.test(href)) {
+						this.onExternalPdfLinkClickCallback?.(href);
+					} else {
+						this.onLinkClickCallback?.(href);
+					}
+					return;
+				}
+			}
+
 			if (target.closest('.callout-icon, .svg-icon, .dynamic-slides-child-heading, .internal-link')) return;
 
-			const selector = [
-				"iframe",
-				"img:not(.emoji):not(.svg-icon)",
-				".mermaid",
-				"svg.mermaid",
-				".block-language-mermaid",
-				"div[class*='block-language-mermaid']",
-				"pre",
-				"table",
-				"[class*='block-language-']:not(.callout)"
-			].join(", ");
-
-			const zoomableEl = target.closest(selector) as HTMLElement;
+			const zoomableEl = target.closest(MEDIA_SELECTOR) as HTMLElement;
 			if (zoomableEl) {
 				const zoomableList = this.detectMediaElements();
 				const matchedEl = zoomableList.find(item => item === zoomableEl || item.contains(zoomableEl));
@@ -636,19 +661,8 @@ export class PresentationModal extends Component {
 
 	public detectMediaElements(): HTMLElement[] {
 		if (!this.contentEl) return [];
-		const selector = [
-			"iframe",
-			"img:not(.emoji):not(.svg-icon)",
-			".mermaid",
-			"svg.mermaid",
-			".block-language-mermaid",
-			"div[class*='block-language-mermaid']",
-			"pre",
-			"table",
-			"[class*='block-language-']:not(.callout)"
-		].join(", ");
 		const raw = Array.from(
-			this.contentEl.querySelectorAll<HTMLElement>(selector)
+			this.contentEl.querySelectorAll<HTMLElement>(MEDIA_SELECTOR)
 		);
 		const filtered = raw.filter(el => {
 			if (
@@ -670,18 +684,7 @@ export class PresentationModal extends Component {
 		if (!this.contentEl) return false;
 		const clone = this.contentEl.cloneNode(true) as HTMLElement;
 		clone.querySelectorAll("h1, h2, h3, h4, h5, h6, .dynamic-slides-child-heading").forEach(el => el.remove());
-		const selector = [
-			"iframe",
-			"img:not(.emoji):not(.svg-icon)",
-			".mermaid",
-			"svg.mermaid",
-			".block-language-mermaid",
-			"div[class*='block-language-mermaid']",
-			"pre",
-			"table",
-			"[class*='block-language-']:not(.callout)"
-		].join(", ");
-		clone.querySelectorAll(selector).forEach(el => el.remove());
+		clone.querySelectorAll(MEDIA_SELECTOR).forEach(el => el.remove());
 		const text = clone.textContent?.trim() || "";
 		return text.length === 0;
 	}
@@ -690,17 +693,26 @@ export class PresentationModal extends Component {
 		return this.zoomOverlayEl !== null;
 	}
 
-	public openMediaZoom(index: number, animated: boolean = true) {
+	private cleanupZoomResources(): void {
+		if (this.zoomSlideComponent) {
+			unloadSlideContent(this.zoomSlideComponent, this);
+			this.zoomSlideComponent = null;
+		}
+		if (this.activePdfBlobUrl) {
+			try {
+				URL.revokeObjectURL(this.activePdfBlobUrl);
+			} catch {
+				// ignore
+			}
+			this.activePdfBlobUrl = null;
+		}
+	}
+
+	private ensureZoomOverlay(animated: boolean): void {
 		this.hideSelectionToolbar();
 		if (this.contentEl) {
-			this.contentEl.style.opacity = '0';
+			this.contentEl.style.opacity = "0";
 		}
-		const zoomableElements = this.detectMediaElements();
-		if (index < 0 || index >= zoomableElements.length) {
-			this.closeMediaZoom(false);
-			return;
-		}
-		this.activeZoomIndex = index;
 		if (!this.zoomOverlayEl) {
 			this.zoomOverlayEl = this.overlayEl.createDiv({ cls: "dynamic-slides-media-zoom-overlay" });
 			if (!animated) {
@@ -736,17 +748,166 @@ export class PresentationModal extends Component {
 						return;
 					}
 				}
-				if (target === this.zoomOverlayEl || target === this.zoomContentEl || target.closest(".dynamic-slides-zoom-close-btn")) {
+				const extLinkEl = target.closest("a[href]") as HTMLAnchorElement | null;
+				if (extLinkEl) {
+					const href = extLinkEl.getAttribute("href") || "";
+					const cleanBeforeHash = href.split("#")[0].split("?")[0].toLowerCase();
+					if (cleanBeforeHash.endsWith(".pdf")) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						if (/^file:\/\//i.test(href)) {
+							this.onExternalPdfLinkClickCallback?.(href);
+						} else {
+							this.onLinkClickCallback?.(href);
+						}
+						return;
+					}
+				}
+				if (
+					target === this.zoomOverlayEl ||
+					target === this.zoomContentEl ||
+					target.closest(".dynamic-slides-zoom-close-btn")
+				) {
 					evt.stopPropagation();
 					this.closeMediaZoom(true);
 					this.activeZoomIndex = -1;
 				}
 			});
 		}
+	}
+
+	/**
+	 * Opens a vault PDF inside the fullscreen zoom overlay using Obsidian's live native PDF.js viewer.
+	 */
+	public async openVaultPdfZoom(
+		pdfVaultPath: string,
+		subpath: string = "",
+		displayTitle?: string,
+		sourcePath?: string,
+		animated: boolean = true,
+		keepZoomIndex: boolean = false
+	): Promise<void> {
+		if (!keepZoomIndex) {
+			this.activeZoomIndex = -1;
+		}
+		this.ensureZoomOverlay(animated);
+		this.cleanupZoomResources();
+
+		if (!this.zoomContentEl) return;
+		this.zoomContentEl.empty();
+
+		const cleanSubpath = subpath && !subpath.startsWith("#") ? `#${subpath}` : subpath;
+		const fullRef = `${pdfVaultPath}${cleanSubpath}`;
+		const title = displayTitle || pdfVaultPath.split("/").pop() || "PDF";
+
+		const wrapper = this.zoomContentEl.createDiv({
+			cls: "dynamic-slides-zoom-pdf",
+			attr: { "data-pdf-source": `![[${fullRef}]]` },
+		});
+		const frame = wrapper.createDiv({ cls: "slideflow-pdf-frame" });
+		const header = frame.createDiv({ cls: "slideflow-pdf-frame-header" });
+		header.createSpan({ cls: "slideflow-pdf-frame-title", text: title });
+		if (cleanSubpath) {
+			header.createSpan({
+				cls: "slideflow-pdf-frame-badge",
+				text: cleanSubpath.replace(/^#/, ""),
+			});
+		}
+
+		const body = frame.createDiv({ cls: "slideflow-pdf-frame-body" });
+		const comp = new Component();
+		this.addChild(comp);
+		this.zoomSlideComponent = comp;
+
+		await MarkdownRenderer.render(
+			this.appRef,
+			`![[${fullRef}]]`,
+			body,
+			sourcePath || this.currentSourcePath,
+			comp
+		);
+	}
+
+	/**
+	 * Opens a local PDF file outside the vault inside the fullscreen zoom overlay via a Blob URL.
+	 */
+	public async openLocalFilePdfZoom(localFsPath: string, pageHash: string = ""): Promise<void> {
+		if (!fs.existsSync(localFsPath)) {
+			throw new Error(`Local PDF not found: ${localFsPath}`);
+		}
+		const bytes = await fs.promises.readFile(localFsPath);
+		const blob = new Blob([bytes], { type: "application/pdf" });
+		const blobUrl = URL.createObjectURL(blob);
+
+		this.activeZoomIndex = -1;
+		this.ensureZoomOverlay(true);
+		this.cleanupZoomResources();
+		this.activePdfBlobUrl = blobUrl;
+
+		if (!this.zoomContentEl) return;
+		this.zoomContentEl.empty();
+
+		const cleanHash = pageHash && !pageHash.startsWith("#") ? `#${pageHash}` : pageHash;
+		const title = path.basename(localFsPath);
+
+		const wrapper = this.zoomContentEl.createDiv({
+			cls: "dynamic-slides-zoom-pdf",
+			attr: { "data-pdf-source": `${localFsPath}${cleanHash}` },
+		});
+		const frame = wrapper.createDiv({ cls: "slideflow-pdf-frame" });
+		const header = frame.createDiv({ cls: "slideflow-pdf-frame-header" });
+		header.createSpan({ cls: "slideflow-pdf-frame-title", text: title });
+		if (cleanHash) {
+			header.createSpan({
+				cls: "slideflow-pdf-frame-badge",
+				text: cleanHash.replace(/^#/, ""),
+			});
+		}
+
+		const body = frame.createDiv({ cls: "slideflow-pdf-frame-body is-external-pdf" });
+		const iframe = body.createEl("iframe", {
+			cls: "slideflow-pdf-iframe",
+			attr: {
+				src: `${blobUrl}${cleanHash}`,
+				title,
+			},
+		});
+		iframe.setAttribute("allowfullscreen", "true");
+	}
+
+	public openMediaZoom(index: number, animated: boolean = true) {
+		const zoomableElements = this.detectMediaElements();
+		if (index < 0 || index >= zoomableElements.length) {
+			this.closeMediaZoom(false);
+			return;
+		}
+		this.activeZoomIndex = index;
+		const targetMedia = zoomableElements[index];
+
+		// Embedded vault PDF (`![[xxx.pdf]]`): render live native Obsidian PDF.js viewer instead of cloning blank canvases!
+		const pdfEmbedEl = (
+			targetMedia.matches(".pdf-embed, .internal-embed[src$='.pdf' i], .internal-embed[src*='.pdf#' i]")
+				? targetMedia
+				: targetMedia.querySelector(".pdf-embed, .internal-embed[src$='.pdf' i], .internal-embed[src*='.pdf#' i]")
+		) as HTMLElement | null;
+
+		if (pdfEmbedEl) {
+			const rawSrc = (pdfEmbedEl.getAttribute("src") || pdfEmbedEl.getAttribute("alt") || "").trim();
+			if (rawSrc) {
+				const hashIdx = rawSrc.indexOf("#");
+				const filePart = hashIdx >= 0 ? rawSrc.slice(0, hashIdx) : rawSrc;
+				const subpath = hashIdx >= 0 ? rawSrc.slice(hashIdx) : "";
+				const title = filePart.split("/").pop() || filePart;
+				void this.openVaultPdfZoom(filePart, subpath, title, this.currentSourcePath, animated, true);
+				return;
+			}
+		}
+
+		this.ensureZoomOverlay(animated);
+		this.cleanupZoomResources();
 
 		if (this.zoomContentEl) {
 			this.zoomContentEl.empty();
-			const targetMedia = zoomableElements[index];
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
 
 			// Strip Obsidian's copy-code-button (which contains an <svg> icon!) BEFORE classifying media type
@@ -835,6 +996,7 @@ export class PresentationModal extends Component {
 
 	public closeMediaZoom(animated: boolean = true) {
 		this.hideSelectionToolbar();
+		this.cleanupZoomResources();
 		if (this.zoomOverlayEl) {
 			const elToClose = this.zoomOverlayEl;
 			this.zoomOverlayEl = null;
@@ -868,6 +1030,12 @@ export class PresentationModal extends Component {
 		const wasAnimating = this.currentScrollAnimId !== null;
 		if (wasAnimating) {
 			this.cancelScrollAnimation(true);
+		}
+
+		if (this.isMediaZoomActive() && this.activeZoomIndex === -1) {
+			// Link-opened zoom (e.g. clicked local PDF link): close cleanly and stay on slide
+			this.closeMediaZoom(true);
+			return true;
 		}
 
 		const mediaElements = this.detectMediaElements();
@@ -928,6 +1096,12 @@ export class PresentationModal extends Component {
 		const wasAnimating = this.currentScrollAnimId !== null;
 		if (wasAnimating) {
 			this.cancelScrollAnimation(true);
+		}
+
+		if (this.isMediaZoomActive() && this.activeZoomIndex === -1) {
+			// Link-opened zoom (e.g. clicked local PDF link): close cleanly and stay on slide
+			this.closeMediaZoom(true);
+			return true;
 		}
 
 		const mediaElements = this.detectMediaElements();
@@ -999,6 +1173,7 @@ export class PresentationModal extends Component {
 		enterFrom: 'start' | 'end' = 'start',
 		decoration?: SlideRenderDecoration
 	) {
+		this.currentSourcePath = sourcePath;
 		this.hideSelectionToolbar();
 		this.cancelScrollAnimation(false);
 		this.hasCompletedAllSteps = false;

@@ -1,4 +1,5 @@
 import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile } from "obsidian";
+import * as path from "path";
 import { parseMarkdownSections, findCurrentSectionNode, SectionNode } from "./parser";
 import { PresentationModal, SlideRenderDecoration } from "./modal";
 import { KeyboardNavigator } from "./keyboard";
@@ -35,13 +36,7 @@ export interface SlideFlowSettings {
 	blockDiffThreshold: number; // 0.1 to 0.8 (default 0.25 = 25%)
 	directCliEnabled: boolean; // optional direct CLI send (instead of clipboard)
 	directCliCommand: string; // command template containing {{COMMENTS}}
-	whisperServerUrl: string;
-	autoStartWhisperServer: boolean;
-	whisperPythonPath: string;
-	whisperScriptPath: string;
 	whisperModel: string;
-	whisperDevice: string;
-	whisperComputeType: string;
 	whisperLanguage: string;
 }
 
@@ -62,13 +57,7 @@ export const DEFAULT_SETTINGS: SlideFlowSettings = {
 	blockDiffThreshold: DEFAULT_BLOCK_DIFF_THRESHOLD,
 	directCliEnabled: false,
 	directCliCommand: DEFAULT_CLI_COMMAND,
-	whisperServerUrl: "http://127.0.0.1:3056",
-	autoStartWhisperServer: true,
-	whisperPythonPath: "python",
-	whisperScriptPath: "_agents/scripts-for-skills/whisper_dictation_server.py",
 	whisperModel: "medium",
-	whisperDevice: "cuda",
-	whisperComputeType: "float16",
 	whisperLanguage: "fr",
 };
 
@@ -120,21 +109,12 @@ export default class SlideFlowPlugin extends Plugin {
 		console.log("Loading SlideFlow plugin");
 		await this.loadSettings();
 
+		const pluginDir = this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`;
 		this.baselinesStore = new BaselinesStore(this.app);
-		this.reviewStore = new ReviewStore(
-			this.app,
-			this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`
-		);
-		this.reviewStore.setPersistenceEnabled(this.settings.directCliEnabled);
+		this.reviewStore = new ReviewStore(this.app, pluginDir);
 
-		this.voiceService = new VoiceDictationService(this.app, () => ({
-			serverUrl: this.settings.whisperServerUrl,
-			autoStartServer: this.settings.autoStartWhisperServer,
-			pythonPath: this.settings.whisperPythonPath,
-			scriptPath: this.settings.whisperScriptPath,
+		this.voiceService = new VoiceDictationService(this.app, pluginDir, () => ({
 			whisperModel: this.settings.whisperModel,
-			whisperDevice: this.settings.whisperDevice,
-			whisperComputeType: this.settings.whisperComputeType,
 			language: this.settings.whisperLanguage,
 		}));
 
@@ -251,13 +231,13 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!targetFile) {
 			const cleanLower = cleanPath.toLowerCase();
 			const noExt = cleanLower.replace(/\.md$/, "");
-			const allFiles = this.app.vault.getMarkdownFiles();
+			const allFiles = this.app.vault.getFiles();
 			targetFile =
 				allFiles.find(
 					(f) =>
 						f.path.toLowerCase() === cleanLower ||
-						f.basename.toLowerCase() === noExt ||
-						f.name.toLowerCase() === cleanLower
+						f.name.toLowerCase() === cleanLower ||
+						f.basename.toLowerCase() === noExt
 				) || null;
 		}
 		return targetFile instanceof TFile ? targetFile : null;
@@ -325,12 +305,6 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 	}
 
-	/**
-	 * Explicitly marks the current slide's diff as read in `_agents/unread_baselines.json`.
-	 * Called ONLY on:
-	 * 1. Saving a comment on that slide (`clearVisuallyNow = false` so additional comments can still see the diff)
-	 * 2. Pressing `Ctrl+Enter` on a slide (`clearVisuallyNow = true` -> immediately removes the diff on screen!)
-	 */
 	private async markCurrentSlideDiffRead(clearVisuallyNow: boolean): Promise<boolean> {
 		const ctx = this.activeDiffContext;
 		const node = this.currentNode;
@@ -367,7 +341,6 @@ export default class SlideFlowPlugin extends Plugin {
 				ctx.deletedSectionsHash = null;
 			}
 
-			// Recompute descendant dirty node IDs cleanly
 			ctx.descendantDirtyNodeIds = new Set<string>();
 			for (const n of this.flatNodes) {
 				const info = ctx.slideDiffs.get(n.id);
@@ -422,7 +395,7 @@ export default class SlideFlowPlugin extends Plugin {
 				console.error("[SlideFlow] Failed reading unread_baselines.json:", err);
 				new Notice(`SlideFlow: failed reading baselines (${err.message})`);
 			}),
-			this.reviewStore.initForSession(this.settings.directCliEnabled).catch((err) => {
+			this.reviewStore.loadFromDisk().catch((err) => {
 				console.error("[SlideFlow] Failed reading pending_reviews.json:", err);
 			}),
 		]);
@@ -476,6 +449,9 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
 		};
+		this.activeModal.onExternalPdfLinkClickCallback = (href: string) => {
+			void this.handleExternalPdfLinkClick(href);
+		};
 		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
 			if (targetNode) {
@@ -520,6 +496,11 @@ export default class SlideFlowPlugin extends Plugin {
 			onDeleteComment: async (commentId: string) => {
 				await this.reviewStore.deleteComment(commentId);
 				this.refreshAllActiveUI();
+			},
+			onClearAll: async () => {
+				const count = await this.reviewStore.clearAll();
+				this.refreshAllActiveUI();
+				new Notice(`Review queue cleared (${count} comment${count > 1 ? "s" : ""}).`);
 			},
 			onPrimaryAction: async () => {
 				if (this.settings.directCliEnabled) {
@@ -590,21 +571,24 @@ export default class SlideFlowPlugin extends Plugin {
 		this.requestClosePresentation();
 	}
 
+	/**
+	 * Comments are ALWAYS persisted across sessions in both modes (never auto-deleted on exit).
+	 * - Direct CLI mode: if unsent comments exist, prompts Ctrl+Enter to send & exit (auto-clears on exit 0),
+	 *   Esc to return, or click "Exit & Keep" to close while keeping comments saved.
+	 * - Clipboard mode: if uncopied comments exist, prompts Ctrl+Enter to copy & exit,
+	 *   Esc to return, or click "Exit & Keep" to close while keeping comments saved until manual Clear queue.
+	 */
 	private requestClosePresentation(): void {
-		if (!this.reviewStore.hasUncopiedOrUnsent(this.inFlightCliCommentIds)) {
-			if (!this.settings.directCliEnabled) {
-				this.reviewStore.resetInMemory();
-			}
-			this.closePresentation();
-			return;
-		}
-
 		if (!this.exitConfirmModal) {
 			this.closePresentation();
 			return;
 		}
 
 		if (this.settings.directCliEnabled) {
+			if (!this.reviewStore.hasUnsentComments(this.inFlightCliCommentIds)) {
+				this.closePresentation();
+				return;
+			}
 			const unsentCount = this.reviewStore
 				.getAll()
 				.filter((c) => !this.inFlightCliCommentIds.has(c.id)).length;
@@ -612,12 +596,12 @@ export default class SlideFlowPlugin extends Plugin {
 
 			this.exitConfirmModal.open({
 				title: `Unsent comments (${unsentCount})`,
-				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments stay saved until ${cliName} succeeds.`,
+				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments stay saved and clear automatically once ${cliName} succeeds.`,
 				confirmLabelHtml: `Send & Exit <strong>Ctrl+↵</strong>`,
 				confirmVariant: "primary",
 				confirmShortcut: "Ctrl+Enter",
 				cancelLabelHtml: `Return <strong>Esc</strong>`,
-				discardLabel: "Discard & Exit",
+				discardLabel: "Exit & Keep",
 				onConfirm: () => {
 					const launched = this.sendPendingCommentsToCli();
 					if (launched) {
@@ -627,43 +611,43 @@ export default class SlideFlowPlugin extends Plugin {
 				onCancel: () => {
 					// Stay in presentation
 				},
-				onDiscard: async () => {
-					await this.reviewStore.discardAll();
-					this.closePresentation();
-				},
-			});
-		} else {
-			const count = this.reviewStore.getCount();
-			this.exitConfirmModal.open({
-				title: `Uncopied comments (${count})`,
-				message: `You have ${count} review comment${count > 1 ? "s" : ""} not copied yet. Comments are cleared when you leave.`,
-				confirmLabelHtml: `Copy & Exit <strong>Ctrl+↵</strong>`,
-				confirmVariant: "primary",
-				confirmShortcut: "Ctrl+Enter",
-				cancelLabelHtml: `Return <strong>Esc</strong>`,
-				discardLabel: "Discard & Exit",
-				onConfirm: async () => {
-					await this.copyPendingCommentsExport(true);
-					this.reviewStore.resetInMemory();
-					this.closePresentation();
-				},
-				onCancel: () => {
-					// Stay in presentation
-				},
 				onDiscard: () => {
-					this.reviewStore.resetInMemory();
+					// Exit cleanly without deleting persisted comments
 					this.closePresentation();
 				},
 			});
+			return;
 		}
+
+		// Clipboard mode
+		if (!this.reviewStore.hasUncopiedComments()) {
+			this.closePresentation();
+			return;
+		}
+
+		const count = this.reviewStore.getCount();
+		this.exitConfirmModal.open({
+			title: `Uncopied comments (${count})`,
+			message: `Copy ${count} review comment${count > 1 ? "s" : ""} to clipboard before closing? Comments stay saved in the queue until you click Clear queue.`,
+			confirmLabelHtml: `Copy & Exit <strong>Ctrl+↵</strong>`,
+			confirmVariant: "primary",
+			confirmShortcut: "Ctrl+Enter",
+			cancelLabelHtml: `Return <strong>Esc</strong>`,
+			discardLabel: "Exit & Keep",
+			onConfirm: async () => {
+				await this.copyPendingCommentsExport(true);
+				this.closePresentation();
+			},
+			onCancel: () => {
+				// Stay in presentation
+			},
+			onDiscard: () => {
+				// Exit cleanly without deleting persisted comments
+				this.closePresentation();
+			},
+		});
 	}
 
-	/**
-	 * Behavior of `Ctrl+Enter` on a slide:
-	 * - Always validates the current slide's diff & immediately clears its diff highlight on screen.
-	 * - In Direct CLI mode: ONLY validates the slide diff (does NOT invoke CLI or copy).
-	 * - In Clipboard mode: ALSO copies all current session comments (XML `/one-shot`) to clipboard.
-	 */
 	private async handleSlideCtrlEnter(): Promise<void> {
 		const validatedDiff = await this.markCurrentSlideDiffRead(true);
 
@@ -797,6 +781,8 @@ export default class SlideFlowPlugin extends Plugin {
 			startWithVoice,
 			anchorRect: extracted.anchorRect || null,
 			highlightRange,
+			slideContentEl: this.activeModal.getContentElement(),
+			isMediaZoomActive: this.activeModal.isMediaZoomActive(),
 		});
 	}
 
@@ -834,7 +820,6 @@ export default class SlideFlowPlugin extends Plugin {
 				commentText,
 			});
 
-			// Commenting on a diffed slide marks its diff as read in unread_baselines.json
 			void this.markCurrentSlideDiffRead(false);
 
 			const snippet = commentText.length > 52 ? commentText.slice(0, 52) + "…" : commentText;
@@ -860,7 +845,7 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private async copyPendingCommentsExport(includeOneShotPrefix: boolean): Promise<void> {
-		if (this.settings.directCliEnabled && !this.activeModal) {
+		if (!this.activeModal) {
 			await this.reviewStore.loadFromDisk();
 		}
 		const count = this.reviewStore.getCount();
@@ -877,11 +862,6 @@ export default class SlideFlowPlugin extends Plugin {
 		new Notice(`Copied ${count} comment(s) (XML /one-shot).`);
 	}
 
-	/**
-	 * Launches the configured CLI command in the background with XML comments.
-	 * Comments remain persisted in `pending_reviews.json` until exit code === 0,
-	 * even if the presentation is closed immediately afterward!
-	 */
 	private sendPendingCommentsToCli(): boolean {
 		const toSend = this.reviewStore
 			.getAll()
@@ -899,7 +879,6 @@ export default class SlideFlowPlugin extends Plugin {
 		const formatted = this.reviewStore.formatExport(true, toSend);
 		let cliDisplayName = "CLI";
 
-		// Validate command template before launching so syntax errors fail fast visibly
 		try {
 			const parsed = parseCommandTemplate(this.settings.directCliCommand, formatted);
 			cliDisplayName = parsed.displayName;
@@ -969,7 +948,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private async jumpAndEditComment(comment: ReviewComment): Promise<void> {
 		await this.jumpToCommentTarget(comment);
-		if (!this.commentModal || !this.currentNode) return;
+		if (!this.commentModal || !this.currentNode || !this.activeModal) return;
 
 		const existingComments = this.reviewStore.getForSlide(
 			comment.notePath,
@@ -987,6 +966,8 @@ export default class SlideFlowPlugin extends Plugin {
 			anchorRect: null,
 			highlightRange: null,
 			editingComment: comment,
+			slideContentEl: this.activeModal.getContentElement(),
+			isMediaZoomActive: this.activeModal.isMediaZoomActive(),
 		});
 	}
 
@@ -1036,6 +1017,44 @@ export default class SlideFlowPlugin extends Plugin {
 		this.prevSlide('start');
 	}
 
+	private async handleExternalPdfLinkClick(fileUrl: string): Promise<void> {
+		if (!this.activeModal) return;
+		try {
+			const hashIdx = fileUrl.indexOf("#");
+			const basePart = hashIdx >= 0 ? fileUrl.slice(0, hashIdx) : fileUrl;
+			const hashPart = hashIdx >= 0 ? fileUrl.slice(hashIdx) : "";
+
+			let decodedPath = decodeURIComponent(basePart.replace(/^file:\/\//i, ""));
+			if (process.platform === "win32") {
+				decodedPath = decodedPath.replace(/^\/([a-zA-Z]:)/, "$1").replace(/\//g, "\\");
+			}
+
+			// If this local PDF lives inside the vault, open it through Obsidian's native PDF.js viewer!
+			const vaultBase = this.reviewStore.getVaultBasePath();
+			if (vaultBase) {
+				const rel = path.relative(vaultBase, decodedPath);
+				if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+					const vaultRel = rel.replace(/\\/g, "/");
+					const vaultFile = this.app.vault.getAbstractFileByPath(vaultRel);
+					if (vaultFile instanceof TFile && vaultFile.extension.toLowerCase() === "pdf") {
+						await this.activeModal.openVaultPdfZoom(
+							vaultFile.path,
+							hashPart,
+							vaultFile.name,
+							this.activeSourcePath
+						);
+						return;
+					}
+				}
+			}
+
+			await this.activeModal.openLocalFilePdfZoom(decodedPath, hashPart);
+		} catch (err: any) {
+			console.error("[SlideFlow] Failed opening local PDF:", err);
+			new Notice(`SlideFlow PDF error: ${err?.message || String(err)}`);
+		}
+	}
+
 	private async handleInternalLinkClick(linkpath: string) {
 		let decodedLink = linkpath;
 		try {
@@ -1064,6 +1083,19 @@ export default class SlideFlowPlugin extends Plugin {
 
 		const targetFile = this.resolveLinkTargetFile(decodedLink, this.activeSourcePath);
 		if (targetFile && targetFile instanceof TFile) {
+			// Local vault PDF clicked -> open directly in SlideFlow's fullscreen PDF zoom viewer!
+			if (targetFile.extension.toLowerCase() === "pdf") {
+				const hashIdx = decodedLink.indexOf("#");
+				const subpath = hashIdx >= 0 ? decodedLink.slice(hashIdx) : "";
+				await this.activeModal?.openVaultPdfZoom(
+					targetFile.path,
+					subpath,
+					targetFile.name,
+					this.activeSourcePath
+				);
+				return;
+			}
+
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
 			const activeFileBasename = (currentFile instanceof TFile)
 				? currentFile.basename
@@ -1402,14 +1434,13 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Send comments directly to CLI (instead of clipboard)")
 			.setDesc(
-				"When enabled, Ctrl+Enter on a slide only validates its diff. Pressing Ctrl+Enter on exit or inside the Review Queue (R) runs the command below with the XML /one-shot payload, and comments stay persisted until the command exits with code 0."
+				"When enabled, Ctrl+Enter on a slide only validates its diff. Pressing Ctrl+Enter on exit or inside the Review Queue (R) runs the command below with the XML /one-shot payload, and sent comments are automatically cleared once the command exits with code 0. When disabled, comments persist until manually cleared via Clear queue."
 			)
 			.addToggle(toggle =>
 				toggle
 					.setValue(this.plugin.settings.directCliEnabled)
 					.onChange(async (val) => {
 						this.plugin.settings.directCliEnabled = val;
-						this.plugin.reviewStore.setPersistenceEnabled(val);
 						await this.plugin.saveSettings();
 					})
 			);
@@ -1431,62 +1462,11 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 				text.inputEl.addClass("slideflow-settings-cli-textarea");
 			});
 
-		containerEl.createEl("h3", { text: "Local Faster-Whisper GPU Voice Dictation (V / Ctrl+M)" });
-
-		new Setting(containerEl)
-			.setName("Auto-start local Faster-Whisper GPU server")
-			.setDesc("Silently warms up whisper_dictation_server.py in the background when SlideFlow opens.")
-			.addToggle(toggle =>
-				toggle
-					.setValue(this.plugin.settings.autoStartWhisperServer)
-					.onChange(async (val) => {
-						this.plugin.settings.autoStartWhisperServer = val;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Whisper server URL")
-			.setDesc("Local HTTP endpoint (default: http://127.0.0.1:3056).")
-			.addText(text =>
-				text
-					.setPlaceholder("http://127.0.0.1:3056")
-					.setValue(this.plugin.settings.whisperServerUrl)
-					.onChange(async (val) => {
-						this.plugin.settings.whisperServerUrl = val.trim() || "http://127.0.0.1:3056";
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Whisper server script path")
-			.setDesc("Vault-relative or absolute path to whisper_dictation_server.py.")
-			.addText(text =>
-				text
-					.setPlaceholder("_agents/scripts-for-skills/whisper_dictation_server.py")
-					.setValue(this.plugin.settings.whisperScriptPath)
-					.onChange(async (val) => {
-						this.plugin.settings.whisperScriptPath = val.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Python executable")
-			.setDesc("Python command with faster-whisper installed (default: python).")
-			.addText(text =>
-				text
-					.setPlaceholder("python")
-					.setValue(this.plugin.settings.whisperPythonPath)
-					.onChange(async (val) => {
-						this.plugin.settings.whisperPythonPath = val.trim() || "python";
-						await this.plugin.saveSettings();
-					})
-			);
+		containerEl.createEl("h3", { text: "Voice Dictation (V / Ctrl+M)" });
 
 		new Setting(containerEl)
 			.setName("Whisper model")
-			.setDesc("Local GPU CUDA FP16 model (medium recommended).")
+			.setDesc("Managed automatically by SlideFlow (runtime, CUDA GPU detection, and model download happen automatically on first use).")
 			.addDropdown(dd =>
 				dd
 					.addOption("tiny", "tiny")
@@ -1503,7 +1483,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Dictation language")
-			.setDesc("ISO code (fr, en) or auto.")
+			.setDesc("ISO language code (fr, en) or automatic detection.")
 			.addDropdown(dd =>
 				dd
 					.addOption("fr", "French (fr)")

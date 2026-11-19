@@ -23,6 +23,8 @@ export interface CommentModalContext {
 	anchorRect?: AnchorRect | null;
 	highlightRange?: Range | null;
 	editingComment?: ReviewComment | null;
+	slideContentEl?: HTMLElement | null;
+	isMediaZoomActive?: boolean;
 }
 
 export interface CommentModalCallbacks {
@@ -80,9 +82,43 @@ export class CommentOverlayModal {
 		}
 
 		const isSelectionAnchored = Boolean(ctx.anchorRect);
+		let placementClass: "is-selection-anchored" | "is-below-slide" | "is-right-docked" = "is-right-docked";
+		let belowSlideGeom: { left: number; top: number; width: number } | null = null;
+
+		if (isSelectionAnchored) {
+			placementClass = "is-selection-anchored";
+		} else if (!ctx.isMediaZoomActive && ctx.slideContentEl) {
+			const slideRect = ctx.slideContentEl.getBoundingClientRect();
+			const footerReserve = 76;
+			const neededHeight = ctx.existingComments.length > 0 ? 225 : 168;
+			const spaceBelow = window.innerHeight - slideRect.bottom - footerReserve;
+			if (slideRect.height > 0 && spaceBelow >= neededHeight) {
+				placementClass = "is-below-slide";
+				const cardWidth = Math.min(560, Math.max(360, Math.round(slideRect.width)));
+				const centerX = slideRect.left + slideRect.width / 2;
+				const left = Math.max(16, Math.min(window.innerWidth - cardWidth - 16, centerX - cardWidth / 2));
+				belowSlideGeom = {
+					left: Math.round(left),
+					top: Math.round(slideRect.bottom + 14),
+					width: cardWidth,
+				};
+			}
+		}
+
+		if (placementClass === "is-right-docked") {
+			this.parentEl.addClass("is-comment-docked-right");
+		} else {
+			this.parentEl.removeClass("is-comment-docked-right");
+		}
+
 		this.cardEl = this.parentEl.createDiv({
-			cls: `slideflow-comment-card ${isSelectionAnchored ? "is-selection-anchored" : "is-left-docked"}`,
+			cls: `slideflow-comment-card ${placementClass}`,
 		});
+		if (belowSlideGeom) {
+			this.cardEl.style.left = `${belowSlideGeom.left}px`;
+			this.cardEl.style.top = `${belowSlideGeom.top}px`;
+			this.cardEl.style.width = `${belowSlideGeom.width}px`;
+		}
 		this.cardEl.addEventListener("click", (evt) => evt.stopPropagation());
 		this.cardEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
 
@@ -411,6 +447,7 @@ export class CommentOverlayModal {
 	}
 
 	public close(invokeOnCloseCallback: boolean = true): void {
+		this.parentEl.removeClass("is-comment-docked-right");
 		if (!this.isOpenFlag && !this.cardEl) return;
 		this.isOpenFlag = false;
 		this.stopRecTimer();

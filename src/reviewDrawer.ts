@@ -5,8 +5,12 @@
  * - ArrowUp / ArrowDown : move selection across comments
  * - Enter               : jump to slide AND open the selected comment for editing
  * - Delete              : open inline confirmation modal (Enter confirms, Esc cancels)
- * - Ctrl+Enter          : copy XML (clipboard mode) or launch CLI & clean on exit 0 (direct CLI mode)
+ * - Ctrl+Enter          : copy XML (clipboard mode) or launch CLI & auto-clear on exit 0 (direct CLI mode)
  * - Esc / R             : close drawer
+ *
+ * Footer buttons:
+ * - Clipboard mode : Copy /one-shot (XML) + Clear queue (manual clear with confirmation)
+ * - Direct CLI mode: Send to <cli> (auto-clears on successful exit code 0)
  */
 
 import { ConfirmOverlayModal } from "./confirmModal";
@@ -22,6 +26,7 @@ export interface ReviewDrawerOpenOptions {
 export interface ReviewDrawerCallbacks {
 	onEditComment: (comment: ReviewComment) => void | Promise<void>;
 	onDeleteComment: (commentId: string) => Promise<void>;
+	onClearAll: () => Promise<void>;
 	onPrimaryAction: () => Promise<void>;
 	onClose: () => void;
 }
@@ -35,6 +40,7 @@ export class ReviewDrawer {
 	private titleEl: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
 	private primaryBtnEl: HTMLButtonElement | null = null;
+	private clearBtnEl: HTMLButtonElement | null = null;
 
 	private isOpenFlag: boolean = false;
 	private directCliEnabled: boolean = false;
@@ -105,13 +111,28 @@ export class ReviewDrawer {
 			cls: "slideflow-drawer-primary-btn",
 			attr: { type: "button" },
 		});
-		this.updateHeaderAndFooter();
 		this.primaryBtnEl.addEventListener("click", async (evt) => {
 			evt.stopPropagation();
 			if (this.comments.length === 0) return;
 			await this.callbacks.onPrimaryAction();
 		});
 
+		// In Clipboard mode, comments are manually cleared via "Clear queue"
+		if (!this.directCliEnabled) {
+			this.clearBtnEl = footerEl.createEl("button", {
+				cls: "slideflow-drawer-danger-btn",
+				text: "Clear queue",
+				attr: { type: "button", title: "Remove all comments from the review queue" },
+			});
+			this.clearBtnEl.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.promptClearAll();
+			});
+		} else {
+			this.clearBtnEl = null;
+		}
+
+		this.updateHeaderAndFooter();
 		window.addEventListener("keydown", this.boundKeyHandler, true);
 	}
 
@@ -158,6 +179,9 @@ export class ReviewDrawer {
 				this.primaryBtnEl.innerHTML = `Copy /one-shot (XML) <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
 			}
+		}
+		if (this.clearBtnEl) {
+			this.clearBtnEl.disabled = this.comments.length === 0;
 		}
 	}
 
@@ -314,11 +338,38 @@ export class ReviewDrawer {
 		});
 	}
 
+	private promptClearAll(): void {
+		if (this.comments.length === 0) return;
+		const n = this.comments.length;
+		this.confirmModal.open({
+			title: `Clear all ${n} comment${n > 1 ? "s" : ""}?`,
+			message: `This will permanently remove all ${n} comment${n > 1 ? "s" : ""} from the review queue.`,
+			confirmLabelHtml: `Clear queue <strong>↵</strong>`,
+			confirmVariant: "danger",
+			confirmShortcut: "Enter",
+			cancelLabelHtml: `Cancel <strong>Esc</strong>`,
+			onConfirm: async () => {
+				await this.callbacks.onClearAll();
+				this.comments = [];
+				this.selectedIndex = -1;
+				this.renderList();
+				this.updateHeaderAndFooter();
+			},
+			onCancel: () => {
+				// Keep drawer open
+			},
+		});
+	}
+
 	private handleKeyDown(evt: KeyboardEvent): void {
 		if (!this.isOpenFlag) return;
 		if (this.confirmModal.isOpen()) return;
 
-		if (evt.key === "Escape" || evt.code === "Escape" || (!evt.ctrlKey && !evt.metaKey && !evt.altKey && evt.key.toLowerCase() === "r")) {
+		if (
+			evt.key === "Escape" ||
+			evt.code === "Escape" ||
+			(!evt.ctrlKey && !evt.metaKey && !evt.altKey && evt.key.toLowerCase() === "r")
+		) {
 			evt.preventDefault();
 			evt.stopPropagation();
 			this.close(true);
@@ -389,6 +440,7 @@ export class ReviewDrawer {
 		this.titleEl = null;
 		this.listEl = null;
 		this.primaryBtnEl = null;
+		this.clearBtnEl = null;
 		this.flatRows = [];
 		this.selectedIndex = -1;
 		if (invokeCallback) {
