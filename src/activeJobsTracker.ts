@@ -65,11 +65,51 @@ function formatHHMM(iso: string): string {
 	return `${hh}:${mm}`;
 }
 
-function formatNotesLabel(notes: string[]): string {
-	if (!notes || notes.length === 0) return "Revue SlideFlow";
-	const unique = Array.from(new Set(notes.filter(Boolean)));
-	if (unique.length === 1) return unique[0];
-	return `${unique[0]} (+${unique.length - 1} note${unique.length - 1 > 1 ? "s" : ""})`;
+function getDashboardMatchKeys(dashboardPath: string): Set<string> {
+	const norm = (dashboardPath || "🎯 Projets.md").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+	const baseWithExt = norm.split("/").pop() || norm;
+	const baseNoExt = baseWithExt.replace(/\.md$/i, "");
+	const normNoExt = norm.replace(/\.md$/i, "");
+	return new Set(
+		[norm, normNoExt, baseWithExt, baseNoExt]
+			.map((s) => s.trim().toLowerCase())
+			.filter(Boolean)
+	);
+}
+
+export function isDashboardNoteMatch(
+	notePathOrTitle: string,
+	dashboardPath: string
+): boolean {
+	if (!notePathOrTitle) return false;
+	const keys = getDashboardMatchKeys(dashboardPath);
+	const norm = notePathOrTitle.replace(/\\/g, "/").replace(/^\/+/, "").trim().toLowerCase();
+	const noExt = norm.replace(/\.md$/i, "");
+	return keys.has(norm) || keys.has(noExt);
+}
+
+export function orderNotesWithDashboardLast(
+	notes: string[],
+	dashboardPath: string = "🎯 Projets.md"
+): string[] {
+	const unique = Array.from(new Set((notes || []).filter(Boolean)));
+	const regular: string[] = [];
+	const dashboard: string[] = [];
+	for (const n of unique) {
+		if (isDashboardNoteMatch(n, dashboardPath)) {
+			dashboard.push(n);
+		} else {
+			regular.push(n);
+		}
+	}
+	return [...regular, ...dashboard];
+}
+
+function formatNotesLabel(notes: string[], dashboardPath: string = "🎯 Projets.md"): string {
+	const ordered = orderNotesWithDashboardLast(notes, dashboardPath);
+	if (ordered.length === 0) return "Revue SlideFlow";
+	if (ordered.length === 1) return ordered[0];
+	return `${ordered[0]} (+${ordered.length - 1} note${ordered.length - 1 > 1 ? "s" : ""})`;
 }
 
 export function pruneAndHealJobs(jobs: SlideFlowCliJob[], nowMs: number = Date.now()): {
@@ -111,7 +151,10 @@ export function pruneAndHealJobs(jobs: SlideFlowCliJob[], nowMs: number = Date.n
 	return { jobs: kept, changed };
 }
 
-export function renderActiveJobsMarkdownBlock(jobs: SlideFlowCliJob[]): string {
+export function renderActiveJobsMarkdownBlock(
+	jobs: SlideFlowCliJob[],
+	dashboardPath: string = "🎯 Projets.md"
+): string {
 	if (!jobs || jobs.length === 0) return "";
 
 	const running = jobs.filter((j) => j.status === "running");
@@ -122,7 +165,7 @@ export function renderActiveJobsMarkdownBlock(jobs: SlideFlowCliJob[]): string {
 	if (running.length > 0) {
 		lines.push(`> 🤖 **Commandes \`agy\` en cours (${running.length})** :`);
 		for (const j of running) {
-			const label = formatNotesLabel(j.notes);
+			const label = formatNotesLabel(j.notes, dashboardPath);
 			const modelPart = j.model ? ` · \`${j.model}\`` : "";
 			const pidPart = j.pid ? ` · PID \`${j.pid}\`` : "";
 			const timeStr = formatHHMM(j.startedAt);
@@ -135,7 +178,7 @@ export function renderActiveJobsMarkdownBlock(jobs: SlideFlowCliJob[]): string {
 	}
 
 	for (const j of recent) {
-		const label = formatNotesLabel(j.notes);
+		const label = formatNotesLabel(j.notes, dashboardPath);
 		const modelPart = j.model ? ` · \`${j.model}\`` : "";
 		const finStr = formatHHMM(j.finishedAt || j.startedAt);
 		if (j.status === "done") {
@@ -212,13 +255,55 @@ export class ActiveJobsTracker {
 		await adapter.write(ACTIVE_JOBS_FILE_PATH, JSON.stringify(payload, null, 2));
 	}
 
+	public async orderNotesForJob(
+		comments: Array<{ notePath: string; noteTitle?: string; stackDepth?: number }>
+	): Promise<string[]> {
+		const dashboardPath = await this.resolveDashboardVaultPath();
+		const byNote = new Map<
+			string,
+			{ label: string; isDashboard: boolean; minDepth: number; firstIdx: number }
+		>();
+
+		comments.forEach((c, idx) => {
+			const label = (c.noteTitle || c.notePath || "").trim();
+			if (!label) return;
+			const key = (c.notePath || label).replace(/\\/g, "/").toLowerCase();
+			const isDash =
+				isDashboardNoteMatch(c.notePath, dashboardPath) ||
+				isDashboardNoteMatch(label, dashboardPath);
+			const depth = typeof c.stackDepth === "number" ? c.stackDepth : 999;
+
+			const existing = byNote.get(key);
+			if (!existing) {
+				byNote.set(key, { label, isDashboard: isDash, minDepth: depth, firstIdx: idx });
+			} else if (depth < existing.minDepth) {
+				existing.minDepth = depth;
+			}
+		});
+
+		const sorted = Array.from(byNote.values()).sort((a, b) => {
+			// Configured Project File (e.g. 🎯 Projets) ALWAYS goes last (inside +X notes)
+			if (a.isDashboard !== b.isDashboard) {
+				return a.isDashboard ? 1 : -1;
+			}
+			// Lowest navigation depth first (Master Project Note before sub-notes)
+			if (a.minDepth !== b.minDepth) {
+				return a.minDepth - b.minDepth;
+			}
+			// First-seen tie-breaker
+			return a.firstIdx - b.firstIdx;
+		});
+
+		return sorted.map((e) => e.label);
+	}
+
 	private async updateDashboardNote(jobs: SlideFlowCliJob[]): Promise<void> {
 		const dashboardPath = await this.resolveDashboardVaultPath();
 		const targetFile = this.app.vault.getAbstractFileByPath(dashboardPath);
 		if (!(targetFile instanceof TFile)) return;
 
 		const original = (await this.app.vault.read(targetFile)).replace(/\r\n/g, "\n");
-		const block = renderActiveJobsMarkdownBlock(jobs);
+		const block = renderActiveJobsMarkdownBlock(jobs, dashboardPath);
 		const markerRe = new RegExp(
 			`\\n?${JOBS_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${JOBS_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
 			"g"

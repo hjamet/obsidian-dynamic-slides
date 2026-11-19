@@ -24,6 +24,7 @@ export interface ReviewComment {
 	noteTitle: string;
 	sectionHeading: string;
 	sectionLevel: number;
+	stackDepth?: number; // DocumentStack navigation depth (0 = initial note, 1 = sub-note / project clicked from dashboard, etc.)
 	lineStart: number; // 1-indexed
 	lineEnd: number; // 1-indexed
 	scopeType?: CommentScopeType;

@@ -944,6 +944,7 @@ export default class SlideFlowPlugin extends Plugin {
 				noteTitle,
 				sectionHeading: this.currentNode.title,
 				sectionLevel: this.currentNode.level,
+				stackDepth: this.documentStack.length,
 				lineStart: this.currentNode.lineStart + 1,
 				lineEnd: this.currentNode.lineEnd + 1,
 				scopeType: ctx?.scopeType || "viewport",
@@ -1036,7 +1037,7 @@ export default class SlideFlowPlugin extends Plugin {
 		const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 		const startedAt = new Date().toISOString();
 		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
-		const noteTitles = Array.from(new Set(toSend.map((c) => c.noteTitle || c.notePath)));
+		const noteTitles = await this.activeJobsTracker.orderNotesForJob(toSend);
 		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
 
 		// Immediately move this batch into WIP so the visible queue is clean for the next project!
