@@ -4,6 +4,9 @@ import * as path from "path";
 import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
+import { applyPersistentCommentHighlights } from "./commentHighlighter";
+import { AnchorRect } from "./contextExtractor";
+import { ReviewComment } from "./reviewStore";
 
 export const SCROLL_PHASE = -1;
 
@@ -62,6 +65,8 @@ export class PresentationModal extends Component {
 	public onOpenQueueClickCallback?: () => void;
 	public onCopyOneShotClickCallback?: () => void;
 	public onSelectionCommentCallback?: (range: Range, startWithVoice: boolean) => void;
+	public onHighlightCommentClickCallback?: (commentId: string, anchorRect: AnchorRect) => void;
+	public onMediaZoomOpenedCallback?: () => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -249,6 +254,23 @@ export class PresentationModal extends Component {
 			}
 
 			const target = evt.target as HTMLElement;
+
+			const commentMarkEl = target.closest("mark.slideflow-comment-mark") as HTMLElement | null;
+			if (commentMarkEl) {
+				const commentId = commentMarkEl.getAttribute("data-comment-id");
+				if (commentId) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					const r = commentMarkEl.getBoundingClientRect();
+					this.onHighlightCommentClickCallback?.(commentId, {
+						left: r.left,
+						top: r.top,
+						right: r.right,
+						bottom: r.bottom,
+					});
+					return;
+				}
+			}
 
 			const childHeadingEl = target.closest('.dynamic-slides-child-heading') as HTMLElement;
 			if (childHeadingEl) {
@@ -736,6 +758,22 @@ export class PresentationModal extends Component {
 					return;
 				}
 				const target = evt.target as HTMLElement;
+				const commentMarkEl = target.closest("mark.slideflow-comment-mark") as HTMLElement | null;
+				if (commentMarkEl) {
+					const commentId = commentMarkEl.getAttribute("data-comment-id");
+					if (commentId) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						const r = commentMarkEl.getBoundingClientRect();
+						this.onHighlightCommentClickCallback?.(commentId, {
+							left: r.left,
+							top: r.top,
+							right: r.right,
+							bottom: r.bottom,
+						});
+						return;
+					}
+				}
 				const linkEl = target.closest(".internal-link") as HTMLElement | null;
 				if (linkEl) {
 					const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href");
@@ -991,6 +1029,16 @@ export class PresentationModal extends Component {
 				wrapper.appendChild(clone);
 				enhanceMermaidSvgElements(wrapper);
 			}
+			this.onMediaZoomOpenedCallback?.();
+		}
+	}
+
+	public applyCommentHighlights(comments: ReviewComment[]): void {
+		if (this.contentEl) {
+			applyPersistentCommentHighlights(this.contentEl, comments);
+		}
+		if (this.zoomContentEl && this.isMediaZoomActive()) {
+			applyPersistentCommentHighlights(this.zoomContentEl, comments);
 		}
 	}
 

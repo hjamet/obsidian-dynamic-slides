@@ -1421,6 +1421,32 @@ body.is-dynamic-slides-active {
 	color: inherit;
 }
 
+/* Persistent clickable highlight for saved selection comments (amber — distinct from green/red diffs) */
+mark.slideflow-comment-mark {
+	background-color: rgba(250, 204, 21, 0.28) !important;
+	color: inherit !important;
+	border-bottom: 2px solid rgba(217, 119, 6, 0.6);
+	border-radius: 3px;
+	padding: 0 2px;
+	cursor: pointer !important;
+	transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+mark.slideflow-comment-mark:hover {
+	background-color: rgba(250, 204, 21, 0.48) !important;
+	border-bottom-color: #d97706;
+}
+
+.theme-dark mark.slideflow-comment-mark {
+	background-color: rgba(250, 204, 21, 0.2) !important;
+	border-bottom-color: rgba(251, 191, 36, 0.65);
+}
+
+.theme-dark mark.slideflow-comment-mark:hover {
+	background-color: rgba(250, 204, 21, 0.36) !important;
+	border-bottom-color: #fbbf24;
+}
+
 .dynamic-slides-overlay {
 	--sf-diff-ins-bg: #dcfce7;
 	--sf-diff-ins-fg: #166534;

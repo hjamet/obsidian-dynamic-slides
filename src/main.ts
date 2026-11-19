@@ -12,6 +12,7 @@ import {
 } from "./diffEngine";
 import { BaselinesStore, normalizeVaultPath } from "./baselinesStore";
 import {
+	AnchorRect,
 	ExtractedCommentContext,
 	extractSelectionContext,
 	extractVisibleSlideContext,
@@ -27,7 +28,12 @@ import {
 	getCliDisplayName,
 	parseCommandTemplate,
 	runCliCommand,
+	templateIncludesOneShot,
 } from "./cliRunner";
+import {
+	ActiveJobsTracker,
+	extractModelLabelFromCommand,
+} from "./activeJobsTracker";
 
 export interface SlideFlowSettings {
 	transitionDuration: number; // in seconds
@@ -92,6 +98,7 @@ export default class SlideFlowPlugin extends Plugin {
 	private baselinesStore!: BaselinesStore;
 	public reviewStore!: ReviewStore;
 	private voiceService!: VoiceDictationService;
+	private activeJobsTracker!: ActiveJobsTracker;
 
 	private rootNode: SectionNode | null = null;
 	private flatNodes: SectionNode[] = [];
@@ -112,6 +119,16 @@ export default class SlideFlowPlugin extends Plugin {
 		const pluginDir = this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`;
 		this.baselinesStore = new BaselinesStore(this.app);
 		this.reviewStore = new ReviewStore(this.app, pluginDir);
+		this.activeJobsTracker = new ActiveJobsTracker(this.app, pluginDir);
+
+		this.app.workspace.onLayoutReady(() => {
+			void this.activeJobsTracker.refreshAndSync();
+		});
+		this.registerInterval(
+			window.setInterval(() => {
+				void this.activeJobsTracker.refreshAndSync();
+			}, 30000)
+		);
 
 		this.voiceService = new VoiceDictationService(this.app, pluginDir, () => ({
 			whisperModel: this.settings.whisperModel,
@@ -295,8 +312,18 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 	}
 
+	private applyCurrentSlideHighlights(): void {
+		if (!this.activeModal || !this.currentNode) return;
+		const slideComments = this.reviewStore.getForSlide(
+			this.activeSourcePath,
+			this.currentNode.title
+		);
+		this.activeModal.applyCommentHighlights(slideComments);
+	}
+
 	private refreshAllActiveUI(): void {
 		this.updateCockpitUI();
+		this.applyCurrentSlideHighlights();
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 		}
@@ -472,6 +499,12 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onSelectionCommentCallback = (range: Range, startWithVoice: boolean) => {
 			this.openCommentModal(startWithVoice, range);
 		};
+		this.activeModal.onHighlightCommentClickCallback = (commentId: string, anchorRect: AnchorRect) => {
+			this.openEditCommentById(commentId, anchorRect);
+		};
+		this.activeModal.onMediaZoomOpenedCallback = () => {
+			this.applyCurrentSlideHighlights();
+		};
 
 		const overlayEl = this.activeModal.getOverlayElement();
 		this.exitConfirmModal = new ConfirmOverlayModal(overlayEl);
@@ -532,6 +565,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 		this.updateSlideCounter();
 		this.updateCockpitUI();
+		this.applyCurrentSlideHighlights();
 
 		this.keyboardNav = new KeyboardNavigator({
 			onNext: () => this.handleNextNavigation(),
@@ -692,7 +726,7 @@ export default class SlideFlowPlugin extends Plugin {
 				this.currentNode,
 				this.activeSourcePath,
 				this.buildSlideRenderDecoration(this.currentNode)
-			);
+			).then(() => this.applyCurrentSlideHighlights());
 		}
 		this.updateCockpitUI();
 		new Notice(this.diffEnabled ? "Diff view enabled" : "Diff view hidden");
@@ -733,7 +767,15 @@ export default class SlideFlowPlugin extends Plugin {
 		let highlightRange: Range | null = null;
 
 		if (activeRange) {
-			extracted = extractSelectionContext(activeRange, this.activeSourcePath, this.currentNode.title);
+			const activeContainer = this.activeModal.isMediaZoomActive()
+				? this.activeModal.getZoomContentElement()
+				: this.activeModal.getContentElement();
+			extracted = extractSelectionContext(
+				activeRange,
+				this.activeSourcePath,
+				this.currentNode.title,
+				activeContainer
+			);
 			if (extracted) {
 				highlightRange = activeRange;
 				this.activeModal.hideSelectionToolbar(true);
@@ -814,6 +856,9 @@ export default class SlideFlowPlugin extends Plugin {
 				scopeType: ctx?.scopeType || "viewport",
 				scopeLabel: ctx?.scopeLabel || "Slide",
 				contextKey: ctx?.contextKey,
+				selectionQuote: ctx?.selectionQuote,
+				selectionPrefix: ctx?.selectionPrefix,
+				selectionSuffix: ctx?.selectionSuffix,
 				excerpt,
 				hadDiff,
 				oldExcerpt,
@@ -876,7 +921,8 @@ export default class SlideFlowPlugin extends Plugin {
 			return false;
 		}
 
-		const formatted = this.reviewStore.formatExport(true, toSend);
+		const includeOneShotPrefix = !templateIncludesOneShot(this.settings.directCliCommand);
+		const formatted = this.reviewStore.formatExport(includeOneShotPrefix, toSend);
 		let cliDisplayName = "CLI";
 
 		try {
@@ -893,10 +939,34 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 		this.refreshAllActiveUI();
 
+		const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
+		const noteTitles = Array.from(new Set(toSend.map((c) => c.noteTitle || c.notePath)));
+		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
+
+		void this.activeJobsTracker.registerJob({
+			id: jobId,
+			pid: null,
+			cli: cliDisplayName,
+			model: modelLabel,
+			status: "running",
+			startedAt: new Date().toISOString(),
+			commentCount: sentIds.length,
+			notes: noteTitles,
+			logPath: path.join(jobsDir, `${jobId}.log`),
+		});
+
 		new Notice(`Sending ${sentIds.length} comment(s) to ${cliDisplayName}…`, 5000);
 
 		const cwd = this.reviewStore.getVaultBasePath();
-		void runCliCommand(this.settings.directCliCommand, formatted, cwd)
+		void runCliCommand(this.settings.directCliCommand, formatted, {
+			cwd,
+			jobsDir,
+			jobId,
+			onSpawn: (pid) => {
+				void this.activeJobsTracker.updateJobPid(jobId, pid);
+			},
+		})
 			.then(async (res) => {
 				for (const id of sentIds) {
 					this.inFlightCliCommentIds.delete(id);
@@ -904,35 +974,65 @@ export default class SlideFlowPlugin extends Plugin {
 
 				if (res.exitCode === 0) {
 					await this.reviewStore.removeCommentsByIds(sentIds);
+					await this.activeJobsTracker.completeJob(jobId, 0, null);
 					this.refreshAllActiveUI();
 					new Notice(
 						`${res.displayName} finished — ${sentIds.length} comment(s) sent & cleared.`,
 						6000
 					);
 				} else {
+					const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
+					const detail = rawErr ? rawErr.slice(0, 140) : "";
+					await this.activeJobsTracker.completeJob(jobId, res.exitCode, detail || null);
 					this.refreshAllActiveUI();
 					console.error("[SlideFlow CLI] Non-zero exit:", res);
-					const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
-					const detail = rawErr ? ` ${rawErr.slice(0, 140)}` : "";
 					new Notice(
-						`SlideFlow: ${res.displayName} failed (exit ${res.exitCode}). Comments kept in queue.${detail}`,
+						`SlideFlow: ${res.displayName} failed (exit ${res.exitCode}). Comments kept in queue.${detail ? " " + detail : ""}`,
 						10000
 					);
 				}
 			})
-			.catch((err: any) => {
+			.catch(async (err: any) => {
 				for (const id of sentIds) {
 					this.inFlightCliCommentIds.delete(id);
 				}
+				const errMsg = err?.message || String(err);
+				await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
 				this.refreshAllActiveUI();
 				console.error("[SlideFlow CLI] Execution failed:", err);
 				new Notice(
-					`SlideFlow CLI error: ${err?.message || String(err)}. Comments kept in queue.`,
+					`SlideFlow CLI error: ${errMsg}. Comments kept in queue.`,
 					10000
 				);
 			});
 
 		return true;
+	}
+
+	private openEditCommentById(commentId: string, anchorRect?: AnchorRect | null): void {
+		if (!this.commentModal || !this.activeModal) return;
+		const comment = this.reviewStore.getAll().find((c) => c.id === commentId);
+		if (!comment) return;
+
+		const existingComments = this.reviewStore.getForSlide(
+			comment.notePath,
+			comment.sectionHeading
+		);
+
+		this.commentModal.open({
+			noteTitle: comment.noteTitle,
+			notePath: comment.notePath,
+			sectionHeading: comment.sectionHeading,
+			scopeLabel: comment.scopeLabel || "Selection",
+			hadDiff: comment.hadDiff,
+			existingComments,
+			startWithVoice: false,
+			anchorRect: anchorRect || null,
+			highlightRange: null,
+			editingComment: comment,
+			slideContentEl: this.activeModal.getContentElement(),
+			isMediaZoomActive: this.activeModal.isMediaZoomActive(),
+		});
 	}
 
 	private async jumpToCommentTarget(comment: ReviewComment): Promise<void> {
@@ -1174,6 +1274,7 @@ export default class SlideFlowPlugin extends Plugin {
 				this.activeModal.setReturnButton(parentFrame ? parentFrame.fileTitle : null);
 				this.updateSlideCounter();
 				this.updateCockpitUI();
+				this.applyCurrentSlideHighlights();
 				this.activeModal.showSubNoteBanner(targetFile.basename, () => void this.popDocumentStack());
 			}
 
@@ -1217,6 +1318,7 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 			this.updateSlideCounter();
 			this.updateCockpitUI();
+			this.applyCurrentSlideHighlights();
 		}
 
 		if (this.tocComp && this.currentNode) {
@@ -1241,6 +1343,7 @@ export default class SlideFlowPlugin extends Plugin {
 			);
 			this.updateSlideCounter();
 			this.updateCockpitUI();
+			this.applyCurrentSlideHighlights();
 		}
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());

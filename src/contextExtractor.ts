@@ -9,6 +9,7 @@
  */
 
 import { hashText, SlideDiffInfo } from "./diffEngine";
+import { captureSelectionAnchorSnippet } from "./commentHighlighter";
 
 export type CommentScopeType = "selection" | "zoom" | "viewport";
 
@@ -23,6 +24,9 @@ export interface ExtractedCommentContext {
 	scopeType: CommentScopeType;
 	scopeLabel: string;
 	contextKey: string;
+	selectionQuote?: string;
+	selectionPrefix?: string;
+	selectionSuffix?: string;
 	excerpt: string;
 	hadDiff: boolean;
 	oldExcerpt?: string | null;
@@ -230,7 +234,8 @@ function getDiffEnclosureKind(node: Node | null): "ins" | "del" | null {
 export function extractSelectionContext(
 	range: Range,
 	notePath: string,
-	sectionHeading: string
+	sectionHeading: string,
+	containerEl?: HTMLElement | null
 ): ExtractedCommentContext | null {
 	if (range.collapsed) return null;
 
@@ -241,6 +246,10 @@ export function extractSelectionContext(
 		right: rect.right,
 		bottom: rect.bottom,
 	};
+
+	const anchorSnippet = containerEl
+		? captureSelectionAnchorSnippet(range, containerEl)
+		: { selectionQuote: range.toString().trim(), selectionPrefix: "", selectionSuffix: "" };
 
 	const frag = range.cloneContents();
 	const wrapper = document.createElement("div");
@@ -277,6 +286,9 @@ export function extractSelectionContext(
 		scopeType: "selection",
 		scopeLabel: "Selection",
 		contextKey: `sel:${notePath}::${sectionHeading}::${hashText(currentText + "|" + (oldText ?? ""))}`,
+		selectionQuote: anchorSnippet.selectionQuote || undefined,
+		selectionPrefix: anchorSnippet.selectionPrefix || undefined,
+		selectionSuffix: anchorSnippet.selectionSuffix || undefined,
 		excerpt: currentText || "(Texte supprimé dans le diff)",
 		hadDiff,
 		oldExcerpt: hadDiff ? oldText : undefined,

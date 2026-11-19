@@ -26,6 +26,9 @@ export interface ReviewComment {
 	scopeType?: CommentScopeType;
 	scopeLabel?: string;
 	contextKey?: string;
+	selectionQuote?: string;
+	selectionPrefix?: string;
+	selectionSuffix?: string;
 	excerpt: string;
 	hadDiff: boolean;
 	oldExcerpt?: string | null;
