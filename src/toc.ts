@@ -56,9 +56,9 @@ export class TOCComponent {
 	public updateToggleBtnText(): void {
 		if (this.toggleBtnEl) {
 			if (this.isCollapsed()) {
-				this.toggleBtnEl.setText("☰ Table of contents");
+				this.toggleBtnEl.setText("Table of contents");
 			} else {
-				this.toggleBtnEl.setText("◀ TOC");
+				this.toggleBtnEl.setText("Hide TOC");
 			}
 		}
 	}
@@ -133,20 +133,20 @@ export class TOCComponent {
 		if (isDirty) {
 			itemEl.createEl("span", {
 				cls: "slideflow-toc-diff-dot",
-				attr: { title: "Slide modifiée (diff non lu)" }
+				attr: { title: "Unread diff" }
 			});
 		} else if (hasDirtyDesc && node.level > 0) {
 			itemEl.createEl("span", {
 				cls: "slideflow-toc-diff-dot is-descendant",
-				attr: { title: "Contient des sous-sections modifiées" }
+				attr: { title: "Contains unread diff" }
 			});
 		}
 
 		if (commentCount > 0) {
 			itemEl.createEl("span", {
 				cls: "slideflow-toc-comment-badge",
-				text: `💬${commentCount}`,
-				attr: { title: `${commentCount} commentaire(s) sur cette slide` }
+				text: String(commentCount),
+				attr: { title: `${commentCount} comment(s)` }
 			});
 		}
 

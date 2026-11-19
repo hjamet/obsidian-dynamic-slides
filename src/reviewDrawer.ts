@@ -1,6 +1,5 @@
 /**
- * ReviewDrawer — Panneau récapitulatif multi-notes des commentaires en attente (`R` ou clic sur la pastille `📋 N`).
- * Monté directement dans l'overlay plein écran SlideFlow pour fonctionner à 100 % en plein écran.
+ * ReviewDrawer — Panneau récapitulatif multi-notes des commentaires en attente (`R`).
  */
 
 import { ReviewComment } from "./reviewStore";
@@ -48,13 +47,13 @@ export class ReviewDrawer {
 		const headerEl = panelEl.createDiv({ cls: "slideflow-drawer-header" });
 		headerEl.createEl("h3", {
 			cls: "slideflow-drawer-title",
-			text: `💬 File de revue SlideFlow (${comments.length})`,
+			text: `Review Queue (${comments.length})`,
 		});
 
 		const closeBtn = headerEl.createEl("button", {
 			cls: "slideflow-drawer-close-btn",
 			text: "✕",
-			attr: { type: "button", title: "Fermer (Échap)" },
+			attr: { type: "button", title: "Close (Esc)" },
 		});
 		closeBtn.addEventListener("click", (evt) => {
 			evt.stopPropagation();
@@ -68,9 +67,9 @@ export class ReviewDrawer {
 
 		const copyOneShotBtn = footerEl.createEl("button", {
 			cls: "slideflow-drawer-primary-btn",
-			text: "📋 Copier /one-shot (Ctrl+↵)",
 			attr: { type: "button" },
 		});
+		copyOneShotBtn.innerHTML = `Copy /one-shot <strong>Ctrl+↵</strong>`;
 		copyOneShotBtn.disabled = comments.length === 0;
 		copyOneShotBtn.addEventListener("click", async (evt) => {
 			evt.stopPropagation();
@@ -79,7 +78,7 @@ export class ReviewDrawer {
 
 		const copyRawBtn = footerEl.createEl("button", {
 			cls: "slideflow-drawer-secondary-btn",
-			text: "📄 Copier sans /one-shot",
+			text: "Copy plain",
 			attr: { type: "button" },
 		});
 		copyRawBtn.disabled = comments.length === 0;
@@ -90,8 +89,8 @@ export class ReviewDrawer {
 
 		const clearBtn = footerEl.createEl("button", {
 			cls: "slideflow-drawer-danger-btn",
-			text: "🗑️ Vider la file",
-			attr: { type: "button", title: "Archive une sauvegarde locale puis vide la file" },
+			text: "Clear queue",
+			attr: { type: "button", title: "Archives a local backup then clears queue" },
 		});
 		clearBtn.disabled = comments.length === 0;
 		clearBtn.addEventListener("click", async (evt) => {
@@ -108,7 +107,7 @@ export class ReviewDrawer {
 		if (comments.length === 0) {
 			listEl.createDiv({
 				cls: "slideflow-drawer-empty",
-				text: "Aucun commentaire en attente. Appuyez sur C (texte) ou V (vocal) sur n'importe quelle slide.",
+				text: "No pending comments. Press C (text) or V (voice), or highlight text on any slide.",
 			});
 			return;
 		}
@@ -124,7 +123,7 @@ export class ReviewDrawer {
 			const groupEl = listEl.createDiv({ cls: "slideflow-drawer-group" });
 			groupEl.createDiv({
 				cls: "slideflow-drawer-group-title",
-				text: `📄 ${items[0].noteTitle} (${notePath})`,
+				text: `${items[0].noteTitle} (${notePath})`,
 			});
 
 			for (const c of items) {
@@ -132,18 +131,24 @@ export class ReviewDrawer {
 				const metaEl = itemEl.createDiv({ cls: "slideflow-drawer-item-meta" });
 				metaEl.createSpan({
 					cls: "slideflow-drawer-item-heading",
-					text: `§ ${c.sectionHeading}`,
+					text: c.sectionHeading,
 				});
+				if (c.scopeLabel) {
+					metaEl.createSpan({
+						cls: "slideflow-drawer-item-scope-badge",
+						text: c.scopeLabel,
+					});
+				}
 				if (c.hadDiff) {
 					metaEl.createSpan({
 						cls: "slideflow-drawer-item-diff-badge",
-						text: "🟢 +ancien texte",
+						text: "+old diff",
 					});
 				}
 				if (c.copiedAt) {
 					metaEl.createSpan({
 						cls: "slideflow-drawer-item-copied-badge",
-						text: "✓ copié",
+						text: "copied",
 					});
 				}
 
@@ -155,7 +160,7 @@ export class ReviewDrawer {
 				const actionsEl = itemEl.createDiv({ cls: "slideflow-drawer-item-actions" });
 				const jumpBtn = actionsEl.createEl("button", {
 					cls: "slideflow-mini-action-btn",
-					text: "↗ Aller à la slide",
+					text: "Go to slide",
 					attr: { type: "button" },
 				});
 				jumpBtn.addEventListener("click", (evt) => {
@@ -166,7 +171,7 @@ export class ReviewDrawer {
 
 				const delBtn = actionsEl.createEl("button", {
 					cls: "slideflow-mini-action-btn danger",
-					text: "🗑️ Supprimer",
+					text: "Delete",
 					attr: { type: "button" },
 				});
 				delBtn.addEventListener("click", async (evt) => {

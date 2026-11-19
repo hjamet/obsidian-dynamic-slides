@@ -59,93 +59,183 @@ body.is-dynamic-slides-active {
 	--dynamic-slides-zoom: 1;
 }
 
+/* Bottom-left Hover Zone: Action Dock + TOC Toggle (slides smoothly from left only on hover) */
 .dynamic-slides-bottom-left-zone {
 	position: fixed;
 	bottom: 0;
 	left: 0;
-	width: 260px;
-	height: 120px;
-	z-index: 10010;
+	width: 440px;
+	height: 136px;
+	z-index: 10015;
 	display: flex;
 	align-items: flex-end;
-	padding: 24px;
+	padding: 20px 24px;
+	pointer-events: auto;
+	box-sizing: border-box;
+}
+
+.slideflow-left-hover-stack {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 8px;
+	opacity: 0;
+	transform: translateX(-28px);
+	pointer-events: none;
+	transition: opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1), transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dynamic-slides-bottom-left-zone:hover .slideflow-left-hover-stack {
+	opacity: 1;
+	transform: translateX(0);
 	pointer-events: auto;
 }
 
-.dynamic-slides-toc-hover-toggle {
-	opacity: 0;
-	pointer-events: none;
-	transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+.slideflow-action-dock {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 4px 5px;
+	border-radius: 999px;
 	background: var(--background-secondary-alt, var(--background-secondary));
 	border: 1px solid var(--background-modifier-border);
-	border-radius: 24px;
-	padding: 10px 18px;
-	font-size: 0.85rem;
-	font-weight: 600;
-	color: var(--text-normal);
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+	user-select: none;
+}
+
+.slideflow-dock-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	border-radius: 999px;
+	padding: 6px 12px;
+	height: auto;
+	font-size: 0.8rem;
+	font-weight: 500;
+	color: var(--text-normal) !important;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.slideflow-dock-btn strong {
+	font-weight: 700;
+	opacity: 0.78;
+	font-size: 0.76rem;
+}
+
+.slideflow-dock-btn:hover {
+	background-color: var(--background-modifier-hover) !important;
+	color: var(--text-normal) !important;
+}
+
+.slideflow-dock-btn:active {
+	transform: scale(0.97);
+}
+
+.slideflow-diff-btn.is-active {
+	background-color: var(--sf-diff-ins-bg) !important;
+	color: var(--sf-diff-ins-fg) !important;
+}
+
+.slideflow-comment-btn.has-comments {
+	color: var(--text-accent) !important;
+}
+
+.slideflow-copy-btn {
+	background-color: #15803d !important;
+	color: #ffffff !important;
+}
+
+.slideflow-copy-btn strong {
+	color: #ffffff !important;
+	opacity: 0.92;
+}
+
+.slideflow-copy-btn:hover {
+	background-color: #166534 !important;
+	color: #ffffff !important;
+}
+
+.dynamic-slides-toc-hover-toggle {
+	appearance: none;
+	-webkit-appearance: none;
+	transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+	background: var(--background-secondary-alt, var(--background-secondary)) !important;
+	border: 1px solid var(--background-modifier-border) !important;
+	border-radius: 999px;
+	padding: 7px 15px;
+	height: auto;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--text-normal) !important;
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16) !important;
 	user-select: none;
 	cursor: pointer;
 }
 
-.dynamic-slides-bottom-left-zone:hover .dynamic-slides-toc-hover-toggle {
-	opacity: 1;
-	pointer-events: auto;
-}
-
 .dynamic-slides-toc-hover-toggle:hover {
-	transform: translateY(-2px);
-	border-color: var(--interactive-accent);
-	color: var(--text-accent);
+	border-color: var(--interactive-accent) !important;
+	color: var(--text-accent) !important;
 }
 
-/* Bottom-right Zoom Zone & Toolbar */
+/* Bottom-right Zoom Zone & Toolbar (slides smoothly from right only on hover) */
 .dynamic-slides-bottom-right-zone {
 	position: fixed;
 	bottom: 0;
 	right: 0;
-	width: 260px;
-	height: 120px;
-	z-index: 10010;
+	width: 240px;
+	height: 112px;
+	z-index: 10015;
 	display: flex;
 	align-items: flex-end;
 	justify-content: flex-end;
-	padding: 24px;
-	pointer-events: none;
+	padding: 20px 24px;
+	pointer-events: auto;
+	box-sizing: border-box;
 }
 
 .dynamic-slides-zoom-toolbar {
-	pointer-events: auto;
 	display: flex;
 	align-items: center;
 	gap: 2px;
 	background: var(--background-secondary-alt, var(--background-secondary));
 	border: 1px solid var(--background-modifier-border);
-	border-radius: 24px;
+	border-radius: 999px;
 	padding: 4px 6px;
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-	opacity: 0.55;
-	transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+	opacity: 0;
+	transform: translateX(28px);
+	pointer-events: none;
+	transition: opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1), transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 	user-select: none;
 }
 
-.dynamic-slides-bottom-right-zone:hover .dynamic-slides-zoom-toolbar,
-.dynamic-slides-zoom-toolbar:hover {
+.dynamic-slides-bottom-right-zone:hover .dynamic-slides-zoom-toolbar {
 	opacity: 1;
-	transform: translateY(-2px);
-	border-color: var(--background-modifier-border-hover, var(--interactive-accent));
-	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+	transform: translateX(0);
+	pointer-events: auto;
 }
 
 .dynamic-slides-zoom-btn {
-	background: transparent;
-	border: none;
-	color: var(--text-muted);
-	font-size: 1.15rem;
+	appearance: none;
+	-webkit-appearance: none;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	color: var(--text-muted) !important;
+	font-size: 1.1rem;
 	font-weight: 700;
 	line-height: 1;
 	width: 28px;
@@ -161,13 +251,12 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-zoom-btn:hover:not(:disabled) {
-	background-color: var(--background-modifier-hover);
-	color: var(--text-normal);
-	transform: scale(1.1);
+	background-color: var(--background-modifier-hover) !important;
+	color: var(--text-normal) !important;
 }
 
 .dynamic-slides-zoom-btn:active:not(:disabled) {
-	transform: scale(0.95);
+	transform: scale(0.94);
 }
 
 .dynamic-slides-zoom-btn:disabled {
@@ -176,14 +265,18 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-zoom-value {
-	background: transparent;
-	border: none;
-	color: var(--text-normal);
-	font-size: 0.82rem;
+	appearance: none;
+	-webkit-appearance: none;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	color: var(--text-normal) !important;
+	font-size: 0.8rem;
 	font-weight: 600;
 	padding: 4px 6px;
+	height: auto;
 	border-radius: 12px;
-	min-width: 48px;
+	min-width: 46px;
 	text-align: center;
 	cursor: pointer;
 	transition: background-color 0.15s ease, color 0.15s ease;
@@ -191,8 +284,8 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-zoom-value:hover {
-	background-color: var(--background-modifier-hover);
-	color: var(--text-accent);
+	background-color: var(--background-modifier-hover) !important;
+	color: var(--text-accent) !important;
 }
 
 .dynamic-slides-sidebar-toc {
@@ -806,24 +899,97 @@ body.is-dynamic-slides-active {
 	object-fit: contain !important;
 }
 
+/* Elegant Framed Code Block Zoom (hides Obsidian copy-code-button) */
 .dynamic-slides-zoom-code {
 	width: 100%;
-	max-width: 100%;
-	max-height: 100%;
-	overflow: auto;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	padding: 24px;
-	background-color: var(--background-secondary);
-	border-radius: 12px;
-	font-family: var(--font-monospace);
-	font-size: calc(1.15rem * var(--dynamic-slides-zoom, 1));
-	line-height: 1.6;
 	box-sizing: border-box;
 }
 
-.dynamic-slides-zoom-code pre {
-	margin: 0;
-	padding: 0;
-	background: transparent;
+.slideflow-code-frame {
+	width: 100%;
+	max-width: min(1080px, 88vw);
+	max-height: 82vh;
+	display: flex;
+	flex-direction: column;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 16px;
+	box-shadow: 0 22px 54px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
+.slideflow-code-frame-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 11px 18px;
+	background: var(--background-secondary-alt, var(--background-primary-alt));
+	border-bottom: 1px solid var(--background-modifier-border);
+	flex-shrink: 0;
+	user-select: none;
+}
+
+.slideflow-code-frame-dots {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.slideflow-code-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: var(--background-modifier-border-hover, var(--background-modifier-border));
+	opacity: 0.85;
+}
+
+.slideflow-code-frame-lang {
+	font-family: var(--font-monospace);
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--text-muted);
+}
+
+.slideflow-code-frame-body {
+	flex: 1 1 auto;
+	overflow: auto;
+	padding: 24px 28px;
+	font-family: var(--font-monospace);
+	font-size: calc(1.08rem * var(--dynamic-slides-zoom, 1));
+	line-height: 1.68;
+	box-sizing: border-box;
+}
+
+.slideflow-code-frame-body pre {
+	margin: 0 !important;
+	padding: 0 !important;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	white-space: pre-wrap !important;
+	word-break: break-word !important;
+	overflow: visible !important;
+}
+
+.slideflow-code-frame-body code {
+	background: transparent !important;
+	padding: 0 !important;
+	font-size: inherit !important;
+	line-height: inherit !important;
+}
+
+.dynamic-slides-zoom-code .copy-code-button,
+.dynamic-slides-media-zoom-content .copy-code-button,
+.dynamic-slides-content .copy-code-button {
+	display: none !important;
 }
 
 .dynamic-slides-zoom-table {
@@ -1047,8 +1213,13 @@ body.is-dynamic-slides-active {
 
 
 /* ==========================================================================
-   SlideFlow v2 — Cockpit Bar, Surgical Diffs, Comment Modal & Review Drawer
+   SlideFlow v2.1 — Surgical Diffs, Selection Highlight, Floating Comment Card & Drawer
    ========================================================================== */
+
+::highlight(slideflow-selection) {
+	background-color: rgba(34, 197, 94, 0.28);
+	color: inherit;
+}
 
 .dynamic-slides-overlay {
 	--sf-diff-ins-bg: #dcfce7;
@@ -1091,7 +1262,7 @@ body.is-dynamic-slides-active {
 .dynamic-slides-content pre.dv-pre-ins {
 	background-color: var(--sf-diff-ins-bg) !important;
 	color: var(--sf-diff-ins-fg) !important;
-	border-left: 4px solid var(--sf-diff-ins-border);
+	border-left: 3px solid var(--sf-diff-ins-border);
 	border-radius: 6px;
 	padding: 8px 14px;
 	margin: 8px 0;
@@ -1101,7 +1272,7 @@ body.is-dynamic-slides-active {
 .dynamic-slides-content pre.dv-pre-del {
 	background-color: var(--sf-diff-del-bg) !important;
 	color: var(--sf-diff-del-fg) !important;
-	border-left: 4px solid var(--sf-diff-del-border);
+	border-left: 3px solid var(--sf-diff-del-border);
 	border-radius: 6px;
 	padding: 8px 14px;
 	margin: 8px 0;
@@ -1122,180 +1293,115 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-deleted-sections-title {
-	font-size: 0.85rem;
+	font-size: 0.8rem;
 	font-weight: 700;
 	color: var(--sf-diff-del-fg);
 	margin-bottom: 8px;
 }
 
-/* Top-Center SlideFlow Cockpit Bar */
-.slideflow-cockpit-bar {
-	position: fixed;
-	top: 16px;
-	left: 50%;
-	transform: translateX(-50%);
-	z-index: 10015;
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 4px 8px;
-	border-radius: 999px;
-	background: var(--background-secondary-alt, var(--background-secondary));
-	border: 1px solid var(--background-modifier-border);
-	backdrop-filter: blur(16px);
-	-webkit-backdrop-filter: blur(16px);
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-	opacity: 0.72;
-	transition: opacity 0.22s ease, transform 0.2s ease, box-shadow 0.2s ease;
-	user-select: none;
-}
-
-.slideflow-cockpit-bar:hover {
-	opacity: 1;
-	box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
-}
-
-.slideflow-pill-btn {
-	display: inline-flex;
-	align-items: center;
-	gap: 5px;
-	border: 1px solid transparent;
-	border-radius: 999px;
-	padding: 5px 12px;
-	font-size: 0.8rem;
-	font-weight: 600;
-	color: var(--text-normal);
-	background: transparent;
-	cursor: pointer;
-	transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
-	white-space: nowrap;
-}
-
-.slideflow-pill-btn:hover {
-	background-color: var(--background-modifier-hover);
-	border-color: var(--background-modifier-border);
-}
-
-.slideflow-pill-btn:active {
-	transform: scale(0.97);
-}
-
-.slideflow-diff-btn.is-active {
-	background-color: var(--sf-diff-ins-bg);
-	color: var(--sf-diff-ins-fg);
-	border-color: var(--sf-diff-ins-border);
-}
-
-.slideflow-comment-btn.has-comments {
-	background-color: rgba(124, 58, 237, 0.15);
-	color: var(--text-accent);
-	border-color: rgba(124, 58, 237, 0.35);
-}
-
-.slideflow-queue-btn {
-	background-color: #16a34a;
-	color: #ffffff !important;
-	border-color: #15803d;
-}
-
-.slideflow-queue-btn:hover {
-	background-color: #15803d;
-	border-color: #166534;
-}
-
-/* Modified Link Pill & Child Heading Diff Badges */
-.slideflow-modified-pill {
-	display: inline-flex;
-	align-items: center;
-	margin-left: 6px;
-	padding: 1px 7px;
-	border-radius: 999px;
-	font-size: 0.68em;
-	font-weight: 700;
-	vertical-align: middle;
-	background-color: var(--sf-diff-ins-bg);
-	color: var(--sf-diff-ins-fg);
-	border: 1px solid var(--sf-diff-ins-border);
-	text-decoration: none !important;
-	white-space: nowrap;
-}
-
-.slideflow-child-diff-badge {
-	display: inline-flex;
-	align-items: center;
-	margin-left: 8px;
-	padding: 1px 8px;
-	border-radius: 999px;
-	font-size: 0.72rem;
-	font-weight: 700;
-	background-color: var(--sf-diff-ins-bg);
-	color: var(--sf-diff-ins-fg);
-	border: 1px solid var(--sf-diff-ins-border);
-	vertical-align: middle;
-}
-
-.slideflow-child-diff-badge.is-sub {
-	padding: 0 4px;
-	background: transparent;
-	border: none;
-}
-
-/* TOC Diff Dot & Comment Counter */
+/* TOC Subtle Diff Dot & Comment Counter */
 .slideflow-toc-diff-dot {
-	width: 8px;
-	height: 8px;
+	width: 7px;
+	height: 7px;
 	border-radius: 50%;
 	background-color: #22c55e;
 	flex-shrink: 0;
-	box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
 }
 
 .slideflow-toc-diff-dot.is-descendant {
 	background-color: transparent;
-	border: 2px solid #22c55e;
-	box-shadow: none;
+	border: 1.5px solid #22c55e;
 }
 
 .slideflow-toc-comment-badge {
-	font-size: 0.72rem;
+	font-size: 0.7rem;
 	font-weight: 700;
-	padding: 1px 5px;
+	padding: 1px 6px;
 	border-radius: 999px;
-	background: rgba(124, 58, 237, 0.2);
-	color: inherit;
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
 	flex-shrink: 0;
 }
 
 /* ==========================================================================
-   SlideFlow Comment Modal (Text C / Voice V / Ctrl+M)
+   Floating Inline Selection Pill ("Comment C | Voice V")
    ========================================================================== */
 
-.slideflow-comment-backdrop {
+.slideflow-selection-toolbar {
 	position: fixed;
-	inset: 0;
-	z-index: 100200;
-	background: rgba(0, 0, 0, 0.42);
-	backdrop-filter: blur(4px);
-	-webkit-backdrop-filter: blur(4px);
-	display: flex;
+	z-index: 100190;
+	display: inline-flex;
 	align-items: center;
-	justify-content: center;
-	padding: 24px;
-	animation: slideFadeIn 0.16s ease forwards;
-}
-
-.slideflow-comment-card {
-	width: 100%;
-	max-width: 640px;
+	gap: 2px;
+	padding: 3px;
+	border-radius: 10px;
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
-	border-radius: 18px;
-	padding: 16px 18px 14px 18px;
-	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15), 0 2px 6px rgba(0, 0, 0, 0.06);
+	animation: slideFadeIn 0.12s ease forwards;
+	user-select: none;
+}
+
+.slideflow-sel-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	border-radius: 7px;
+	padding: 5px 10px;
+	height: auto;
+	font-size: 0.8rem;
+	font-weight: 500;
+	color: var(--text-normal) !important;
+	cursor: pointer;
+	transition: background-color 0.14s ease;
+}
+
+.slideflow-sel-btn strong {
+	font-weight: 700;
+	color: var(--text-muted);
+	font-size: 0.76rem;
+}
+
+.slideflow-sel-btn:hover {
+	background: var(--background-modifier-hover) !important;
+}
+
+/* ==========================================================================
+   Discreet Floating Comment Card (No Dark Backdrop — Left-Docked or Selection-Anchored)
+   ========================================================================== */
+
+.slideflow-comment-card {
+	position: fixed;
+	z-index: 100200;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 14px;
+	padding: 12px 14px 10px 14px;
+	box-shadow: 0 14px 38px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 8px;
 	box-sizing: border-box;
+	animation: slideFadeIn 0.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.slideflow-comment-card.is-left-docked {
+	left: 24px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 340px;
+	max-width: calc(100vw - 48px);
+	animation: none;
+}
+
+.slideflow-comment-card.is-selection-anchored {
+	width: 370px;
+	max-width: calc(100vw - 32px);
 }
 
 .slideflow-comment-header {
@@ -1303,112 +1409,57 @@ body.is-dynamic-slides-active {
 	align-items: center;
 	justify-content: space-between;
 	gap: 8px;
-	flex-wrap: wrap;
 }
 
-.slideflow-comment-context {
-	font-size: 0.82rem;
-	font-weight: 600;
-	color: var(--text-muted);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	max-width: 100%;
-}
-
-.slideflow-comment-diff-pill {
+.slideflow-comment-meta {
 	font-size: 0.73rem;
-	font-weight: 700;
-	padding: 2px 9px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--text-muted);
+}
+
+.slideflow-comment-diff-tag {
+	font-size: 0.7rem;
+	font-weight: 600;
+	padding: 1px 7px;
 	border-radius: 999px;
 	background: var(--sf-diff-ins-bg);
 	color: var(--sf-diff-ins-fg);
-	border: 1px solid var(--sf-diff-ins-border);
-	white-space: nowrap;
-}
-
-.slideflow-comment-existing-list {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-	max-height: 140px;
-	overflow-y: auto;
-	padding-right: 2px;
-}
-
-.slideflow-existing-comment-row {
-	display: flex;
-	align-items: flex-start;
-	justify-content: space-between;
-	gap: 8px;
-	padding: 6px 10px;
-	border-radius: 10px;
-	background: var(--background-secondary);
-	border: 1px solid var(--background-modifier-border);
-	font-size: 0.84rem;
-}
-
-.slideflow-existing-comment-text {
-	flex: 1;
-	white-space: pre-wrap;
-	word-break: break-word;
-	color: var(--text-normal);
-}
-
-.slideflow-existing-comment-btns {
-	display: flex;
-	gap: 4px;
-	flex-shrink: 0;
-}
-
-.slideflow-mini-icon-btn {
-	background: transparent;
-	border: none;
-	border-radius: 6px;
-	padding: 2px 5px;
-	cursor: pointer;
-	font-size: 0.85rem;
-	opacity: 0.75;
-	transition: opacity 0.15s ease, background-color 0.15s ease;
-}
-
-.slideflow-mini-icon-btn:hover {
-	opacity: 1;
-	background-color: var(--background-modifier-hover);
 }
 
 .slideflow-comment-textarea {
 	width: 100%;
-	min-height: 96px;
-	resize: vertical;
-	border-radius: 12px;
-	border: 1px solid var(--background-modifier-border);
+	min-height: 54px;
+	max-height: 200px;
+	resize: none;
+	border-radius: 10px;
+	border: 1px solid transparent;
 	background: var(--background-secondary);
 	color: var(--text-normal);
-	padding: 12px 14px;
+	padding: 9px 11px;
 	font-family: var(--font-text);
-	font-size: 1rem;
-	line-height: 1.5;
+	font-size: 0.92rem;
+	line-height: 1.48;
 	box-sizing: border-box;
 	outline: none;
-	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+	transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .slideflow-comment-textarea:focus {
-	border-color: #22c55e;
-	box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+	border-color: rgba(34, 197, 94, 0.45);
+	background: var(--background-secondary);
 }
 
-.slideflow-comment-voice-bar {
+.slideflow-comment-voice-feedback {
 	display: flex;
 	flex-direction: column;
-	gap: 5px;
+	gap: 4px;
 }
 
 .slideflow-comment-status {
-	font-size: 0.78rem;
+	font-size: 0.74rem;
 	color: var(--text-muted);
-	transition: color 0.15s ease;
 }
 
 .slideflow-comment-status.is-recording {
@@ -1428,7 +1479,7 @@ body.is-dynamic-slides-active {
 
 .slideflow-voice-meter-track {
 	width: 100%;
-	height: 4px;
+	height: 3px;
 	border-radius: 999px;
 	background: var(--background-modifier-border);
 	overflow: hidden;
@@ -1446,87 +1497,152 @@ body.is-dynamic-slides-active {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 10px;
-	padding-top: 2px;
+	gap: 8px;
 }
 
 .slideflow-comment-cancel-btn {
-	background: transparent;
-	border: none;
-	color: var(--text-muted);
-	font-size: 0.92rem;
+	appearance: none;
+	-webkit-appearance: none;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	color: var(--text-muted) !important;
+	font-size: 0.85rem;
 	font-weight: 500;
-	padding: 6px 10px;
+	padding: 5px 8px;
+	height: auto;
 	border-radius: 8px;
 	cursor: pointer;
-	transition: color 0.15s ease, background-color 0.15s ease;
+	transition: color 0.14s ease, background-color 0.14s ease;
 }
 
 .slideflow-comment-cancel-btn:hover {
-	color: var(--text-normal);
-	background: var(--background-modifier-hover);
+	color: var(--text-normal) !important;
+	background: var(--background-modifier-hover) !important;
 }
 
 .slideflow-comment-right-actions {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 8px;
 }
 
 @keyframes sfMicPulse {
-	0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
-	70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+	0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+	70% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
 	100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
 .slideflow-comment-mic-btn {
-	width: 36px;
-	height: 36px;
+	appearance: none;
+	-webkit-appearance: none;
+	width: 30px;
+	height: 30px;
 	border-radius: 50%;
-	border: 1px solid var(--background-modifier-border);
-	background: var(--background-secondary);
-	color: var(--text-normal);
+	border: none !important;
+	box-shadow: none !important;
+	background: transparent !important;
+	color: var(--text-muted) !important;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	cursor: pointer;
 	padding: 0;
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+	transition: background-color 0.14s ease, color 0.14s ease;
 }
 
 .slideflow-comment-mic-btn:hover {
-	background: var(--background-modifier-hover);
-	border-color: var(--interactive-accent);
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-normal) !important;
 }
 
 .slideflow-comment-mic-btn.is-recording {
-	background: #ef4444;
-	border-color: #dc2626;
-	color: #ffffff;
+	background: #ef4444 !important;
+	color: #ffffff !important;
 	animation: sfMicPulse 1.3s infinite;
 }
 
 .slideflow-comment-submit-btn {
-	background: #22b814;
-	color: #ffffff;
-	border: none;
+	appearance: none;
+	-webkit-appearance: none;
+	background: #16a34a !important;
+	color: #ffffff !important;
+	border: none !important;
+	box-shadow: none !important;
 	border-radius: 999px;
-	padding: 8px 18px;
-	font-size: 0.92rem;
-	font-weight: 700;
+	padding: 6px 15px;
+	height: auto;
+	font-size: 0.84rem;
+	font-weight: 600;
 	cursor: pointer;
-	box-shadow: 0 4px 12px rgba(34, 184, 20, 0.35);
-	transition: background-color 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+	transition: background-color 0.14s ease, opacity 0.14s ease;
 }
 
 .slideflow-comment-submit-btn:hover:not(:disabled) {
-	background: #1ea311;
-	transform: translateY(-1px);
+	background: #15803d !important;
 }
 
 .slideflow-comment-submit-btn:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
+}
+
+.slideflow-comment-existing-list {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	max-height: 110px;
+	overflow-y: auto;
+	padding-top: 6px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.slideflow-existing-comment-row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 5px 8px;
+	border-radius: 8px;
+	background: var(--background-secondary);
+	font-size: 0.8rem;
+}
+
+.slideflow-existing-comment-text {
+	flex: 1;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--text-normal);
+}
+
+.slideflow-existing-comment-btns {
+	display: flex;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.slideflow-mini-text-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	padding: 2px 5px;
+	height: auto;
+	font-size: 0.72rem;
+	font-weight: 600;
+	color: var(--text-muted) !important;
+	cursor: pointer;
+	border-radius: 5px;
+}
+
+.slideflow-mini-text-btn:hover {
+	color: var(--text-normal) !important;
+	background: var(--background-modifier-hover) !important;
+}
+
+.slideflow-mini-text-btn.danger:hover {
+	color: #ef4444 !important;
 }
 
 /* ==========================================================================
@@ -1537,9 +1653,9 @@ body.is-dynamic-slides-active {
 	position: fixed;
 	inset: 0;
 	z-index: 100180;
-	background: rgba(0, 0, 0, 0.45);
-	backdrop-filter: blur(4px);
-	-webkit-backdrop-filter: blur(4px);
+	background: rgba(0, 0, 0, 0.35);
+	backdrop-filter: blur(3px);
+	-webkit-backdrop-filter: blur(3px);
 	display: flex;
 	justify-content: flex-end;
 	animation: slideFadeIn 0.16s ease forwards;
@@ -1547,11 +1663,11 @@ body.is-dynamic-slides-active {
 
 .slideflow-drawer-panel {
 	width: 100%;
-	max-width: 520px;
+	max-width: 480px;
 	height: 100vh;
 	background: var(--background-primary);
 	border-left: 1px solid var(--background-modifier-border);
-	box-shadow: -16px 0 48px rgba(0, 0, 0, 0.35);
+	box-shadow: -16px 0 48px rgba(0, 0, 0, 0.25);
 	display: flex;
 	flex-direction: column;
 	box-sizing: border-box;
@@ -1561,33 +1677,37 @@ body.is-dynamic-slides-active {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 18px 20px;
+	padding: 16px 20px;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .slideflow-drawer-title {
 	margin: 0;
-	font-size: 1.05rem;
+	font-size: 1rem;
 	font-weight: 700;
 	color: var(--text-normal);
 }
 
 .slideflow-drawer-close-btn {
-	background: transparent;
-	border: 1px solid var(--background-modifier-border);
+	appearance: none;
+	-webkit-appearance: none;
+	background: transparent !important;
+	border: 1px solid var(--background-modifier-border) !important;
+	box-shadow: none !important;
 	border-radius: 50%;
-	width: 30px;
-	height: 30px;
+	width: 28px;
+	height: 28px;
+	padding: 0;
 	cursor: pointer;
-	color: var(--text-muted);
+	color: var(--text-muted) !important;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 }
 
 .slideflow-drawer-close-btn:hover {
-	color: var(--text-normal);
-	background: var(--background-modifier-hover);
+	color: var(--text-normal) !important;
+	background: var(--background-modifier-hover) !important;
 }
 
 .slideflow-drawer-list {
@@ -1603,7 +1723,7 @@ body.is-dynamic-slides-active {
 	padding: 32px 16px;
 	text-align: center;
 	color: var(--text-muted);
-	font-size: 0.92rem;
+	font-size: 0.9rem;
 }
 
 .slideflow-drawer-group {
@@ -1613,7 +1733,7 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-drawer-group-title {
-	font-size: 0.82rem;
+	font-size: 0.8rem;
 	font-weight: 700;
 	color: var(--text-accent);
 	word-break: break-word;
@@ -1637,13 +1757,23 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-drawer-item-heading {
-	font-size: 0.8rem;
+	font-size: 0.78rem;
 	font-weight: 600;
 	color: var(--text-muted);
 }
 
+.slideflow-drawer-item-scope-badge {
+	font-size: 0.68rem;
+	font-weight: 600;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+}
+
 .slideflow-drawer-item-diff-badge {
-	font-size: 0.7rem;
+	font-size: 0.68rem;
 	font-weight: 700;
 	padding: 1px 6px;
 	border-radius: 999px;
@@ -1652,8 +1782,8 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-drawer-item-copied-badge {
-	font-size: 0.7rem;
-	font-weight: 700;
+	font-size: 0.68rem;
+	font-weight: 600;
 	padding: 1px 6px;
 	border-radius: 999px;
 	background: var(--background-modifier-hover);
@@ -1661,7 +1791,7 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-drawer-item-body {
-	font-size: 0.92rem;
+	font-size: 0.9rem;
 	line-height: 1.45;
 	color: var(--text-normal);
 	white-space: pre-wrap;
@@ -1670,27 +1800,31 @@ body.is-dynamic-slides-active {
 
 .slideflow-drawer-item-actions {
 	display: flex;
-	gap: 8px;
+	gap: 6px;
 	justify-content: flex-end;
 }
 
 .slideflow-mini-action-btn {
-	font-size: 0.78rem;
+	appearance: none;
+	-webkit-appearance: none;
+	font-size: 0.76rem;
 	padding: 4px 10px;
+	height: auto;
 	border-radius: 6px;
-	border: 1px solid var(--background-modifier-border);
-	background: var(--background-primary);
-	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border) !important;
+	box-shadow: none !important;
+	background: var(--background-primary) !important;
+	color: var(--text-normal) !important;
 	cursor: pointer;
 }
 
 .slideflow-mini-action-btn:hover {
-	border-color: var(--interactive-accent);
+	border-color: var(--interactive-accent) !important;
 }
 
 .slideflow-mini-action-btn.danger:hover {
-	border-color: #ef4444;
-	color: #ef4444;
+	border-color: #ef4444 !important;
+	color: #ef4444 !important;
 }
 
 .slideflow-drawer-footer {
@@ -1702,37 +1836,49 @@ body.is-dynamic-slides-active {
 }
 
 .slideflow-drawer-primary-btn {
+	appearance: none;
+	-webkit-appearance: none;
 	flex: 1 1 100%;
-	background: #16a34a;
-	color: #ffffff;
-	border: none;
+	background: #15803d !important;
+	color: #ffffff !important;
+	border: none !important;
+	box-shadow: none !important;
 	border-radius: 10px;
 	padding: 10px 16px;
-	font-size: 0.92rem;
-	font-weight: 700;
+	height: auto;
+	font-size: 0.88rem;
+	font-weight: 600;
 	cursor: pointer;
 }
 
+.slideflow-drawer-primary-btn strong {
+	color: #ffffff !important;
+}
+
 .slideflow-drawer-primary-btn:hover:not(:disabled) {
-	background: #15803d;
+	background: #166534 !important;
 }
 
 .slideflow-drawer-secondary-btn,
 .slideflow-drawer-danger-btn {
+	appearance: none;
+	-webkit-appearance: none;
 	flex: 1;
 	padding: 8px 12px;
+	height: auto;
 	border-radius: 10px;
-	border: 1px solid var(--background-modifier-border);
-	background: var(--background-secondary);
-	color: var(--text-normal);
-	font-size: 0.84rem;
+	border: 1px solid var(--background-modifier-border) !important;
+	box-shadow: none !important;
+	background: var(--background-secondary) !important;
+	color: var(--text-normal) !important;
+	font-size: 0.82rem;
 	font-weight: 600;
 	cursor: pointer;
 }
 
 .slideflow-drawer-danger-btn:hover:not(:disabled) {
-	border-color: #ef4444;
-	color: #ef4444;
+	border-color: #ef4444 !important;
+	color: #ef4444 !important;
 }
 
 .slideflow-drawer-primary-btn:disabled,

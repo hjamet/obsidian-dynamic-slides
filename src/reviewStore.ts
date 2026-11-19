@@ -1,15 +1,17 @@
 /**
- * ReviewStore — File de staging transactionnelle hors notes (`.obsidian/plugins/<id>/pending_reviews.json`).
+ * ReviewStore — File de staging transactionnelle hors notes (`.obsidian/plugins/slideflow/pending_reviews.json`).
  *
  * - Zéro pollution des notes Markdown du coffre.
  * - Zéro perte : chaque ajout/édition/suppression est immédiatement sauvegardé sur disque,
  *   et chaque export `/one-shot` est archivé dans `sent_reviews_archive.json` (30 derniers lots).
- * - Capture `oldExcerpt` (ancien texte de la baseline) ET `excerpt` (nouveau texte actuel)
- *   dès qu'un commentaire porte sur une slide contenant un diff.
+ * - Regroupement dédupliqué : plusieurs commentaires sur une même slide / portée (zoom, sélection, viewport)
+ *   ne copient le texte source QU'UNE SEULE FOIS suivi de tous les commentaires dessous !
+ * - Capture `oldExcerpt` (ancien texte avant diff) ET `excerpt` (nouveau texte actuel) sur les zones avec diff.
  */
 
 import { App } from "obsidian";
 import * as path from "path";
+import { CommentScopeType } from "./contextExtractor";
 
 export interface ReviewComment {
 	id: string;
@@ -20,6 +22,9 @@ export interface ReviewComment {
 	sectionLevel: number;
 	lineStart: number; // 1-indexed
 	lineEnd: number;   // 1-indexed
+	scopeType?: CommentScopeType;
+	scopeLabel?: string;
+	contextKey?: string;
 	excerpt: string;
 	hadDiff: boolean;
 	oldExcerpt?: string | null;
@@ -194,26 +199,30 @@ export class ReviewStore {
 
 	private quoteBlock(text: string): string {
 		const clean = text.replace(/\r\n/g, "\n").trim();
-		if (!clean) return "  > *(vide)*";
+		if (!clean) return "> *(vide)*";
 		return clean
 			.split("\n")
-			.map((line) => `  > ${line}`)
+			.map((line) => `> ${line}`)
 			.join("\n");
 	}
 
+	/**
+	 * Exporte tous les commentaires en dédupliquant le contexte :
+	 * Si plusieurs commentaires portent sur la même slide / même viewport / même zoom / même sélection,
+	 * le texte source n'est affiché QU'UNE SEULE FOIS, suivi de la liste des commentaires dessous.
+	 */
 	public formatExport(includeOneShotPrefix: boolean = true): string {
 		if (this.comments.length === 0) return "";
 
 		const basePath = this.getVaultBasePath();
-		// Group comments by notePath preserving first-seen order
-		const groups = new Map<string, ReviewComment[]>();
+		const noteGroups = new Map<string, ReviewComment[]>();
 		for (const c of this.comments) {
-			const arr = groups.get(c.notePath) || [];
+			const arr = noteGroups.get(c.notePath) || [];
 			arr.push(c);
-			groups.set(c.notePath, arr);
+			noteGroups.set(c.notePath, arr);
 		}
 
-		const noteCount = groups.size;
+		const noteCount = noteGroups.size;
 		const totalCount = this.comments.length;
 		const lines: string[] = [];
 
@@ -223,42 +232,63 @@ export class ReviewStore {
 		}
 
 		lines.push(
-			`Commentaires de revue SlideFlow (${totalCount} commentaire${totalCount > 1 ? "s" : ""} sur ${noteCount} note${noteCount > 1 ? "s" : ""}) :`
+			`Review comments from SlideFlow (${totalCount} comment${totalCount > 1 ? "s" : ""} across ${noteCount} note${noteCount > 1 ? "s" : ""}):`
 		);
 		lines.push("");
 
-		let idx = 1;
-		for (const [notePath, items] of groups.entries()) {
+		for (const [notePath, noteItems] of noteGroups.entries()) {
 			const refPath = basePath
 				? path.join(basePath, ...notePath.split("/"))
 				: notePath;
-			lines.push(`### 📄 @[${refPath}]`);
+			lines.push(`### @[${refPath}]`);
 			lines.push("");
 
-			for (const c of items) {
-				const lineSpan =
-					c.lineEnd > c.lineStart
-						? `lignes ${c.lineStart}–${c.lineEnd}`
-						: `ligne ${c.lineStart}`;
-				const diffTag = c.hadDiff ? " · 🟢 slide avec diff" : "";
-				lines.push(`${idx}. **Section** : \`${c.sectionHeading}\` (${lineSpan}${diffTag})`);
-				lines.push(`   - **Commentaire d'Henri** : ${c.commentText}`);
+			// Group items inside this note by exact deduplicated contextKey
+			const contextGroups = new Map<string, ReviewComment[]>();
+			for (const c of noteItems) {
+				const key =
+					c.contextKey ||
+					`${c.sectionHeading}::${c.scopeType || "viewport"}::${c.excerpt}::${c.oldExcerpt || ""}`;
+				const bucket = contextGroups.get(key) || [];
+				bucket.push(c);
+				contextGroups.set(key, bucket);
+			}
 
-				if (c.hadDiff) {
+			for (const groupItems of contextGroups.values()) {
+				const rep = groupItems[0];
+				const scopeTag = rep.scopeLabel ? ` · ${rep.scopeLabel}` : "";
+				const lineSpan =
+					rep.lineEnd > rep.lineStart
+						? `lines ${rep.lineStart}–${rep.lineEnd}`
+						: `line ${rep.lineStart}`;
+				lines.push(`#### Section: \`${rep.sectionHeading}\` (${lineSpan}${scopeTag})`);
+				lines.push("");
+
+				if (rep.hadDiff) {
 					const oldText =
-						c.oldExcerpt && c.oldExcerpt.trim().length > 0
-							? c.oldExcerpt
-							: "(Section nouvellement ajoutée — absente de la version précédente)";
-					lines.push("   - **Ancien texte (avant diff)** :");
+						rep.oldExcerpt && rep.oldExcerpt.trim().length > 0
+							? rep.oldExcerpt
+							: "(Newly added content — absent from previous version)";
+					lines.push("**Previous text (before diff):**");
 					lines.push(this.quoteBlock(oldText));
-					lines.push("   - **Nouveau texte (actuel)** :");
-					lines.push(this.quoteBlock(c.excerpt));
+					lines.push("");
+					lines.push("**Current text:**");
+					lines.push(this.quoteBlock(rep.excerpt));
 				} else {
-					lines.push("   - **Texte commenté** :");
-					lines.push(this.quoteBlock(c.excerpt));
+					lines.push("**Context:**");
+					lines.push(this.quoteBlock(rep.excerpt));
 				}
 				lines.push("");
-				idx++;
+
+				if (groupItems.length === 1) {
+					lines.push(`**Comment:** ${groupItems[0].commentText}`);
+				} else {
+					lines.push("**Comments:**");
+					groupItems.forEach((item, idx) => {
+						lines.push(`${idx + 1}. ${item.commentText}`);
+					});
+				}
+				lines.push("");
 			}
 		}
 

@@ -16,9 +16,6 @@ export interface CockpitBarState {
 
 export interface SlideRenderDecoration {
 	overrideMarkdown?: string;
-	dirtyNodeIds?: Set<string>;
-	descendantDirtyNodeIds?: Set<string>;
-	isLinkModified?: (href: string) => boolean;
 }
 
 export class PresentationModal extends Component {
@@ -45,17 +42,23 @@ export class PresentationModal extends Component {
 	public onCommentVoiceClickCallback?: () => void;
 	public onOpenQueueClickCallback?: () => void;
 	public onCopyOneShotClickCallback?: () => void;
+	public onSelectionCommentCallback?: (range: Range, startWithVoice: boolean) => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
 	private subNoteBannerEl: HTMLElement | null = null;
 
-	// SlideFlow Cockpit Top Bar
-	private cockpitBarEl: HTMLElement;
+	// Bottom-left hover action controls (no emojis, English labels, bold shortcuts)
 	private diffToggleBtnEl: HTMLButtonElement;
 	private commentTextBtnEl: HTMLButtonElement;
 	private commentVoiceBtnEl: HTMLButtonElement;
 	private queueBtnEl: HTMLButtonElement;
+	private copyBtnEl: HTMLButtonElement;
+
+	// Floating inline selection toolbar ("Comment C | Voice V" like Antigravity)
+	private selectionToolbarEl: HTMLElement | null = null;
+	private pendingSelectionRange: Range | null = null;
+	private boundMouseUpHandler: () => void;
 
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
@@ -92,51 +95,6 @@ export class PresentationModal extends Component {
 
 		this.overlayEl = document.body.createDiv({ cls: "dynamic-slides-overlay" });
 
-		// Top-center SlideFlow Cockpit Bar (Diff toggle, Comment C, Voice V, Pending Queue R / Ctrl+Enter)
-		this.cockpitBarEl = this.overlayEl.createDiv({ cls: "slideflow-cockpit-bar" });
-
-		this.diffToggleBtnEl = this.cockpitBarEl.createEl("button", {
-			cls: "slideflow-pill-btn slideflow-diff-btn",
-			text: "Diff (D)",
-			attr: { type: "button", title: "Afficher/Masquer les diffs (Touche D · N = diff suivante)" }
-		});
-		this.diffToggleBtnEl.style.display = "none";
-		this.diffToggleBtnEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.onToggleDiffClickCallback?.();
-		});
-
-		this.commentTextBtnEl = this.cockpitBarEl.createEl("button", {
-			cls: "slideflow-pill-btn slideflow-comment-btn",
-			text: "💬 Commenter (C)",
-			attr: { type: "button", title: "Laisser un commentaire texte sur cette slide (Touche C)" }
-		});
-		this.commentTextBtnEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.onCommentTextClickCallback?.();
-		});
-
-		this.commentVoiceBtnEl = this.cockpitBarEl.createEl("button", {
-			cls: "slideflow-pill-btn slideflow-voice-btn",
-			text: "🎤 (V)",
-			attr: { type: "button", title: "Commentaire vocal immédiat Faster-Whisper GPU (Touche V)" }
-		});
-		this.commentVoiceBtnEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.onCommentVoiceClickCallback?.();
-		});
-
-		this.queueBtnEl = this.cockpitBarEl.createEl("button", {
-			cls: "slideflow-pill-btn slideflow-queue-btn",
-			text: "📋 0 → /one-shot",
-			attr: { type: "button", title: "Voir la file de commentaires (R) ou copier /one-shot (Ctrl+Entrée)" }
-		});
-		this.queueBtnEl.style.display = "none";
-		this.queueBtnEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.onOpenQueueClickCallback?.();
-		});
-
 		this.returnBtnEl = this.overlayEl.createEl("button", {
 			cls: "dynamic-slides-return-btn"
 		});
@@ -148,12 +106,70 @@ export class PresentationModal extends Component {
 			}
 		});
 
+		// Bottom-left hover zone: Action Dock + TOC toggle (slides smoothly in from the left on hover)
 		const bottomLeftZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-left-zone" });
-		this.hoverToggleBtnEl = bottomLeftZone.createEl("button", {
-			text: "☰ Table of contents",
-			cls: "dynamic-slides-toc-hover-toggle"
+		const leftStackEl = bottomLeftZone.createDiv({ cls: "slideflow-left-hover-stack" });
+
+		const actionDockEl = leftStackEl.createDiv({ cls: "slideflow-action-dock" });
+
+		this.diffToggleBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-diff-btn",
+			attr: { type: "button", title: "Toggle diff view (D · N next diff)" }
 		});
-		this.hoverToggleBtnEl.setAttribute("aria-label", "Toggle TOC");
+		this.diffToggleBtnEl.innerHTML = `<span>Diff</span> <strong>D</strong>`;
+		this.diffToggleBtnEl.style.display = "none";
+		this.diffToggleBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onToggleDiffClickCallback?.();
+		});
+
+		this.commentTextBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-comment-btn",
+			attr: { type: "button", title: "Comment on visible slide or selection (C)" }
+		});
+		this.commentTextBtnEl.innerHTML = `<span>Comment</span> <strong>C</strong>`;
+		this.commentTextBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onCommentTextClickCallback?.();
+		});
+
+		this.commentVoiceBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-voice-btn",
+			attr: { type: "button", title: "Voice comment with Faster-Whisper GPU (V)" }
+		});
+		this.commentVoiceBtnEl.innerHTML = `<span>Voice</span> <strong>V</strong>`;
+		this.commentVoiceBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onCommentVoiceClickCallback?.();
+		});
+
+		this.queueBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-queue-btn",
+			attr: { type: "button", title: "Open review queue (R)" }
+		});
+		this.queueBtnEl.innerHTML = `<span>Queue</span> <strong>R</strong>`;
+		this.queueBtnEl.style.display = "none";
+		this.queueBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onOpenQueueClickCallback?.();
+		});
+
+		this.copyBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-copy-btn",
+			attr: { type: "button", title: "Copy all review comments for /one-shot (Ctrl+Enter)" }
+		});
+		this.copyBtnEl.innerHTML = `<span>Copy</span> <strong>Ctrl+↵</strong>`;
+		this.copyBtnEl.style.display = "none";
+		this.copyBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onCopyOneShotClickCallback?.();
+		});
+
+		this.hoverToggleBtnEl = leftStackEl.createEl("button", {
+			text: "Table of contents",
+			cls: "dynamic-slides-toc-hover-toggle",
+			attr: { type: "button", "aria-label": "Toggle TOC" }
+		});
 		this.hoverToggleBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			if (this.tocComp) {
@@ -161,16 +177,15 @@ export class PresentationModal extends Component {
 			}
 		});
 
-		// Bottom-right Zoom Toolbar
+		// Bottom-right Zoom Zone & Toolbar (slides smoothly in from the right on hover)
 		const bottomRightZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-right-zone" });
 		this.zoomToolbarEl = bottomRightZone.createDiv({ cls: "dynamic-slides-zoom-toolbar" });
 
 		this.zoomOutBtnEl = this.zoomToolbarEl.createEl("button", {
 			cls: "dynamic-slides-zoom-btn zoom-out",
-			text: "−"
+			text: "−",
+			attr: { type: "button", "aria-label": "Zoom out (-10%)", title: "Zoom out (-10%) [-]" }
 		});
-		this.zoomOutBtnEl.setAttribute("aria-label", "Zoom out (-10%)");
-		this.zoomOutBtnEl.setAttribute("title", "Zoom out (-10%) [Key -]");
 		this.zoomOutBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.zoomOut();
@@ -178,10 +193,9 @@ export class PresentationModal extends Component {
 
 		this.zoomValueBtnEl = this.zoomToolbarEl.createEl("button", {
 			cls: "dynamic-slides-zoom-value",
-			text: `${Math.round(this.zoomLevel * 100)}%`
+			text: `${Math.round(this.zoomLevel * 100)}%`,
+			attr: { type: "button", "aria-label": "Reset zoom (100%)", title: "Reset zoom to 100% [0]" }
 		});
-		this.zoomValueBtnEl.setAttribute("aria-label", "Reset zoom (100%)");
-		this.zoomValueBtnEl.setAttribute("title", "Reset zoom to 100% [Key 0]");
 		this.zoomValueBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.resetZoom();
@@ -189,10 +203,9 @@ export class PresentationModal extends Component {
 
 		this.zoomInBtnEl = this.zoomToolbarEl.createEl("button", {
 			cls: "dynamic-slides-zoom-btn zoom-in",
-			text: "+"
+			text: "+",
+			attr: { type: "button", "aria-label": "Zoom in (+10%)", title: "Zoom in (+10%) [+]" }
 		});
-		this.zoomInBtnEl.setAttribute("aria-label", "Zoom in (+10%)");
-		this.zoomInBtnEl.setAttribute("title", "Zoom in (+10%) [Key +]");
 		this.zoomInBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.zoomIn();
@@ -206,6 +219,12 @@ export class PresentationModal extends Component {
 		this.counterEl = this.mainAreaEl.createDiv({ cls: "dynamic-slides-footer-counter" });
 
 		this.contentEl.addEventListener('click', (evt) => {
+			const sel = window.getSelection();
+			if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+				// User just finished highlighting text — don't accidentally open media zoom or click links
+				return;
+			}
+
 			const target = evt.target as HTMLElement;
 
 			const childHeadingEl = target.closest('.dynamic-slides-child-heading') as HTMLElement;
@@ -264,55 +283,136 @@ export class PresentationModal extends Component {
 				}
 			}
 		});
+
+		this.boundMouseUpHandler = () => {
+			window.setTimeout(() => this.handleSelectionChange(), 10);
+		};
+		this.overlayEl.addEventListener("mouseup", this.boundMouseUpHandler);
+		this.contentEl.addEventListener("scroll", () => this.hideSelectionToolbar());
+	}
+
+	public getContentElement(): HTMLElement {
+		return this.contentEl;
+	}
+
+	public getZoomContentElement(): HTMLElement | null {
+		return this.zoomContentEl;
+	}
+
+	public getActiveZoomIndex(): number {
+		return this.activeZoomIndex;
+	}
+
+	public getActiveSelectionRange(): Range | null {
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+		const txt = sel.toString().trim();
+		if (!txt) return null;
+		const range = sel.getRangeAt(0);
+		const common = range.commonAncestorContainer;
+		const inSlide = this.contentEl.contains(common);
+		const inZoom = Boolean(this.zoomContentEl && this.zoomContentEl.contains(common));
+		if (!inSlide && !inZoom) return null;
+		return range.cloneRange();
+	}
+
+	private handleSelectionChange(): void {
+		const range = this.getActiveSelectionRange();
+		if (!range) {
+			this.hideSelectionToolbar();
+			return;
+		}
+		this.pendingSelectionRange = range;
+		this.showSelectionToolbar(range);
+	}
+
+	private showSelectionToolbar(range: Range): void {
+		this.hideSelectionToolbar(false);
+		const rect = range.getBoundingClientRect();
+		if (rect.width === 0 && rect.height === 0) return;
+
+		const bar = this.overlayEl.createDiv({ cls: "slideflow-selection-toolbar" });
+		bar.addEventListener("mousedown", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+		});
+		bar.addEventListener("click", (evt) => evt.stopPropagation());
+
+		const commentBtn = bar.createEl("button", {
+			cls: "slideflow-sel-btn",
+			attr: { type: "button" },
+		});
+		commentBtn.innerHTML = `<span>Comment</span> <strong>C</strong>`;
+		commentBtn.addEventListener("click", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const captured = this.pendingSelectionRange?.cloneRange() || range.cloneRange();
+			this.hideSelectionToolbar(true);
+			window.getSelection()?.removeAllRanges();
+			this.onSelectionCommentCallback?.(captured, false);
+		});
+
+		const voiceBtn = bar.createEl("button", {
+			cls: "slideflow-sel-btn",
+			attr: { type: "button" },
+		});
+		voiceBtn.innerHTML = `<span>Voice</span> <strong>V</strong>`;
+		voiceBtn.addEventListener("click", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const captured = this.pendingSelectionRange?.cloneRange() || range.cloneRange();
+			this.hideSelectionToolbar(true);
+			window.getSelection()?.removeAllRanges();
+			this.onSelectionCommentCallback?.(captured, true);
+		});
+
+		const estW = 190;
+		const left = Math.max(12, Math.min(window.innerWidth - estW - 12, rect.right - estW));
+		const top = rect.bottom + 8 + 40 < window.innerHeight ? rect.bottom + 8 : Math.max(12, rect.top - 44);
+		bar.style.left = `${Math.round(left)}px`;
+		bar.style.top = `${Math.round(top)}px`;
+
+		this.selectionToolbarEl = bar;
+	}
+
+	public hideSelectionToolbar(clearPending: boolean = true): void {
+		if (this.selectionToolbarEl) {
+			this.selectionToolbarEl.remove();
+			this.selectionToolbarEl = null;
+		}
+		if (clearPending) {
+			this.pendingSelectionRange = null;
+		}
 	}
 
 	public updateCockpitBar(state: CockpitBarState): void {
 		if (state.hasNoteDiff) {
 			this.diffToggleBtnEl.style.display = "inline-flex";
-			const label = state.diffEnabled
-				? `🟢 Diff ON (${state.dirtySlidesCount})`
-				: `Diff OFF (${state.dirtySlidesCount})`;
-			this.diffToggleBtnEl.setText(label);
+			this.diffToggleBtnEl.innerHTML = state.diffEnabled
+				? `<span>Diff on</span> <strong>D</strong>`
+				: `<span>Diff off</span> <strong>D</strong>`;
 			this.diffToggleBtnEl.toggleClass("is-active", state.diffEnabled);
-			this.diffToggleBtnEl.toggleClass("is-slide-dirty", state.currentSlideHasDiff);
 		} else {
 			this.diffToggleBtnEl.style.display = "none";
 		}
 
 		if (state.currentSlideCommentsCount > 0) {
-			this.commentTextBtnEl.setText(`💬 ${state.currentSlideCommentsCount} (C)`);
+			this.commentTextBtnEl.innerHTML = `<span>Comment (${state.currentSlideCommentsCount})</span> <strong>C</strong>`;
 			this.commentTextBtnEl.addClass("has-comments");
 		} else {
-			this.commentTextBtnEl.setText("💬 (C)");
+			this.commentTextBtnEl.innerHTML = `<span>Comment</span> <strong>C</strong>`;
 			this.commentTextBtnEl.removeClass("has-comments");
 		}
 
 		if (state.totalPendingCommentsCount > 0) {
 			this.queueBtnEl.style.display = "inline-flex";
-			this.queueBtnEl.setText(`📋 ${state.totalPendingCommentsCount} · /one-shot (Ctrl+↵)`);
+			this.queueBtnEl.innerHTML = `<span>Queue (${state.totalPendingCommentsCount})</span> <strong>R</strong>`;
+			this.copyBtnEl.style.display = "inline-flex";
+			this.copyBtnEl.innerHTML = `<span>Copy</span> <strong>Ctrl+↵</strong>`;
 		} else {
 			this.queueBtnEl.style.display = "none";
+			this.copyBtnEl.style.display = "none";
 		}
-	}
-
-	public refreshLinkModifiedBadges(isLinkModified: (href: string) => boolean): void {
-		const applyToRoot = (root: HTMLElement | null) => {
-			if (!root) return;
-			root.querySelectorAll(".slideflow-modified-pill").forEach((el) => el.remove());
-			const links = root.querySelectorAll<HTMLElement>("a.internal-link");
-			links.forEach((linkEl) => {
-				const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "";
-				if (href && isLinkModified(href)) {
-					const pill = document.createElement("span");
-					pill.className = "slideflow-modified-pill";
-					pill.textContent = "🟢 Modifié";
-					pill.setAttribute("title", "Modifications non lues dans cette note");
-					linkEl.appendChild(pill);
-				}
-			});
-		};
-		applyToRoot(this.contentEl);
-		applyToRoot(this.zoomContentEl);
 	}
 
 	public setZoom(zoom: number, triggerCallback: boolean = true): void {
@@ -394,7 +494,8 @@ export class PresentationModal extends Component {
 		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-title", text: noteTitle });
 		const returnBtn = this.subNoteBannerEl.createEl("button", {
 			cls: "dynamic-slides-subnote-return-btn",
-			text: "↩ Retour (Échap)"
+			text: "Return (Esc)",
+			attr: { type: "button" }
 		});
 
 		returnBtn.addEventListener("click", (evt) => {
@@ -464,9 +565,7 @@ export class PresentationModal extends Component {
 			}
 
 			const startTime = performance.now();
-			const easeInOutSine = (t: number): number => {
-				return 0.5 * (1 - Math.cos(Math.PI * t));
-			};
+			const easeInOutSine = (t: number): number => 0.5 * (1 - Math.cos(Math.PI * t));
 
 			const step = (currentTime: number) => {
 				const elapsed = currentTime - startTime;
@@ -561,6 +660,7 @@ export class PresentationModal extends Component {
 	}
 
 	public openMediaZoom(index: number, animated: boolean = true) {
+		this.hideSelectionToolbar();
 		if (this.contentEl) {
 			this.contentEl.style.opacity = '0';
 		}
@@ -577,9 +677,9 @@ export class PresentationModal extends Component {
 			}
 			const closeBtn = this.zoomOverlayEl.createEl("button", {
 				cls: "dynamic-slides-zoom-close-btn",
-				text: "✕"
+				text: "✕",
+				attr: { type: "button", "aria-label": "Close zoom" }
 			});
-			closeBtn.setAttribute("aria-label", "Close zoom");
 			closeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
 				this.closeMediaZoom(true);
@@ -588,8 +688,11 @@ export class PresentationModal extends Component {
 
 			this.zoomContentEl = this.zoomOverlayEl.createDiv({ cls: "dynamic-slides-media-zoom-content" });
 			this.zoomOverlayEl.addEventListener("click", (evt) => {
+				const sel = window.getSelection();
+				if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+					return;
+				}
 				const target = evt.target as HTMLElement;
-				// Allow clicking internal links directly inside zoomed tables (e.g., 🎯 Projets.md!)
 				const linkEl = target.closest(".internal-link") as HTMLElement | null;
 				if (linkEl) {
 					const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href");
@@ -614,6 +717,9 @@ export class PresentationModal extends Component {
 			this.zoomContentEl.empty();
 			const targetMedia = zoomableElements[index];
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
+
+			// Strip Obsidian's copy-code-button everywhere inside zoomed media
+			clone.querySelectorAll(".copy-code-button").forEach((btn) => btn.remove());
 
 			const isIframe = targetMedia.tagName.toLowerCase() === "iframe" || targetMedia.querySelector("iframe") !== null;
 			const isTable = !isIframe && (targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null);
@@ -648,7 +754,21 @@ export class PresentationModal extends Component {
 				enhanceMermaidSvgElements(wrapper);
 			} else if (isCode) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
-				wrapper.appendChild(clone);
+				const frame = wrapper.createDiv({ cls: "slideflow-code-frame" });
+				const codeEl = clone.querySelector("code") || clone;
+				const langCls = Array.from(codeEl.classList).find((c) => c.startsWith("language-"))
+					|| Array.from(clone.classList).find((c) => c.startsWith("language-"));
+				const langLabel = langCls ? langCls.replace(/^language-/, "") : "code";
+
+				const frameHeader = frame.createDiv({ cls: "slideflow-code-frame-header" });
+				const dots = frameHeader.createDiv({ cls: "slideflow-code-frame-dots" });
+				dots.createSpan({ cls: "slideflow-code-dot" });
+				dots.createSpan({ cls: "slideflow-code-dot" });
+				dots.createSpan({ cls: "slideflow-code-dot" });
+				frameHeader.createSpan({ cls: "slideflow-code-frame-lang", text: langLabel });
+
+				const frameBody = frame.createDiv({ cls: "slideflow-code-frame-body" });
+				frameBody.appendChild(clone);
 			} else {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-image" });
 				wrapper.appendChild(clone);
@@ -658,6 +778,7 @@ export class PresentationModal extends Component {
 	}
 
 	public closeMediaZoom(animated: boolean = true) {
+		this.hideSelectionToolbar();
 		if (this.zoomOverlayEl) {
 			const elToClose = this.zoomOverlayEl;
 			this.zoomOverlayEl = null;
@@ -822,6 +943,7 @@ export class PresentationModal extends Component {
 		enterFrom: 'start' | 'end' = 'start',
 		decoration?: SlideRenderDecoration
 	) {
+		this.hideSelectionToolbar();
 		this.cancelScrollAnimation(false);
 		this.hasCompletedAllSteps = false;
 
@@ -861,23 +983,6 @@ export class PresentationModal extends Component {
 			this
 		);
 
-		// Decorate child headings with unread diff dot
-		if (decoration?.dirtyNodeIds || decoration?.descendantDirtyNodeIds) {
-			this.contentEl.querySelectorAll<HTMLElement>(".dynamic-slides-child-heading").forEach((el) => {
-				const cid = el.getAttribute("data-node-id") || "";
-				if (decoration.dirtyNodeIds?.has(cid)) {
-					el.createSpan({ cls: "slideflow-child-diff-badge", text: "🟢 Modifié" });
-				} else if (decoration.descendantDirtyNodeIds?.has(cid)) {
-					el.createSpan({ cls: "slideflow-child-diff-badge is-sub", text: "🟢" });
-				}
-			});
-		}
-
-		// Decorate internal links pointing to notes/sub-notes with unread diffs
-		if (decoration?.isLinkModified) {
-			this.refreshLinkModifiedBadges(decoration.isLinkModified);
-		}
-
 		const mediaElements = this.detectMediaElements();
 		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
 		if (isOnlyZoomable) {
@@ -902,6 +1007,8 @@ export class PresentationModal extends Component {
 	}
 
 	public close() {
+		this.hideSelectionToolbar();
+		this.overlayEl.removeEventListener("mouseup", this.boundMouseUpHandler);
 		this.cancelScrollAnimation(false);
 		this.closeMediaZoom(false);
 		this.hideSubNoteBanner();

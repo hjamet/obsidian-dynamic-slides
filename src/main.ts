@@ -10,6 +10,12 @@ import {
 	SlideDiffInfo,
 } from "./diffEngine";
 import { BaselinesStore, normalizeVaultPath } from "./baselinesStore";
+import {
+	ExtractedCommentContext,
+	extractSelectionContext,
+	extractVisibleSlideContext,
+	extractZoomContext,
+} from "./contextExtractor";
 import { ReviewComment, ReviewStore } from "./reviewStore";
 import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
@@ -100,6 +106,7 @@ export default class SlideFlowPlugin extends Plugin {
 	private diffEnabled: boolean = false;
 	private seenInSession: Set<string> = new Set();
 	private slideReadTimerId: number | null = null;
+	private pendingCommentContext: ExtractedCommentContext | null = null;
 
 	async onload() {
 		console.log("Loading SlideFlow plugin");
@@ -128,8 +135,8 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "start-dynamic-slides",
-			name: "SlideFlow: Open slide presentation & review cockpit",
+			id: "start-slideflow",
+			name: "Open slide presentation & review cockpit",
 			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "p" }],
 			callback: () => {
 				void this.startPresentation();
@@ -138,7 +145,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 		this.addCommand({
 			id: "copy-slideflow-oneshot",
-			name: "SlideFlow: Copy pending review comments for /one-shot",
+			name: "Copy pending review comments for /one-shot",
 			callback: () => {
 				void this.copyPendingCommentsExport(true, false);
 			}
@@ -186,7 +193,6 @@ export default class SlideFlowPlugin extends Plugin {
 		);
 
 		if (ctx.totalDirtySlides === 0 && !ctx.deletedSectionsMarkdown) {
-			// All slides already seen or content reverted to baseline -> purge entry to 0 bytes
 			await this.baselinesStore.markEntireNoteRead(normPath);
 			return { ctx: null, autoEnable: false };
 		}
@@ -254,13 +260,6 @@ export default class SlideFlowPlugin extends Plugin {
 		return targetFile instanceof TFile ? targetFile : null;
 	}
 
-	private isLinkTargetModified = (href: string): boolean => {
-		if (!href || href.startsWith("#")) return false;
-		const targetFile = this.resolveLinkTargetFile(href, this.activeSourcePath);
-		if (!targetFile) return false;
-		return this.baselinesStore.hasUnreadBaseline(targetFile.path);
-	};
-
 	private buildSlideRenderDecoration(node: SectionNode): SlideRenderDecoration {
 		let overrideMarkdown: string | undefined = undefined;
 		const slideDiff = this.activeDiffContext?.slideDiffs.get(node.id);
@@ -282,12 +281,7 @@ export default class SlideFlowPlugin extends Plugin {
 			overrideMarkdown = parts.join("\n\n");
 		}
 
-		return {
-			overrideMarkdown,
-			dirtyNodeIds: this.getDirtyNodeIdSet(),
-			descendantDirtyNodeIds: this.activeDiffContext?.descendantDirtyNodeIds,
-			isLinkModified: this.isLinkTargetModified,
-		};
+		return { overrideMarkdown };
 	}
 
 	private updateCockpitUI() {
@@ -311,10 +305,6 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 	}
 
-	/**
-	 * Planifie le marquage comme vu d'une slide après > 1s de consultation (pour la PROCHAINE ouverture).
-	 * Le diff reste visible durant la session en cours et l'ancien texte reste disponible pour les commentaires !
-	 */
 	private scheduleSlideSeenTimer(node: SectionNode) {
 		this.clearSlideReadTimer();
 		const ctx = this.activeDiffContext;
@@ -335,7 +325,6 @@ export default class SlideFlowPlugin extends Plugin {
 
 		this.slideReadTimerId = window.setTimeout(() => {
 			this.slideReadTimerId = null;
-			// Vérifier que l'utilisateur est toujours sur la même note et la même slide
 			if (
 				!this.activeModal ||
 				this.activeSourcePath !== targetNotePath ||
@@ -358,34 +347,32 @@ export default class SlideFlowPlugin extends Plugin {
 	private async startPresentation() {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view) {
-			new Notice("Aucune note Markdown active pour SlideFlow.");
+			new Notice("No active Markdown note for SlideFlow.");
 			return;
 		}
 
 		const file = view.file;
 		if (!file) {
-			new Notice("Fichier introuvable.");
+			new Notice("File not found.");
 			return;
 		}
 
 		const markdownText = view.editor.getValue();
 		if (!markdownText.trim()) {
-			new Notice("Note vide : impossible de démarrer SlideFlow.");
+			new Notice("Empty note: cannot start SlideFlow.");
 			return;
 		}
 
-		// Recharger les baselines (Solution B) et les commentaires en attente
 		await Promise.all([
 			this.baselinesStore.reload().catch((err) => {
-				console.error("[SlideFlow] Erreur lecture unread_baselines.json:", err);
-				new Notice(`SlideFlow: erreur lecture baselines (${err.message})`);
+				console.error("[SlideFlow] Failed reading unread_baselines.json:", err);
+				new Notice(`SlideFlow: failed reading baselines (${err.message})`);
 			}),
 			this.reviewStore.load().catch((err) => {
-				console.error("[SlideFlow] Erreur lecture pending_reviews.json:", err);
+				console.error("[SlideFlow] Failed reading pending_reviews.json:", err);
 			}),
 		]);
 
-		// Préchauffer le serveur Faster-Whisper GPU silencieusement en arrière-plan
 		void this.voiceService.prewarmServer();
 
 		this.documentStack = [];
@@ -397,7 +384,7 @@ export default class SlideFlowPlugin extends Plugin {
 		const parsed = parseMarkdownSections(markdownText, cache?.headings);
 
 		if (parsed.error === "no_headings") {
-			new Notice("Note sans titres H1–H6 : présentation en slide unique.");
+			new Notice("Note without headings: presenting as a single slide.");
 		}
 
 		this.rootNode = parsed.root;
@@ -453,8 +440,10 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onCommentVoiceClickCallback = () => this.openCommentModal(true);
 		this.activeModal.onOpenQueueClickCallback = () => this.toggleReviewDrawer();
 		this.activeModal.onCopyOneShotClickCallback = () => void this.copyPendingCommentsExport(true, false);
+		this.activeModal.onSelectionCommentCallback = (range: Range, startWithVoice: boolean) => {
+			this.openCommentModal(startWithVoice, range);
+		};
 
-		// Monter CommentOverlayModal et ReviewDrawer DANS overlayEl pour le plein écran
 		const overlayEl = this.activeModal.getOverlayElement();
 		this.commentModal = new CommentOverlayModal(overlayEl, this.voiceService, {
 			onSubmit: async (commentText: string, editingId?: string) => {
@@ -468,7 +457,7 @@ export default class SlideFlowPlugin extends Plugin {
 				}
 			},
 			onClose: () => {
-				// Return keyboard focus cleanly to presentation
+				this.pendingCommentContext = null;
 			},
 		});
 
@@ -492,7 +481,7 @@ export default class SlideFlowPlugin extends Plugin {
 				if (this.tocComp && this.currentNode) {
 					this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 				}
-				new Notice(`🗑️ File vidée (${count} commentaire(s) archivé(s) localement).`);
+				new Notice(`Queue cleared (${count} archived locally).`);
 			},
 			onClose: () => {
 				// no-op
@@ -555,7 +544,7 @@ export default class SlideFlowPlugin extends Plugin {
 			(this.activeDiffContext.totalDirtySlides === 0 &&
 				!this.activeDiffContext.deletedSectionsMarkdown)
 		) {
-			new Notice("Aucun diff non lu sur cette note.");
+			new Notice("No unread diff on this note.");
 			return;
 		}
 		this.diffEnabled = !this.diffEnabled;
@@ -569,12 +558,12 @@ export default class SlideFlowPlugin extends Plugin {
 			);
 		}
 		this.updateCockpitUI();
-		new Notice(this.diffEnabled ? "🟢 Mode Diff activé" : "Mode Diff masqué");
+		new Notice(this.diffEnabled ? "Diff view enabled" : "Diff view hidden");
 	}
 
 	private jumpToNextDiffSlide() {
 		if (!this.activeDiffContext || this.activeDiffContext.totalDirtySlides === 0) {
-			new Notice("Aucune slide modifiée dans cette note.");
+			new Notice("No modified slide in this note.");
 			return;
 		}
 		const dirtyIds = this.getDirtyNodeIdSet();
@@ -589,15 +578,61 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 	}
 
-	private openCommentModal(startWithVoice: boolean) {
-		if (!this.commentModal || !this.currentNode) return;
+	private openCommentModal(startWithVoice: boolean, explicitRange?: Range | null) {
+		if (!this.commentModal || !this.currentNode || !this.activeModal) return;
+
 		const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
 		const noteTitle =
 			currentFile instanceof TFile
 				? currentFile.basename
 				: this.activeSourcePath.split("/").pop()?.replace(/\.md$/, "") || "Note";
 
-		const slideDiff = this.activeDiffContext?.slideDiffs.get(this.currentNode.id);
+		const slideDiff: SlideDiffInfo | undefined = this.activeDiffContext?.slideDiffs.get(
+			this.currentNode.id
+		);
+
+		// Determine exact comment context in strict priority:
+		// 1. Highlighted text selection
+		// 2. Active zoomed media (table / code / diagram / image / embed)
+		// 3. Currently visible viewport text of the slide (excluding hidden media)
+		const activeRange = explicitRange ?? this.activeModal.getActiveSelectionRange();
+		let extracted: ExtractedCommentContext | null = null;
+		let highlightRange: Range | null = null;
+
+		if (activeRange) {
+			extracted = extractSelectionContext(activeRange, this.activeSourcePath, this.currentNode.title);
+			if (extracted) {
+				highlightRange = activeRange;
+				this.activeModal.hideSelectionToolbar(true);
+				window.getSelection()?.removeAllRanges();
+			}
+		}
+
+		if (!extracted && this.activeModal.isMediaZoomActive()) {
+			const zoomEl = this.activeModal.getZoomContentElement();
+			if (zoomEl) {
+				extracted = extractZoomContext(
+					zoomEl,
+					this.activeSourcePath,
+					this.currentNode.title,
+					this.activeModal.getActiveZoomIndex(),
+					this.currentNode.rawOwnMarkdown
+				);
+			}
+		}
+
+		if (!extracted) {
+			extracted = extractVisibleSlideContext(
+				this.activeModal.getContentElement(),
+				this.activeSourcePath,
+				this.currentNode.title,
+				slideDiff,
+				this.diffEnabled
+			);
+		}
+
+		this.pendingCommentContext = extracted;
+
 		const existingComments = this.reviewStore.getForSlide(
 			this.activeSourcePath,
 			this.currentNode.title
@@ -607,9 +642,12 @@ export default class SlideFlowPlugin extends Plugin {
 			noteTitle,
 			notePath: this.activeSourcePath,
 			sectionHeading: this.currentNode.title,
-			hadDiff: Boolean(slideDiff?.hasChanges),
+			scopeLabel: extracted.scopeLabel,
+			hadDiff: extracted.hadDiff,
 			existingComments,
 			startWithVoice,
+			anchorRect: extracted.anchorRect || null,
+			highlightRange,
 		});
 	}
 
@@ -617,7 +655,7 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!this.currentNode) return;
 		if (editingId) {
 			await this.reviewStore.updateComment(editingId, commentText);
-			new Notice("💬 Commentaire mis à jour.");
+			new Notice("Comment updated.");
 		} else {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
 			const noteTitle =
@@ -625,10 +663,10 @@ export default class SlideFlowPlugin extends Plugin {
 					? currentFile.basename
 					: this.activeSourcePath.split("/").pop()?.replace(/\.md$/, "") || "Note";
 
-			const slideDiff: SlideDiffInfo | undefined = this.activeDiffContext?.slideDiffs.get(
-				this.currentNode.id
-			);
-			const hadDiff = Boolean(slideDiff?.hasChanges);
+			const ctx = this.pendingCommentContext;
+			const excerpt = ctx?.excerpt || this.currentNode.rawOwnMarkdown.trim();
+			const hadDiff = Boolean(ctx?.hadDiff);
+			const oldExcerpt = hadDiff ? ctx?.oldExcerpt ?? null : undefined;
 
 			await this.reviewStore.addComment({
 				projectRootPath: this.sessionRootProjectPath,
@@ -638,20 +676,20 @@ export default class SlideFlowPlugin extends Plugin {
 				sectionLevel: this.currentNode.level,
 				lineStart: this.currentNode.lineStart + 1,
 				lineEnd: this.currentNode.lineEnd + 1,
-				excerpt: this.currentNode.rawOwnMarkdown.trim(),
+				scopeType: ctx?.scopeType || "viewport",
+				scopeLabel: ctx?.scopeLabel || "Slide",
+				contextKey: ctx?.contextKey,
+				excerpt,
 				hadDiff,
-				oldExcerpt: hadDiff ? slideDiff?.rawOldMarkdown ?? null : undefined,
+				oldExcerpt,
 				commentText,
 			});
 
 			const snippet = commentText.length > 52 ? commentText.slice(0, 52) + "…" : commentText;
-			new Notice(
-				hadDiff
-					? `💬 Commentaire (+ancien texte diff) ajouté : « ${snippet} »`
-					: `💬 Commentaire ajouté : « ${snippet} »`
-			);
+			new Notice(`Comment saved (${ctx?.scopeLabel || "Slide"}): "${snippet}"`);
 		}
 
+		this.pendingCommentContext = null;
 		this.updateCockpitUI();
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
@@ -674,7 +712,7 @@ export default class SlideFlowPlugin extends Plugin {
 		await this.reviewStore.load();
 		const count = this.reviewStore.getCount();
 		if (count === 0) {
-			new Notice("Aucun commentaire en attente à copier.");
+			new Notice("No pending comments to copy.");
 			return;
 		}
 
@@ -693,10 +731,8 @@ export default class SlideFlowPlugin extends Plugin {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 		}
 
-		const modeLabel = includeOneShotPrefix ? "/one-shot" : "sans /one-shot";
-		new Notice(
-			`📋 ${count} commentaire(s) copié(s) (${modeLabel}) ! Collez dans Antigravity (R pour gérer/vider la file).`
-		);
+		const modeLabel = includeOneShotPrefix ? "/one-shot" : "plain";
+		new Notice(`Copied ${count} comment(s) (${modeLabel}). Press R to manage or clear queue.`);
 	}
 
 	private async jumpToCommentTarget(comment: ReviewComment) {
@@ -764,7 +800,6 @@ export default class SlideFlowPlugin extends Plugin {
 			decodedLink = linkpath;
 		}
 
-		// Local anchors (#Heading)
 		if (decodedLink.startsWith("#")) {
 			const anchorQuery = decodedLink.substring(1).trim().toLowerCase();
 			const targetNode = this.flatNodes.find(n => {
@@ -778,7 +813,7 @@ export default class SlideFlowPlugin extends Plugin {
 			if (targetNode) {
 				this.goToNode(targetNode, 'zoom-in', 'start');
 			} else {
-				new Notice("Section introuvable dans cette note.");
+				new Notice("Section not found in presentation.");
 			}
 			return;
 		}
@@ -803,7 +838,7 @@ export default class SlideFlowPlugin extends Plugin {
 				if (targetNode) {
 					this.goToNode(targetNode, 'zoom-in', 'start');
 				} else {
-					new Notice("Section introuvable dans cette note.");
+					new Notice("Section not found in presentation.");
 				}
 				return;
 			}
@@ -823,7 +858,6 @@ export default class SlideFlowPlugin extends Plugin {
 				});
 			}
 
-			// Recharger les baselines fraîches à l'entrée de la sous-note
 			await this.baselinesStore.reload().catch(() => undefined);
 
 			const markdownText = await this.app.vault.read(targetFile);
@@ -875,14 +909,8 @@ export default class SlideFlowPlugin extends Plugin {
 			if (this.tocComp && this.currentNode) {
 				this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 			}
-
-			new Notice(
-				this.diffEnabled
-					? `📄 ${targetFile.basename} (🟢 Diff actif : ${this.activeDiffContext?.totalDirtySlides || 0} slide(s))`
-					: `📄 ${targetFile.basename}`
-			);
 		} else {
-			new Notice(`Fichier ou section introuvable pour le lien : ${decodedLink}`);
+			new Notice(`File or section not found: ${decodedLink}`);
 		}
 	}
 
@@ -899,8 +927,6 @@ export default class SlideFlowPlugin extends Plugin {
 		this.diffEnabled = parentFrame.diffEnabled;
 		this.seenInSession = parentFrame.seenInSession;
 
-		// Recharger unread_baselines.json afin que les pastilles 🟢 Modifié se mettent à jour
-		// immédiatement si Henri vient de lire intégralement la sous-note !
 		await this.baselinesStore.reload().catch(() => undefined);
 
 		if (this.activeModal && this.currentNode) {
@@ -928,8 +954,6 @@ export default class SlideFlowPlugin extends Plugin {
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 		}
-
-		new Notice(`↩ Retour : ${parentFrame.fileTitle}`);
 	}
 
 	private goToNode(
@@ -966,7 +990,7 @@ export default class SlideFlowPlugin extends Plugin {
 		if (idx >= 0 && idx < this.flatNodes.length - 1) {
 			this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
 		} else if (idx === this.flatNodes.length - 1) {
-			new Notice("Fin de la note atteinte.");
+			new Notice("End of presentation reached.");
 		}
 	}
 
@@ -979,7 +1003,7 @@ export default class SlideFlowPlugin extends Plugin {
 			if (this.documentStack.length > 0) {
 				void this.popDocumentStack();
 			} else {
-				new Notice("Début de la note atteint.");
+				new Notice("Beginning of presentation reached.");
 			}
 		}
 	}
@@ -1070,7 +1094,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl("h2", { text: "SlideFlow — Présentation, Diffs & Revue" });
+		containerEl.createEl("h2", { text: "SlideFlow" });
 
 		const setting = new Setting(containerEl)
 			.setName("Transition animation duration")
@@ -1119,11 +1143,11 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl("h3", { text: "Diffs (Dirty-Only _agents/unread_baselines.json)" });
+		containerEl.createEl("h3", { text: "Diffs (_agents/unread_baselines.json)" });
 
 		const diffThreshSetting = new Setting(containerEl)
-			.setName("Seuil de bascule bloc rouge/vert (%)")
-			.setDesc(`Au-delà de ${Math.round(this.plugin.settings.blockDiffThreshold * 100)}% de mots modifiés, le paragraphe s'affiche en bloc complet (défaut : 25%).`)
+			.setName("Block diff threshold (%)")
+			.setDesc(`Above ${Math.round(this.plugin.settings.blockDiffThreshold * 100)}% modified tokens, switches paragraph to full red/green block diff (default: 25%).`)
 			.addSlider(slider =>
 				slider
 					.setLimits(10, 80, 5)
@@ -1132,13 +1156,13 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.blockDiffThreshold = value / 100;
 						await this.plugin.saveSettings();
-						diffThreshSetting.setDesc(`Au-delà de ${value}% de mots modifiés, le paragraphe s'affiche en bloc complet (défaut : 25%).`);
+						diffThreshSetting.setDesc(`Above ${value}% modified tokens, switches paragraph to full red/green block diff (default: 25%).`);
 					})
 			);
 
 		const readDelaySetting = new Setting(containerEl)
-			.setName("Délai de marquage « vu » d'une slide (secondes)")
-			.setDesc(`Actuel : ${(this.plugin.settings.autoMarkReadDelayMs / 1000).toFixed(1)}s — passé ce délai sur une slide, son diff disparaîtra à la prochaine ouverture.`)
+			.setName("Auto-mark slide read delay (seconds)")
+			.setDesc(`Current: ${(this.plugin.settings.autoMarkReadDelayMs / 1000).toFixed(1)}s — after staying on a modified slide, its diff disappears on next open.`)
 			.addSlider(slider =>
 				slider
 					.setLimits(0.5, 5.0, 0.5)
@@ -1147,15 +1171,15 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.autoMarkReadDelayMs = Math.round(value * 1000);
 						await this.plugin.saveSettings();
-						readDelaySetting.setDesc(`Actuel : ${value.toFixed(1)}s — passé ce délai sur une slide, son diff disparaîtra à la prochaine ouverture.`);
+						readDelaySetting.setDesc(`Current: ${value.toFixed(1)}s — after staying on a modified slide, its diff disappears on next open.`);
 					})
 			);
 
-		containerEl.createEl("h3", { text: "Dictée vocale locale Faster-Whisper GPU (V / Ctrl+M)" });
+		containerEl.createEl("h3", { text: "Local Faster-Whisper GPU Voice Dictation (V / Ctrl+M)" });
 
 		new Setting(containerEl)
-			.setName("Démarrer automatiquement le serveur Faster-Whisper GPU")
-			.setDesc("Lance silencieusement whisper_dictation_server.py en arrière-plan dès l'ouverture de SlideFlow.")
+			.setName("Auto-start local Faster-Whisper GPU server")
+			.setDesc("Silently warms up whisper_dictation_server.py in the background when SlideFlow opens.")
 			.addToggle(toggle =>
 				toggle
 					.setValue(this.plugin.settings.autoStartWhisperServer)
@@ -1166,8 +1190,8 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("URL du serveur Whisper")
-			.setDesc("Adresse locale du micro-serveur HTTP Faster-Whisper (défaut : http://127.0.0.1:3056).")
+			.setName("Whisper server URL")
+			.setDesc("Local HTTP endpoint (default: http://127.0.0.1:3056).")
 			.addText(text =>
 				text
 					.setPlaceholder("http://127.0.0.1:3056")
@@ -1179,8 +1203,8 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Chemin du script serveur Whisper")
-			.setDesc("Chemin relatif au coffre ou absolu vers whisper_dictation_server.py.")
+			.setName("Whisper server script path")
+			.setDesc("Vault-relative or absolute path to whisper_dictation_server.py.")
 			.addText(text =>
 				text
 					.setPlaceholder("_agents/scripts-for-skills/whisper_dictation_server.py")
@@ -1192,8 +1216,8 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Exécutable Python")
-			.setDesc("Commande Python disposant de faster-whisper (défaut : python).")
+			.setName("Python executable")
+			.setDesc("Python command with faster-whisper installed (default: python).")
 			.addText(text =>
 				text
 					.setPlaceholder("python")
@@ -1205,14 +1229,14 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Modèle Faster-Whisper")
-			.setDesc("Modèle local chargé sur GPU CUDA FP16 (medium recommandé).")
+			.setName("Whisper model")
+			.setDesc("Local GPU CUDA FP16 model (medium recommended).")
 			.addDropdown(dd =>
 				dd
-					.addOption("tiny", "tiny (ultra-rapide)")
-					.addOption("base", "base (rapide)")
-					.addOption("small", "small (équilibré)")
-					.addOption("medium", "medium (recommandé GPU)")
+					.addOption("tiny", "tiny")
+					.addOption("base", "base")
+					.addOption("small", "small")
+					.addOption("medium", "medium (recommended)")
 					.addOption("large-v3-turbo", "large-v3-turbo")
 					.setValue(this.plugin.settings.whisperModel)
 					.onChange(async (val) => {
@@ -1222,13 +1246,13 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Langue de dictée")
-			.setDesc("Code ISO (fr, en) ou auto pour détection automatique.")
+			.setName("Dictation language")
+			.setDesc("ISO code (fr, en) or auto.")
 			.addDropdown(dd =>
 				dd
-					.addOption("fr", "Français (fr)")
+					.addOption("fr", "French (fr)")
 					.addOption("en", "English (en)")
-					.addOption("auto", "Auto-détection")
+					.addOption("auto", "Auto-detect")
 					.setValue(this.plugin.settings.whisperLanguage)
 					.onChange(async (val) => {
 						this.plugin.settings.whisperLanguage = val;
