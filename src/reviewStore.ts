@@ -1,12 +1,16 @@
 /**
- * ReviewStore — File de staging transactionnelle hors notes (`.obsidian/plugins/slideflow/pending_reviews.json`).
+ * ReviewStore — Review comment store for SlideFlow.
  *
- * - Zéro pollution des notes Markdown du coffre.
- * - Zéro perte : chaque ajout/édition/suppression est immédiatement sauvegardé sur disque,
- *   et chaque export `/one-shot` est archivé dans `sent_reviews_archive.json` (30 derniers lots).
- * - Regroupement dédupliqué : plusieurs commentaires sur une même slide / portée (zoom, sélection, viewport)
- *   ne copient le texte source QU'UNE SEULE FOIS suivi de tous les commentaires dessous !
- * - Capture `oldExcerpt` (ancien texte avant diff) ET `excerpt` (nouveau texte actuel) sur les zones avec diff.
+ * - Clipboard mode (`persistenceEnabled = false`):
+ *   Purely session-ephemeral in memory; comments vanish between sessions once closed.
+ *   Tracks `hasUncopiedChanges` so exiting with uncopied comments prompts a confirmation dialog.
+ * - Direct CLI mode (`persistenceEnabled = true`):
+ *   Persisted immediately to `.obsidian/plugins/slideflow/pending_reviews.json` so comments
+ *   survive presentation closure and only vanish AFTER the CLI invocation succeeds (exit code 0).
+ * - Clean XML export (`/one-shot` + `<slideflow_review>`) so Markdown code blocks, headings,
+ *   and blockquotes inside notes never collide with the comment structure.
+ * - Deduplicated grouping per `(notePath, contextKey)` with both `<previous_text>` and
+ *   `<current_text>` whenever the commented zone contained a diff.
  */
 
 import { App } from "obsidian";
@@ -21,7 +25,7 @@ export interface ReviewComment {
 	sectionHeading: string;
 	sectionLevel: number;
 	lineStart: number; // 1-indexed
-	lineEnd: number;   // 1-indexed
+	lineEnd: number; // 1-indexed
 	scopeType?: CommentScopeType;
 	scopeLabel?: string;
 	contextKey?: string;
@@ -39,23 +43,34 @@ interface PendingReviewsFile {
 	comments: ReviewComment[];
 }
 
-interface SentBatchArchiveEntry {
-	exportedAt: string;
-	includeOneShotPrefix: boolean;
-	count: number;
-	comments: ReviewComment[];
-	formattedText: string;
+function escapeXmlAttr(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\r?\n/g, " ");
 }
 
-interface SentReviewsArchiveFile {
-	version: number;
-	batches: SentBatchArchiveEntry[];
+function escapeXmlText(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function wrapCdata(raw: string): string {
+	const clean = raw.replace(/\r\n/g, "\n").trim();
+	const safe = clean.replace(/\]\]>/g, "]]]]><![CDATA[>");
+	return `<![CDATA[\n${safe}\n]]>`;
 }
 
 export class ReviewStore {
 	private app: App;
 	private pluginDir: string;
 	private comments: ReviewComment[] = [];
+	private persistenceEnabled: boolean = false;
+	private hasUncopiedChanges: boolean = false;
 
 	constructor(app: App, pluginDir: string) {
 		this.app = app;
@@ -66,23 +81,45 @@ export class ReviewStore {
 		return `${this.pluginDir}/pending_reviews.json`;
 	}
 
-	private get archiveFilePath(): string {
-		return `${this.pluginDir}/sent_reviews_archive.json`;
+	public setPersistenceEnabled(enabled: boolean): void {
+		this.persistenceEnabled = enabled;
 	}
 
-	public async load(): Promise<ReviewComment[]> {
+	public isPersistenceEnabled(): boolean {
+		return this.persistenceEnabled;
+	}
+
+	/**
+	 * Initializes comments for a new presentation session:
+	 * - In Direct CLI mode: loads persisted pending comments from disk.
+	 * - In Clipboard mode: starts completely clean in memory (ephemeral per session).
+	 */
+	public async initForSession(persistenceEnabled: boolean): Promise<ReviewComment[]> {
+		this.persistenceEnabled = persistenceEnabled;
+		if (!persistenceEnabled) {
+			this.comments = [];
+			this.hasUncopiedChanges = false;
+			return [];
+		}
+		return this.loadFromDisk();
+	}
+
+	public async loadFromDisk(): Promise<ReviewComment[]> {
 		const adapter = this.app.vault.adapter;
 		if (!(await adapter.exists(this.pendingFilePath))) {
 			this.comments = [];
+			this.hasUncopiedChanges = false;
 			return this.comments;
 		}
 		const raw = await adapter.read(this.pendingFilePath);
 		const parsed = JSON.parse(raw) as PendingReviewsFile;
 		this.comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+		this.hasUncopiedChanges = this.comments.length > 0;
 		return this.comments;
 	}
 
-	private async save(): Promise<void> {
+	private async persistIfEnabled(): Promise<void> {
+		if (!this.persistenceEnabled) return;
 		const adapter = this.app.vault.adapter;
 		if (!(await adapter.exists(this.pluginDir))) {
 			await adapter.mkdir(this.pluginDir);
@@ -112,6 +149,14 @@ export class ReviewStore {
 		return this.comments.filter((c) => c.notePath === notePath).length;
 	}
 
+	public hasUncopiedOrUnsent(inFlightIds?: Set<string>): boolean {
+		if (this.comments.length === 0) return false;
+		if (this.persistenceEnabled) {
+			return this.comments.some((c) => !inFlightIds?.has(c.id));
+		}
+		return this.hasUncopiedChanges;
+	}
+
 	public async addComment(
 		input: Omit<ReviewComment, "id" | "createdAt">
 	): Promise<ReviewComment> {
@@ -122,7 +167,8 @@ export class ReviewStore {
 			createdAt: new Date().toISOString(),
 		};
 		this.comments.push(item);
-		await this.save();
+		this.hasUncopiedChanges = true;
+		await this.persistIfEnabled();
 		return item;
 	}
 
@@ -131,7 +177,9 @@ export class ReviewStore {
 		if (!target) return null;
 		target.commentText = newText.trim();
 		target.updatedAt = new Date().toISOString();
-		await this.save();
+		target.copiedAt = undefined;
+		this.hasUncopiedChanges = true;
+		await this.persistIfEnabled();
 		return target;
 	}
 
@@ -139,10 +187,27 @@ export class ReviewStore {
 		const before = this.comments.length;
 		this.comments = this.comments.filter((c) => c.id !== id);
 		if (this.comments.length !== before) {
-			await this.save();
+			if (this.comments.length === 0) {
+				this.hasUncopiedChanges = false;
+			}
+			await this.persistIfEnabled();
 			return true;
 		}
 		return false;
+	}
+
+	public async removeCommentsByIds(ids: string[]): Promise<number> {
+		const idSet = new Set(ids);
+		const before = this.comments.length;
+		this.comments = this.comments.filter((c) => !idSet.has(c.id));
+		const removed = before - this.comments.length;
+		if (this.comments.length === 0) {
+			this.hasUncopiedChanges = false;
+		}
+		if (removed > 0) {
+			await this.persistIfEnabled();
+		}
+		return removed;
 	}
 
 	public async markAllCopied(): Promise<void> {
@@ -150,43 +215,21 @@ export class ReviewStore {
 		for (const c of this.comments) {
 			c.copiedAt = now;
 		}
-		await this.save();
+		this.hasUncopiedChanges = false;
+		await this.persistIfEnabled();
 	}
 
-	public async archiveBatch(formattedText: string, includeOneShotPrefix: boolean): Promise<void> {
-		if (this.comments.length === 0) return;
-		const adapter = this.app.vault.adapter;
-		let archive: SentReviewsArchiveFile = { version: 1, batches: [] };
-		if (await adapter.exists(this.archiveFilePath)) {
-			const raw = await adapter.read(this.archiveFilePath);
-			const parsed = JSON.parse(raw) as SentReviewsArchiveFile;
-			if (parsed && Array.isArray(parsed.batches)) {
-				archive = parsed;
-			}
-		}
-		archive.batches.unshift({
-			exportedAt: new Date().toISOString(),
-			includeOneShotPrefix,
-			count: this.comments.length,
-			comments: JSON.parse(JSON.stringify(this.comments)),
-			formattedText,
-		});
-		if (archive.batches.length > 30) {
-			archive.batches = archive.batches.slice(0, 30);
-		}
-		await adapter.write(this.archiveFilePath, JSON.stringify(archive, null, 2));
-	}
-
-	public async clearAll(archiveFirst: boolean = true): Promise<number> {
+	public async discardAll(): Promise<number> {
 		const count = this.comments.length;
-		if (count === 0) return 0;
-		if (archiveFirst) {
-			const formatted = this.formatExport(true);
-			await this.archiveBatch(formatted, true);
-		}
 		this.comments = [];
-		await this.save();
+		this.hasUncopiedChanges = false;
+		await this.persistIfEnabled();
 		return count;
+	}
+
+	public resetInMemory(): void {
+		this.comments = [];
+		this.hasUncopiedChanges = false;
 	}
 
 	public getVaultBasePath(): string {
@@ -197,53 +240,41 @@ export class ReviewStore {
 		return "";
 	}
 
-	private quoteBlock(text: string): string {
-		const clean = text.replace(/\r\n/g, "\n").trim();
-		if (!clean) return "> *(vide)*";
-		return clean
-			.split("\n")
-			.map((line) => `> ${line}`)
-			.join("\n");
-	}
-
 	/**
-	 * Exporte tous les commentaires en dédupliquant le contexte :
-	 * Si plusieurs commentaires portent sur la même slide / même viewport / même zoom / même sélection,
-	 * le texte source n'est affiché QU'UNE SEULE FOIS, suivi de la liste des commentaires dessous.
+	 * Formats comments as unambiguous XML (`/one-shot` + `<slideflow_review>`).
+	 * Deduplicates source context when multiple comments share the same `(notePath, contextKey)`.
 	 */
-	public formatExport(includeOneShotPrefix: boolean = true): string {
-		if (this.comments.length === 0) return "";
+	public formatExport(
+		includeOneShotPrefix: boolean = true,
+		subset?: ReviewComment[]
+	): string {
+		const list = subset ?? this.comments;
+		if (list.length === 0) return "";
 
 		const basePath = this.getVaultBasePath();
 		const noteGroups = new Map<string, ReviewComment[]>();
-		for (const c of this.comments) {
+		for (const c of list) {
 			const arr = noteGroups.get(c.notePath) || [];
 			arr.push(c);
 			noteGroups.set(c.notePath, arr);
 		}
 
-		const noteCount = noteGroups.size;
-		const totalCount = this.comments.length;
 		const lines: string[] = [];
-
 		if (includeOneShotPrefix) {
 			lines.push("/one-shot");
 			lines.push("");
 		}
 
 		lines.push(
-			`Review comments from SlideFlow (${totalCount} comment${totalCount > 1 ? "s" : ""} across ${noteCount} note${noteCount > 1 ? "s" : ""}):`
+			`<slideflow_review count="${list.length}" notes="${noteGroups.size}">`
 		);
-		lines.push("");
 
 		for (const [notePath, noteItems] of noteGroups.entries()) {
 			const refPath = basePath
 				? path.join(basePath, ...notePath.split("/"))
 				: notePath;
-			lines.push(`### @[${refPath}]`);
-			lines.push("");
+			lines.push(`  <note path="${escapeXmlAttr(refPath)}">`);
 
-			// Group items inside this note by exact deduplicated contextKey
 			const contextGroups = new Map<string, ReviewComment[]>();
 			for (const c of noteItems) {
 				const key =
@@ -256,42 +287,39 @@ export class ReviewStore {
 
 			for (const groupItems of contextGroups.values()) {
 				const rep = groupItems[0];
-				const scopeTag = rep.scopeLabel ? ` · ${rep.scopeLabel}` : "";
-				const lineSpan =
+				const lineAttr =
 					rep.lineEnd > rep.lineStart
-						? `lines ${rep.lineStart}–${rep.lineEnd}`
-						: `line ${rep.lineStart}`;
-				lines.push(`#### Section: \`${rep.sectionHeading}\` (${lineSpan}${scopeTag})`);
-				lines.push("");
+						? `${rep.lineStart}-${rep.lineEnd}`
+						: `${rep.lineStart}`;
+				const scopeAttr = rep.scopeLabel || "Slide";
+
+				lines.push(
+					`    <target section="${escapeXmlAttr(rep.sectionHeading)}" lines="${escapeXmlAttr(lineAttr)}" scope="${escapeXmlAttr(scopeAttr)}">`
+				);
 
 				if (rep.hadDiff) {
 					const oldText =
 						rep.oldExcerpt && rep.oldExcerpt.trim().length > 0
 							? rep.oldExcerpt
 							: "(Newly added content — absent from previous version)";
-					lines.push("**Previous text (before diff):**");
-					lines.push(this.quoteBlock(oldText));
-					lines.push("");
-					lines.push("**Current text:**");
-					lines.push(this.quoteBlock(rep.excerpt));
+					lines.push(`      <previous_text>${wrapCdata(oldText)}</previous_text>`);
+					lines.push(`      <current_text>${wrapCdata(rep.excerpt)}</current_text>`);
 				} else {
-					lines.push("**Context:**");
-					lines.push(this.quoteBlock(rep.excerpt));
+					lines.push(`      <context>${wrapCdata(rep.excerpt)}</context>`);
 				}
-				lines.push("");
 
-				if (groupItems.length === 1) {
-					lines.push(`**Comment:** ${groupItems[0].commentText}`);
-				} else {
-					lines.push("**Comments:**");
-					groupItems.forEach((item, idx) => {
-						lines.push(`${idx + 1}. ${item.commentText}`);
-					});
+				lines.push(`      <comments>`);
+				for (const item of groupItems) {
+					lines.push(`        <comment>${escapeXmlText(item.commentText)}</comment>`);
 				}
-				lines.push("");
+				lines.push(`      </comments>`);
+				lines.push(`    </target>`);
 			}
+
+			lines.push(`  </note>`);
 		}
 
-		return lines.join("\n").trim() + "\n";
+		lines.push(`</slideflow_review>`);
+		return lines.join("\n") + "\n";
 	}
 }

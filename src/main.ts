@@ -20,13 +20,21 @@ import { ReviewComment, ReviewStore } from "./reviewStore";
 import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
 import { ReviewDrawer } from "./reviewDrawer";
+import { ConfirmOverlayModal } from "./confirmModal";
+import {
+	DEFAULT_CLI_COMMAND,
+	getCliDisplayName,
+	parseCommandTemplate,
+	runCliCommand,
+} from "./cliRunner";
 
 export interface SlideFlowSettings {
 	transitionDuration: number; // in seconds
 	scrollDuration: number;
 	zoomLevel: number; // 0.7 to 2.0 (1.0 = 100%)
 	blockDiffThreshold: number; // 0.1 to 0.8 (default 0.25 = 25%)
-	autoMarkReadDelayMs: number; // default 1000 ms (1 second)
+	directCliEnabled: boolean; // optional direct CLI send (instead of clipboard)
+	directCliCommand: string; // command template containing {{COMMENTS}}
 	whisperServerUrl: string;
 	autoStartWhisperServer: boolean;
 	whisperPythonPath: string;
@@ -45,7 +53,6 @@ export interface DocumentStackFrame {
 	rootNode: SectionNode;
 	diffContext: NoteDiffContext | null;
 	diffEnabled: boolean;
-	seenInSession: Set<string>;
 }
 
 export const DEFAULT_SETTINGS: SlideFlowSettings = {
@@ -53,7 +60,8 @@ export const DEFAULT_SETTINGS: SlideFlowSettings = {
 	scrollDuration: 1.0,
 	zoomLevel: 1.0,
 	blockDiffThreshold: DEFAULT_BLOCK_DIFF_THRESHOLD,
-	autoMarkReadDelayMs: 1000,
+	directCliEnabled: false,
+	directCliCommand: DEFAULT_CLI_COMMAND,
 	whisperServerUrl: "http://127.0.0.1:3056",
 	autoStartWhisperServer: true,
 	whisperPythonPath: "python",
@@ -90,9 +98,10 @@ export default class SlideFlowPlugin extends Plugin {
 	private tocComp: TOCComponent | null = null;
 	private commentModal: CommentOverlayModal | null = null;
 	private reviewDrawer: ReviewDrawer | null = null;
+	private exitConfirmModal: ConfirmOverlayModal | null = null;
 
 	private baselinesStore!: BaselinesStore;
-	private reviewStore!: ReviewStore;
+	public reviewStore!: ReviewStore;
 	private voiceService!: VoiceDictationService;
 
 	private rootNode: SectionNode | null = null;
@@ -104,9 +113,8 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private activeDiffContext: NoteDiffContext | null = null;
 	private diffEnabled: boolean = false;
-	private seenInSession: Set<string> = new Set();
-	private slideReadTimerId: number | null = null;
 	private pendingCommentContext: ExtractedCommentContext | null = null;
+	private inFlightCliCommentIds: Set<string> = new Set();
 
 	async onload() {
 		console.log("Loading SlideFlow plugin");
@@ -117,6 +125,8 @@ export default class SlideFlowPlugin extends Plugin {
 			this.app,
 			this.manifest.dir || `.obsidian/plugins/${this.manifest.id}`
 		);
+		this.reviewStore.setPersistenceEnabled(this.settings.directCliEnabled);
+
 		this.voiceService = new VoiceDictationService(this.app, () => ({
 			serverUrl: this.settings.whisperServerUrl,
 			autoStartServer: this.settings.autoStartWhisperServer,
@@ -145,9 +155,9 @@ export default class SlideFlowPlugin extends Plugin {
 
 		this.addCommand({
 			id: "copy-slideflow-oneshot",
-			name: "Copy pending review comments for /one-shot",
+			name: "Copy pending review comments as XML (/one-shot)",
 			callback: () => {
-				void this.copyPendingCommentsExport(true, false);
+				void this.copyPendingCommentsExport(true);
 			}
 		});
 	}
@@ -163,13 +173,6 @@ export default class SlideFlowPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-
-	private clearSlideReadTimer() {
-		if (this.slideReadTimerId !== null) {
-			window.clearTimeout(this.slideReadTimerId);
-			this.slideReadTimerId = null;
-		}
 	}
 
 	private async computeDiffForLoadedNote(
@@ -287,6 +290,12 @@ export default class SlideFlowPlugin extends Plugin {
 	private updateCockpitUI() {
 		if (!this.activeModal || !this.currentNode) return;
 		const slideDiff = this.activeDiffContext?.slideDiffs.get(this.currentNode.id);
+		const firstHeadingId = this.flatNodes.length > 1 ? this.flatNodes[1].id : this.flatNodes[0]?.id;
+		const hasDeletedHere = Boolean(
+			this.activeDiffContext &&
+				this.currentNode.id === firstHeadingId &&
+				this.activeDiffContext.deletedSectionsMarkdown
+		);
 		const currentSlideComments = this.reviewStore.getForSlide(
 			this.activeSourcePath,
 			this.currentNode.title
@@ -299,49 +308,94 @@ export default class SlideFlowPlugin extends Plugin {
 			),
 			diffEnabled: this.diffEnabled,
 			dirtySlidesCount: this.activeDiffContext?.totalDirtySlides || 0,
-			currentSlideHasDiff: Boolean(slideDiff?.hasChanges),
+			currentSlideHasDiff: Boolean(slideDiff?.hasChanges || hasDeletedHere),
 			currentSlideCommentsCount: currentSlideComments.length,
 			totalPendingCommentsCount: this.reviewStore.getCount(),
+			directCliEnabled: this.settings.directCliEnabled,
 		});
 	}
 
-	private scheduleSlideSeenTimer(node: SectionNode) {
-		this.clearSlideReadTimer();
+	private refreshAllActiveUI(): void {
+		this.updateCockpitUI();
+		if (this.tocComp && this.currentNode) {
+			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
+		}
+		if (this.reviewDrawer?.isOpen()) {
+			this.reviewDrawer.refresh(this.reviewStore.getAll(), this.inFlightCliCommentIds);
+		}
+	}
+
+	/**
+	 * Explicitly marks the current slide's diff as read in `_agents/unread_baselines.json`.
+	 * Called ONLY on:
+	 * 1. Saving a comment on that slide (`clearVisuallyNow = false` so additional comments can still see the diff)
+	 * 2. Pressing `Ctrl+Enter` on a slide (`clearVisuallyNow = true` -> immediately removes the diff on screen!)
+	 */
+	private async markCurrentSlideDiffRead(clearVisuallyNow: boolean): Promise<boolean> {
 		const ctx = this.activeDiffContext;
-		if (!ctx) return;
+		const node = this.currentNode;
+		if (!ctx || !node) return false;
 
 		const slideDiff = ctx.slideDiffs.get(node.id);
-		if (!slideDiff) return;
-
 		const firstHeadingId = this.flatNodes.length > 1 ? this.flatNodes[1].id : this.flatNodes[0]?.id;
 		const hasDeletedHere = Boolean(node.id === firstHeadingId && ctx.deletedSectionsHash);
 
-		if (!slideDiff.hasChanges && !hasDeletedHere) return;
-		if (this.seenInSession.has(slideDiff.slideKey) && !hasDeletedHere) return;
+		if (!slideDiff) return false;
+		if (!slideDiff.hasChanges && !hasDeletedHere) return false;
 
-		const targetNotePath = this.activeSourcePath;
-		const targetSlideId = node.id;
-		const delayMs = Math.max(250, this.settings.autoMarkReadDelayMs || 1000);
+		await this.baselinesStore.markSlideSeen(
+			this.activeSourcePath,
+			slideDiff.slideKey,
+			slideDiff.rawNewMarkdown,
+			ctx.dirtySlideKeys,
+			ctx.currentHashesByKey,
+			hasDeletedHere ? ctx.deletedSectionsHash : null
+		);
 
-		this.slideReadTimerId = window.setTimeout(() => {
-			this.slideReadTimerId = null;
-			if (
-				!this.activeModal ||
-				this.activeSourcePath !== targetNotePath ||
-				this.currentNode?.id !== targetSlideId
-			) {
-				return;
+		if (clearVisuallyNow) {
+			slideDiff.hasChanges = false;
+			slideDiff.diffMarkdown = slideDiff.rawNewMarkdown;
+			slideDiff.rawOldMarkdown = slideDiff.rawNewMarkdown;
+			slideDiff.addedCount = 0;
+			slideDiff.removedCount = 0;
+
+			ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => k !== slideDiff.slideKey);
+			ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
+
+			if (hasDeletedHere) {
+				ctx.deletedSectionsMarkdown = null;
+				ctx.deletedSectionsHash = null;
 			}
-			this.seenInSession.add(slideDiff.slideKey);
-			void this.baselinesStore.markSlideSeen(
-				targetNotePath,
-				slideDiff.slideKey,
-				slideDiff.rawNewMarkdown,
-				ctx.dirtySlideKeys,
-				ctx.currentHashesByKey,
-				hasDeletedHere ? ctx.deletedSectionsHash : null
-			);
-		}, delayMs);
+
+			// Recompute descendant dirty node IDs cleanly
+			ctx.descendantDirtyNodeIds = new Set<string>();
+			for (const n of this.flatNodes) {
+				const info = ctx.slideDiffs.get(n.id);
+				if (info?.hasChanges) {
+					let p = n.parent;
+					while (p) {
+						ctx.descendantDirtyNodeIds.add(p.id);
+						p = p.parent;
+					}
+				}
+			}
+
+			if (ctx.totalDirtySlides === 0 && !ctx.deletedSectionsMarkdown) {
+				this.activeDiffContext = null;
+				this.diffEnabled = false;
+			}
+
+			if (this.activeModal) {
+				await this.activeModal.refreshSlideInPlace(
+					node,
+					this.activeSourcePath,
+					this.buildSlideRenderDecoration(node)
+				);
+			}
+			this.refreshAllActiveUI();
+		}
+
+		return true;
 	}
 
 	private async startPresentation() {
@@ -368,7 +422,7 @@ export default class SlideFlowPlugin extends Plugin {
 				console.error("[SlideFlow] Failed reading unread_baselines.json:", err);
 				new Notice(`SlideFlow: failed reading baselines (${err.message})`);
 			}),
-			this.reviewStore.load().catch((err) => {
+			this.reviewStore.initForSession(this.settings.directCliEnabled).catch((err) => {
 				console.error("[SlideFlow] Failed reading pending_reviews.json:", err);
 			}),
 		]);
@@ -378,7 +432,6 @@ export default class SlideFlowPlugin extends Plugin {
 		this.documentStack = [];
 		this.activeSourcePath = file.path;
 		this.sessionRootProjectPath = file.path;
-		this.seenInSession = new Set();
 
 		const cache = this.app.metadataCache.getFileCache(file);
 		const parsed = parseMarkdownSections(markdownText, cache?.headings);
@@ -426,35 +479,34 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
 			if (targetNode) {
-				this.goToNode(targetNode, 'zoom-in', 'start');
+				void this.goToNode(targetNode, 'zoom-in', 'start');
 			}
 		};
 		this.activeModal.onSectionClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
 			if (targetNode) {
-				this.goToNode(targetNode, 'zoom-in', 'start');
+				void this.goToNode(targetNode, 'zoom-in', 'start');
 			}
 		};
 		this.activeModal.onToggleDiffClickCallback = () => this.toggleDiffMode();
 		this.activeModal.onCommentTextClickCallback = () => this.openCommentModal(false);
 		this.activeModal.onCommentVoiceClickCallback = () => this.openCommentModal(true);
 		this.activeModal.onOpenQueueClickCallback = () => this.toggleReviewDrawer();
-		this.activeModal.onCopyOneShotClickCallback = () => void this.copyPendingCommentsExport(true, false);
+		this.activeModal.onCopyOneShotClickCallback = () => void this.handleSlideCtrlEnter();
 		this.activeModal.onSelectionCommentCallback = (range: Range, startWithVoice: boolean) => {
 			this.openCommentModal(startWithVoice, range);
 		};
 
 		const overlayEl = this.activeModal.getOverlayElement();
+		this.exitConfirmModal = new ConfirmOverlayModal(overlayEl);
+
 		this.commentModal = new CommentOverlayModal(overlayEl, this.voiceService, {
 			onSubmit: async (commentText: string, editingId?: string) => {
 				await this.saveSlideComment(commentText, editingId);
 			},
 			onDeleteExisting: async (commentId: string) => {
 				await this.reviewStore.deleteComment(commentId);
-				this.updateCockpitUI();
-				if (this.tocComp && this.currentNode) {
-					this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
-				}
+				this.refreshAllActiveUI();
 			},
 			onClose: () => {
 				this.pendingCommentContext = null;
@@ -462,26 +514,23 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 
 		this.reviewDrawer = new ReviewDrawer(overlayEl, {
-			onJumpToComment: (comment: ReviewComment) => {
-				void this.jumpToCommentTarget(comment);
+			onEditComment: async (comment: ReviewComment) => {
+				await this.jumpAndEditComment(comment);
 			},
 			onDeleteComment: async (commentId: string) => {
 				await this.reviewStore.deleteComment(commentId);
-				this.updateCockpitUI();
-				if (this.tocComp && this.currentNode) {
-					this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
-				}
+				this.refreshAllActiveUI();
 			},
-			onCopyExport: async (includeOneShotPrefix: boolean, clearAfter: boolean) => {
-				await this.copyPendingCommentsExport(includeOneShotPrefix, clearAfter);
-			},
-			onClearAll: async () => {
-				const count = await this.reviewStore.clearAll(true);
-				this.updateCockpitUI();
-				if (this.tocComp && this.currentNode) {
-					this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
+			onPrimaryAction: async () => {
+				if (this.settings.directCliEnabled) {
+					const launched = this.sendPendingCommentsToCli();
+					if (launched) {
+						this.reviewDrawer?.close(false);
+					}
+				} else {
+					await this.copyPendingCommentsExport(true);
+					this.reviewDrawer?.refresh(this.reviewStore.getAll(), this.inFlightCliCommentIds);
 				}
-				new Notice(`Queue cleared (${count} archived locally).`);
 			},
 			onClose: () => {
 				// no-op
@@ -495,14 +544,13 @@ export default class SlideFlowPlugin extends Plugin {
 		);
 
 		this.tocComp = new TOCComponent(overlayEl, (selectedNode) => {
-			this.goToNode(selectedNode);
+			void this.goToNode(selectedNode);
 		});
 		this.activeModal.setTOC(this.tocComp);
 		this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 
 		this.updateSlideCounter();
 		this.updateCockpitUI();
-		this.scheduleSlideSeenTimer(this.currentNode);
 
 		this.keyboardNav = new KeyboardNavigator({
 			onNext: () => this.handleNextNavigation(),
@@ -519,9 +567,13 @@ export default class SlideFlowPlugin extends Plugin {
 			onToggleDiff: () => this.toggleDiffMode(),
 			onNextDiffSlide: () => this.jumpToNextDiffSlide(),
 			onToggleReviewDrawer: () => this.toggleReviewDrawer(),
-			onCopyOneShot: () => void this.copyPendingCommentsExport(true, false),
+			onCopyOneShot: () => void this.handleSlideCtrlEnter(),
 			isInputBlocked: () =>
-				Boolean(this.commentModal?.isOpen() || this.reviewDrawer?.isOpen()),
+				Boolean(
+					this.commentModal?.isOpen() ||
+						this.reviewDrawer?.isOpen() ||
+						this.exitConfirmModal?.isOpen()
+				),
 		});
 		this.keyboardNav.attach();
 	}
@@ -535,7 +587,110 @@ export default class SlideFlowPlugin extends Plugin {
 			void this.popDocumentStack();
 			return;
 		}
-		this.closePresentation();
+		this.requestClosePresentation();
+	}
+
+	private requestClosePresentation(): void {
+		if (!this.reviewStore.hasUncopiedOrUnsent(this.inFlightCliCommentIds)) {
+			if (!this.settings.directCliEnabled) {
+				this.reviewStore.resetInMemory();
+			}
+			this.closePresentation();
+			return;
+		}
+
+		if (!this.exitConfirmModal) {
+			this.closePresentation();
+			return;
+		}
+
+		if (this.settings.directCliEnabled) {
+			const unsentCount = this.reviewStore
+				.getAll()
+				.filter((c) => !this.inFlightCliCommentIds.has(c.id)).length;
+			const cliName = getCliDisplayName(this.settings.directCliCommand);
+
+			this.exitConfirmModal.open({
+				title: `Unsent comments (${unsentCount})`,
+				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments stay saved until ${cliName} succeeds.`,
+				confirmLabelHtml: `Send & Exit <strong>Ctrl+↵</strong>`,
+				confirmVariant: "primary",
+				confirmShortcut: "Ctrl+Enter",
+				cancelLabelHtml: `Return <strong>Esc</strong>`,
+				discardLabel: "Discard & Exit",
+				onConfirm: () => {
+					const launched = this.sendPendingCommentsToCli();
+					if (launched) {
+						this.closePresentation();
+					}
+				},
+				onCancel: () => {
+					// Stay in presentation
+				},
+				onDiscard: async () => {
+					await this.reviewStore.discardAll();
+					this.closePresentation();
+				},
+			});
+		} else {
+			const count = this.reviewStore.getCount();
+			this.exitConfirmModal.open({
+				title: `Uncopied comments (${count})`,
+				message: `You have ${count} review comment${count > 1 ? "s" : ""} not copied yet. Comments are cleared when you leave.`,
+				confirmLabelHtml: `Copy & Exit <strong>Ctrl+↵</strong>`,
+				confirmVariant: "primary",
+				confirmShortcut: "Ctrl+Enter",
+				cancelLabelHtml: `Return <strong>Esc</strong>`,
+				discardLabel: "Discard & Exit",
+				onConfirm: async () => {
+					await this.copyPendingCommentsExport(true);
+					this.reviewStore.resetInMemory();
+					this.closePresentation();
+				},
+				onCancel: () => {
+					// Stay in presentation
+				},
+				onDiscard: () => {
+					this.reviewStore.resetInMemory();
+					this.closePresentation();
+				},
+			});
+		}
+	}
+
+	/**
+	 * Behavior of `Ctrl+Enter` on a slide:
+	 * - Always validates the current slide's diff & immediately clears its diff highlight on screen.
+	 * - In Direct CLI mode: ONLY validates the slide diff (does NOT invoke CLI or copy).
+	 * - In Clipboard mode: ALSO copies all current session comments (XML `/one-shot`) to clipboard.
+	 */
+	private async handleSlideCtrlEnter(): Promise<void> {
+		const validatedDiff = await this.markCurrentSlideDiffRead(true);
+
+		if (this.settings.directCliEnabled) {
+			new Notice(validatedDiff ? "Slide diff validated." : "No unread diff on this slide.");
+			return;
+		}
+
+		const count = this.reviewStore.getCount();
+		if (count > 0) {
+			const formatted = this.reviewStore.formatExport(true);
+			await navigator.clipboard.writeText(formatted);
+			await this.reviewStore.markAllCopied();
+			this.refreshAllActiveUI();
+			new Notice(
+				validatedDiff
+					? `Slide diff validated & copied ${count} comment(s) (XML).`
+					: `Copied ${count} comment(s) (XML /one-shot).`
+			);
+			return;
+		}
+
+		new Notice(
+			validatedDiff
+				? "Slide diff validated."
+				: "No unread diff or comments to copy."
+		);
 	}
 
 	private toggleDiffMode() {
@@ -549,11 +704,9 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 		this.diffEnabled = !this.diffEnabled;
 		if (this.activeModal && this.currentNode) {
-			void this.activeModal.updateSlide(
+			void this.activeModal.refreshSlideInPlace(
 				this.currentNode,
 				this.activeSourcePath,
-				'jump',
-				'start',
 				this.buildSlideRenderDecoration(this.currentNode)
 			);
 		}
@@ -572,7 +725,7 @@ export default class SlideFlowPlugin extends Plugin {
 			const idx = (currIdx + offset) % this.flatNodes.length;
 			const cand = this.flatNodes[idx];
 			if (dirtyIds.has(cand.id)) {
-				this.goToNode(cand, 'jump', 'start');
+				void this.goToNode(cand, 'jump', 'start');
 				return;
 			}
 		}
@@ -591,10 +744,6 @@ export default class SlideFlowPlugin extends Plugin {
 			this.currentNode.id
 		);
 
-		// Determine exact comment context in strict priority:
-		// 1. Highlighted text selection
-		// 2. Active zoomed media (table / code / diagram / image / embed)
-		// 3. Currently visible viewport text of the slide (excluding hidden media)
 		const activeRange = explicitRange ?? this.activeModal.getActiveSelectionRange();
 		let extracted: ExtractedCommentContext | null = null;
 		let highlightRange: Range | null = null;
@@ -685,15 +834,15 @@ export default class SlideFlowPlugin extends Plugin {
 				commentText,
 			});
 
+			// Commenting on a diffed slide marks its diff as read in unread_baselines.json
+			void this.markCurrentSlideDiffRead(false);
+
 			const snippet = commentText.length > 52 ? commentText.slice(0, 52) + "…" : commentText;
 			new Notice(`Comment saved (${ctx?.scopeLabel || "Slide"}): "${snippet}"`);
 		}
 
 		this.pendingCommentContext = null;
-		this.updateCockpitUI();
-		if (this.tocComp && this.currentNode) {
-			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
-		}
+		this.refreshAllActiveUI();
 	}
 
 	private toggleReviewDrawer() {
@@ -701,15 +850,19 @@ export default class SlideFlowPlugin extends Plugin {
 		if (this.reviewDrawer.isOpen()) {
 			this.reviewDrawer.close(true);
 		} else {
-			this.reviewDrawer.open(this.reviewStore.getAll());
+			this.reviewDrawer.open({
+				comments: this.reviewStore.getAll(),
+				directCliEnabled: this.settings.directCliEnabled,
+				cliDisplayName: getCliDisplayName(this.settings.directCliCommand),
+				inFlightIds: this.inFlightCliCommentIds,
+			});
 		}
 	}
 
-	private async copyPendingCommentsExport(
-		includeOneShotPrefix: boolean,
-		clearAfter: boolean
-	): Promise<void> {
-		await this.reviewStore.load();
+	private async copyPendingCommentsExport(includeOneShotPrefix: boolean): Promise<void> {
+		if (this.settings.directCliEnabled && !this.activeModal) {
+			await this.reviewStore.loadFromDisk();
+		}
 		const count = this.reviewStore.getCount();
 		if (count === 0) {
 			new Notice("No pending comments to copy.");
@@ -718,32 +871,123 @@ export default class SlideFlowPlugin extends Plugin {
 
 		const formatted = this.reviewStore.formatExport(includeOneShotPrefix);
 		await navigator.clipboard.writeText(formatted);
-		await this.reviewStore.archiveBatch(formatted, includeOneShotPrefix);
+		await this.reviewStore.markAllCopied();
+		this.refreshAllActiveUI();
 
-		if (clearAfter) {
-			await this.reviewStore.clearAll(false);
-		} else {
-			await this.reviewStore.markAllCopied();
-		}
-
-		this.updateCockpitUI();
-		if (this.tocComp && this.currentNode) {
-			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
-		}
-
-		const modeLabel = includeOneShotPrefix ? "/one-shot" : "plain";
-		new Notice(`Copied ${count} comment(s) (${modeLabel}). Press R to manage or clear queue.`);
+		new Notice(`Copied ${count} comment(s) (XML /one-shot).`);
 	}
 
-	private async jumpToCommentTarget(comment: ReviewComment) {
+	/**
+	 * Launches the configured CLI command in the background with XML comments.
+	 * Comments remain persisted in `pending_reviews.json` until exit code === 0,
+	 * even if the presentation is closed immediately afterward!
+	 */
+	private sendPendingCommentsToCli(): boolean {
+		const toSend = this.reviewStore
+			.getAll()
+			.filter((c) => !this.inFlightCliCommentIds.has(c.id));
+
+		if (toSend.length === 0) {
+			if (this.inFlightCliCommentIds.size > 0) {
+				new Notice("CLI invocation is already running for these comments…");
+			} else {
+				new Notice("No pending comments to send.");
+			}
+			return false;
+		}
+
+		const formatted = this.reviewStore.formatExport(true, toSend);
+		let cliDisplayName = "CLI";
+
+		// Validate command template before launching so syntax errors fail fast visibly
+		try {
+			const parsed = parseCommandTemplate(this.settings.directCliCommand, formatted);
+			cliDisplayName = parsed.displayName;
+		} catch (err: any) {
+			new Notice(`SlideFlow CLI config error: ${err?.message || String(err)}`, 9000);
+			return false;
+		}
+
+		const sentIds = toSend.map((c) => c.id);
+		for (const id of sentIds) {
+			this.inFlightCliCommentIds.add(id);
+		}
+		this.refreshAllActiveUI();
+
+		new Notice(`Sending ${sentIds.length} comment(s) to ${cliDisplayName}…`, 5000);
+
+		const cwd = this.reviewStore.getVaultBasePath();
+		void runCliCommand(this.settings.directCliCommand, formatted, cwd)
+			.then(async (res) => {
+				for (const id of sentIds) {
+					this.inFlightCliCommentIds.delete(id);
+				}
+
+				if (res.exitCode === 0) {
+					await this.reviewStore.removeCommentsByIds(sentIds);
+					this.refreshAllActiveUI();
+					new Notice(
+						`${res.displayName} finished — ${sentIds.length} comment(s) sent & cleared.`,
+						6000
+					);
+				} else {
+					this.refreshAllActiveUI();
+					console.error("[SlideFlow CLI] Non-zero exit:", res);
+					const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
+					const detail = rawErr ? ` ${rawErr.slice(0, 140)}` : "";
+					new Notice(
+						`SlideFlow: ${res.displayName} failed (exit ${res.exitCode}). Comments kept in queue.${detail}`,
+						10000
+					);
+				}
+			})
+			.catch((err: any) => {
+				for (const id of sentIds) {
+					this.inFlightCliCommentIds.delete(id);
+				}
+				this.refreshAllActiveUI();
+				console.error("[SlideFlow CLI] Execution failed:", err);
+				new Notice(
+					`SlideFlow CLI error: ${err?.message || String(err)}. Comments kept in queue.`,
+					10000
+				);
+			});
+
+		return true;
+	}
+
+	private async jumpToCommentTarget(comment: ReviewComment): Promise<void> {
 		if (comment.notePath === this.activeSourcePath) {
 			const match = this.flatNodes.find((n) => n.title === comment.sectionHeading);
 			if (match) {
-				this.goToNode(match, 'jump', 'start');
+				await this.goToNode(match, 'jump', 'start');
 				return;
 			}
 		}
 		await this.handleInternalLinkClick(`${comment.notePath}#${comment.sectionHeading}`);
+	}
+
+	private async jumpAndEditComment(comment: ReviewComment): Promise<void> {
+		await this.jumpToCommentTarget(comment);
+		if (!this.commentModal || !this.currentNode) return;
+
+		const existingComments = this.reviewStore.getForSlide(
+			comment.notePath,
+			comment.sectionHeading
+		);
+
+		this.commentModal.open({
+			noteTitle: comment.noteTitle,
+			notePath: comment.notePath,
+			sectionHeading: comment.sectionHeading,
+			scopeLabel: comment.scopeLabel || "Slide",
+			hadDiff: comment.hadDiff,
+			existingComments,
+			startWithVoice: false,
+			anchorRect: null,
+			highlightRange: null,
+			editingComment: comment,
+		});
 	}
 
 	private updateSlideCounter() {
@@ -811,7 +1055,7 @@ export default class SlideFlowPlugin extends Plugin {
 			}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery));
 
 			if (targetNode) {
-				this.goToNode(targetNode, 'zoom-in', 'start');
+				await this.goToNode(targetNode, 'zoom-in', 'start');
 			} else {
 				new Notice("Section not found in presentation.");
 			}
@@ -836,14 +1080,12 @@ export default class SlideFlowPlugin extends Plugin {
 				}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery));
 
 				if (targetNode) {
-					this.goToNode(targetNode, 'zoom-in', 'start');
+					await this.goToNode(targetNode, 'zoom-in', 'start');
 				} else {
 					new Notice("Section not found in presentation.");
 				}
 				return;
 			}
-
-			this.clearSlideReadTimer();
 
 			if (this.currentNode && this.rootNode) {
 				this.documentStack.push({
@@ -854,7 +1096,6 @@ export default class SlideFlowPlugin extends Plugin {
 					rootNode: this.rootNode,
 					diffContext: this.activeDiffContext,
 					diffEnabled: this.diffEnabled,
-					seenInSession: new Set(this.seenInSession),
 				});
 			}
 
@@ -867,7 +1108,6 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeSourcePath = targetFile.path;
 			this.rootNode = parsed.root;
 			this.flatNodes = parsed.flatNodes;
-			this.seenInSession = new Set();
 
 			let initialNode: SectionNode | null = null;
 			if (decodedLink.includes("#")) {
@@ -903,7 +1143,6 @@ export default class SlideFlowPlugin extends Plugin {
 				this.updateSlideCounter();
 				this.updateCockpitUI();
 				this.activeModal.showSubNoteBanner(targetFile.basename, () => void this.popDocumentStack());
-				this.scheduleSlideSeenTimer(this.currentNode);
 			}
 
 			if (this.tocComp && this.currentNode) {
@@ -916,7 +1155,6 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private async popDocumentStack() {
 		if (this.documentStack.length === 0) return;
-		this.clearSlideReadTimer();
 
 		const parentFrame = this.documentStack.pop()!;
 		this.activeSourcePath = parentFrame.filePath;
@@ -925,7 +1163,6 @@ export default class SlideFlowPlugin extends Plugin {
 		this.currentNode = parentFrame.currentNode;
 		this.activeDiffContext = parentFrame.diffContext;
 		this.diffEnabled = parentFrame.diffEnabled;
-		this.seenInSession = parentFrame.seenInSession;
 
 		await this.baselinesStore.reload().catch(() => undefined);
 
@@ -948,7 +1185,6 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 			this.updateSlideCounter();
 			this.updateCockpitUI();
-			this.scheduleSlideSeenTimer(this.currentNode);
 		}
 
 		if (this.tocComp && this.currentNode) {
@@ -956,15 +1192,15 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 	}
 
-	private goToNode(
+	private async goToNode(
 		node: SectionNode,
 		overrideDirection?: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump',
 		enterFrom: 'start' | 'end' = 'start'
-	) {
+	): Promise<void> {
 		const direction = overrideDirection ?? computeDirection(this.currentNode, node);
 		this.currentNode = node;
 		if (this.activeModal && this.currentNode) {
-			void this.activeModal.updateSlide(
+			await this.activeModal.updateSlide(
 				this.currentNode,
 				this.activeSourcePath,
 				direction,
@@ -973,7 +1209,6 @@ export default class SlideFlowPlugin extends Plugin {
 			);
 			this.updateSlideCounter();
 			this.updateCockpitUI();
-			this.scheduleSlideSeenTimer(this.currentNode);
 		}
 		if (this.tocComp && this.currentNode) {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
@@ -984,11 +1219,11 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx === -1 && this.flatNodes.length > 0) {
-			this.goToNode(this.flatNodes[0], undefined, 'start');
+			void this.goToNode(this.flatNodes[0], undefined, 'start');
 			return;
 		}
 		if (idx >= 0 && idx < this.flatNodes.length - 1) {
-			this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
+			void this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
 		} else if (idx === this.flatNodes.length - 1) {
 			new Notice("End of presentation reached.");
 		}
@@ -998,7 +1233,7 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
 		if (idx > 0) {
-			this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
+			void this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
 		} else {
 			if (this.documentStack.length > 0) {
 				void this.popDocumentStack();
@@ -1009,7 +1244,10 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private closePresentation() {
-		this.clearSlideReadTimer();
+		if (this.exitConfirmModal) {
+			this.exitConfirmModal.close();
+			this.exitConfirmModal = null;
+		}
 		if (this.commentModal) {
 			this.commentModal.close(false);
 			this.commentModal = null;
@@ -1070,7 +1308,6 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private cleanupNavigation() {
-		this.clearSlideReadTimer();
 		if (this.keyboardNav) {
 			this.keyboardNav.detach();
 			this.keyboardNav = null;
@@ -1147,7 +1384,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 
 		const diffThreshSetting = new Setting(containerEl)
 			.setName("Block diff threshold (%)")
-			.setDesc(`Above ${Math.round(this.plugin.settings.blockDiffThreshold * 100)}% modified tokens, switches paragraph to full red/green block diff (default: 25%).`)
+			.setDesc(`Above ${Math.round(this.plugin.settings.blockDiffThreshold * 100)}% modified tokens, switches paragraph to full red/green block diff (default: 25%). Slide diffs are marked as read only when you comment or press Ctrl+Enter.`)
 			.addSlider(slider =>
 				slider
 					.setLimits(10, 80, 5)
@@ -1156,24 +1393,43 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.blockDiffThreshold = value / 100;
 						await this.plugin.saveSettings();
-						diffThreshSetting.setDesc(`Above ${value}% modified tokens, switches paragraph to full red/green block diff (default: 25%).`);
+						diffThreshSetting.setDesc(`Above ${value}% modified tokens, switches paragraph to full red/green block diff (default: 25%). Slide diffs are marked as read only when you comment or press Ctrl+Enter.`);
 					})
 			);
 
-		const readDelaySetting = new Setting(containerEl)
-			.setName("Auto-mark slide read delay (seconds)")
-			.setDesc(`Current: ${(this.plugin.settings.autoMarkReadDelayMs / 1000).toFixed(1)}s — after staying on a modified slide, its diff disappears on next open.`)
-			.addSlider(slider =>
-				slider
-					.setLimits(0.5, 5.0, 0.5)
-					.setValue(this.plugin.settings.autoMarkReadDelayMs / 1000)
-					.setDynamicTooltip()
-					.onChange(async (value) => {
-						this.plugin.settings.autoMarkReadDelayMs = Math.round(value * 1000);
+		containerEl.createEl("h3", { text: "Direct CLI Execution (Optional)" });
+
+		new Setting(containerEl)
+			.setName("Send comments directly to CLI (instead of clipboard)")
+			.setDesc(
+				"When enabled, Ctrl+Enter on a slide only validates its diff. Pressing Ctrl+Enter on exit or inside the Review Queue (R) runs the command below with the XML /one-shot payload, and comments stay persisted until the command exits with code 0."
+			)
+			.addToggle(toggle =>
+				toggle
+					.setValue(this.plugin.settings.directCliEnabled)
+					.onChange(async (val) => {
+						this.plugin.settings.directCliEnabled = val;
+						this.plugin.reviewStore.setPersistenceEnabled(val);
 						await this.plugin.saveSettings();
-						readDelaySetting.setDesc(`Current: ${value.toFixed(1)}s — after staying on a modified slide, its diff disappears on next open.`);
 					})
 			);
+
+		new Setting(containerEl)
+			.setName("CLI command template")
+			.setDesc(
+				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). Runs in the vault root directory."
+			)
+			.addTextArea(text => {
+				text
+					.setPlaceholder(DEFAULT_CLI_COMMAND)
+					.setValue(this.plugin.settings.directCliCommand)
+					.onChange(async (val) => {
+						this.plugin.settings.directCliCommand = val.trim() || DEFAULT_CLI_COMMAND;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 3;
+				text.inputEl.addClass("slideflow-settings-cli-textarea");
+			});
 
 		containerEl.createEl("h3", { text: "Local Faster-Whisper GPU Voice Dictation (V / Ctrl+M)" });
 

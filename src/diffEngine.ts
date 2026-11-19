@@ -745,7 +745,7 @@ export function buildNoteDiffContext(
 		const delHash = hashText(rawDel);
 		const seenDel = seenSlides["__deleted__"];
 		if (!seenDel || seenDel.hash !== delHash) {
-			deletedSectionsMarkdown = `<div class="slideflow-deleted-sections"><div class="slideflow-deleted-sections-title">🗑️ Sections supprimées depuis la dernière lecture</div>\n\n${rawDel}\n\n</div>`;
+			deletedSectionsMarkdown = `<div class="slideflow-deleted-sections"><div class="slideflow-deleted-sections-title">Sections removed since last review</div>\n\n${rawDel}\n\n</div>`;
 			deletedSectionsHash = delHash;
 		}
 	}

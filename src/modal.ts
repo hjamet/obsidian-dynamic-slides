@@ -12,6 +12,7 @@ export interface CockpitBarState {
 	currentSlideHasDiff: boolean;
 	currentSlideCommentsCount: number;
 	totalPendingCommentsCount: number;
+	directCliEnabled: boolean;
 }
 
 export interface SlideRenderDecoration {
@@ -59,6 +60,7 @@ export class PresentationModal extends Component {
 	private selectionToolbarEl: HTMLElement | null = null;
 	private pendingSelectionRange: Range | null = null;
 	private boundMouseUpHandler: () => void;
+	private boundKeyUpSelectionHandler: (evt: KeyboardEvent) => void;
 
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
@@ -287,7 +289,13 @@ export class PresentationModal extends Component {
 		this.boundMouseUpHandler = () => {
 			window.setTimeout(() => this.handleSelectionChange(), 10);
 		};
-		this.overlayEl.addEventListener("mouseup", this.boundMouseUpHandler);
+		this.boundKeyUpSelectionHandler = (evt: KeyboardEvent) => {
+			if (evt.shiftKey || evt.key === "Shift") {
+				window.setTimeout(() => this.handleSelectionChange(), 10);
+			}
+		};
+		window.addEventListener("mouseup", this.boundMouseUpHandler);
+		window.addEventListener("keyup", this.boundKeyUpSelectionHandler);
 		this.contentEl.addEventListener("scroll", () => this.hideSelectionToolbar());
 	}
 
@@ -407,11 +415,34 @@ export class PresentationModal extends Component {
 		if (state.totalPendingCommentsCount > 0) {
 			this.queueBtnEl.style.display = "inline-flex";
 			this.queueBtnEl.innerHTML = `<span>Queue (${state.totalPendingCommentsCount})</span> <strong>R</strong>`;
-			this.copyBtnEl.style.display = "inline-flex";
-			this.copyBtnEl.innerHTML = `<span>Copy</span> <strong>Ctrl+↵</strong>`;
 		} else {
 			this.queueBtnEl.style.display = "none";
-			this.copyBtnEl.style.display = "none";
+		}
+
+		if (state.directCliEnabled) {
+			if (state.currentSlideHasDiff) {
+				this.copyBtnEl.style.display = "inline-flex";
+				this.copyBtnEl.innerHTML = `<span>Validate diff</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", "Validate slide diff (Ctrl+Enter)");
+			} else {
+				this.copyBtnEl.style.display = "none";
+			}
+		} else {
+			if (state.currentSlideHasDiff && state.totalPendingCommentsCount > 0) {
+				this.copyBtnEl.style.display = "inline-flex";
+				this.copyBtnEl.innerHTML = `<span>Validate & Copy</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", "Validate slide diff & copy all XML comments (Ctrl+Enter)");
+			} else if (state.currentSlideHasDiff) {
+				this.copyBtnEl.style.display = "inline-flex";
+				this.copyBtnEl.innerHTML = `<span>Validate diff</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", "Validate slide diff (Ctrl+Enter)");
+			} else if (state.totalPendingCommentsCount > 0) {
+				this.copyBtnEl.style.display = "inline-flex";
+				this.copyBtnEl.innerHTML = `<span>Copy</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", "Copy all XML comments for /one-shot (Ctrl+Enter)");
+			} else {
+				this.copyBtnEl.style.display = "none";
+			}
 		}
 	}
 
@@ -718,18 +749,39 @@ export class PresentationModal extends Component {
 			const targetMedia = zoomableElements[index];
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
 
-			// Strip Obsidian's copy-code-button everywhere inside zoomed media
+			// Strip Obsidian's copy-code-button (which contains an <svg> icon!) BEFORE classifying media type
 			clone.querySelectorAll(".copy-code-button").forEach((btn) => btn.remove());
 
-			const isIframe = targetMedia.tagName.toLowerCase() === "iframe" || targetMedia.querySelector("iframe") !== null;
-			const isTable = !isIframe && (targetMedia.tagName.toLowerCase() === "table" || targetMedia.querySelector("table") !== null);
-			const isSvgOrMermaid = !isIframe && !isTable && (
-				targetMedia.tagName.toLowerCase() === "svg" ||
-				targetMedia.querySelector("svg") !== null ||
-				targetMedia.matches(".mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-mermaid']") ||
-				targetMedia.querySelector(".mermaid, [class*='mermaid'], [class*='language-mermaid'], [class*='block-language-mermaid']") !== null
-			);
-			const isCode = !isIframe && !isTable && !isSvgOrMermaid && (targetMedia.tagName.toLowerCase() === "pre" || targetMedia.matches("[class*='block-language-']") || targetMedia.querySelector("pre") !== null);
+			const isIframe =
+				clone.tagName.toLowerCase() === "iframe" ||
+				clone.querySelector("iframe") !== null;
+			const isTable =
+				!isIframe &&
+				(clone.tagName.toLowerCase() === "table" ||
+					clone.querySelector("table") !== null);
+			const isMermaid =
+				!isIframe &&
+				!isTable &&
+				(clone.matches(
+					".mermaid, svg.mermaid, [class*='language-mermaid'], [class*='block-language-mermaid']"
+				) ||
+					clone.querySelector(
+						".mermaid, svg.mermaid, [class*='language-mermaid'], [class*='block-language-mermaid']"
+					) !== null);
+			const isCode =
+				!isIframe &&
+				!isTable &&
+				!isMermaid &&
+				(clone.tagName.toLowerCase() === "pre" ||
+					clone.matches("[class*='block-language-']") ||
+					clone.querySelector("pre") !== null);
+			const isSvg =
+				!isIframe &&
+				!isTable &&
+				!isMermaid &&
+				!isCode &&
+				(clone.tagName.toLowerCase() === "svg" ||
+					clone.querySelector("svg:not(.svg-icon):not(.emoji)") !== null);
 
 			if (isIframe) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-iframe" });
@@ -748,7 +800,7 @@ export class PresentationModal extends Component {
 			} else if (isTable) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-table" });
 				wrapper.appendChild(clone);
-			} else if (isSvgOrMermaid) {
+			} else if (isMermaid || isSvg) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-mermaid" });
 				wrapper.appendChild(clone);
 				enhanceMermaidSvgElements(wrapper);
@@ -756,9 +808,13 @@ export class PresentationModal extends Component {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
 				const frame = wrapper.createDiv({ cls: "slideflow-code-frame" });
 				const codeEl = clone.querySelector("code") || clone;
-				const langCls = Array.from(codeEl.classList).find((c) => c.startsWith("language-"))
-					|| Array.from(clone.classList).find((c) => c.startsWith("language-"));
-				const langLabel = langCls ? langCls.replace(/^language-/, "") : "code";
+				const langCls =
+					Array.from(codeEl.classList).find((c) => c.startsWith("language-")) ||
+					Array.from(clone.classList).find((c) => c.startsWith("language-")) ||
+					Array.from(clone.classList).find((c) => c.startsWith("block-language-"));
+				const langLabel = langCls
+					? langCls.replace(/^(?:block-)?language-/, "")
+					: "code";
 
 				const frameHeader = frame.createDiv({ cls: "slideflow-code-frame-header" });
 				const dots = frameHeader.createDiv({ cls: "slideflow-code-frame-dots" });
@@ -1006,9 +1062,56 @@ export class PresentationModal extends Component {
 		}
 	}
 
+	/**
+	 * Re-renders the current slide immediately without transition animation, preserving
+	 * scroll position (and active media zoom if open). Used when Ctrl+Enter validates a diff.
+	 */
+	public async refreshSlideInPlace(
+		node: SectionNode,
+		sourcePath: string,
+		decoration?: SlideRenderDecoration
+	): Promise<void> {
+		this.hideSelectionToolbar();
+		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
+		const wasZoomOpen = this.isMediaZoomActive();
+		const prevZoomIndex = this.activeZoomIndex;
+
+		if (this.currentSlideComponent) {
+			unloadSlideContent(this.currentSlideComponent, this);
+			this.currentSlideComponent = null;
+		}
+
+		const markdownToRender = decoration?.overrideMarkdown ?? node.contentMarkdown;
+		this.currentSlideComponent = await renderSlideContent(
+			this.appRef,
+			markdownToRender,
+			this.contentEl,
+			sourcePath,
+			this
+		);
+
+		const mediaElements = this.detectMediaElements();
+		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
+		this.contentEl.toggleClass("is-only-zoomable-slide", isOnlyZoomable);
+
+		if (this.contentEl) {
+			this.contentEl.scrollTop = Math.min(
+				prevScrollTop,
+				Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight)
+			);
+		}
+
+		if (wasZoomOpen && prevZoomIndex >= 0 && prevZoomIndex < mediaElements.length) {
+			this.openMediaZoom(prevZoomIndex, false);
+		} else if (wasZoomOpen) {
+			this.closeMediaZoom(false);
+		}
+	}
+
 	public close() {
 		this.hideSelectionToolbar();
-		this.overlayEl.removeEventListener("mouseup", this.boundMouseUpHandler);
+		window.removeEventListener("mouseup", this.boundMouseUpHandler);
+		window.removeEventListener("keyup", this.boundKeyUpSelectionHandler);
 		this.cancelScrollAnimation(false);
 		this.closeMediaZoom(false);
 		this.hideSubNoteBanner();
