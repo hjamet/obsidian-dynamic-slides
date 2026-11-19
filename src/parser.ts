@@ -1,6 +1,9 @@
+import { renderChildHeadingInnerHtml, stripHeadingLinksToPlainText } from "./headingUtils";
+
 export interface SectionNode {
 	id: string;
 	title: string;
+	displayTitle: string;
 	level: number;
 	lineStart: number;
 	lineEnd: number;
@@ -9,7 +12,29 @@ export interface SectionNode {
 	contentMarkdown: string;
 	rawOwnMarkdown: string;
 	childHeadingsHtml: string;
+	isPureLinkLeaf?: boolean;
+	isVirtualDeleted?: boolean;
 	flatIndex?: number;
+}
+
+export function buildChildHeadingsHtml(
+	children: SectionNode[],
+	includeVirtualDeleted: boolean = false
+): string {
+	const visibleChildren = includeVirtualDeleted
+		? children
+		: children.filter((c) => !c.isVirtualDeleted);
+
+	return visibleChildren
+		.map((c) => {
+			if (c.isVirtualDeleted) {
+				const inner = renderChildHeadingInnerHtml(c.title, false);
+				return `<div class="dynamic-slides-child-heading level-${c.level} is-deleted-child-heading" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}"><del class="dv-del">${inner}</del></div>`;
+			}
+			const inner = renderChildHeadingInnerHtml(c.title, Boolean(c.isPureLinkLeaf));
+			return `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}">${inner}</div>`;
+		})
+		.join("\n");
 }
 
 export function stripFrontmatterWithOffset(markdown: string): { text: string; strippedLines: number } {
@@ -32,6 +57,7 @@ export function parseMarkdownSections(
 		const rootNode: SectionNode = {
 			id: "node-root",
 			title: "0. Full document",
+			displayTitle: "0. Full document",
 			level: 0,
 			lineStart: 0,
 			lineEnd: Math.max(0, lines.length - 1),
@@ -53,6 +79,7 @@ export function parseMarkdownSections(
 	const rootNode: SectionNode = {
 		id: "node-root",
 		title: "0. Full document",
+		displayTitle: "0. Full document",
 		level: 0,
 		lineStart: 0,
 		lineEnd: lines.length - 1,
@@ -83,10 +110,12 @@ export function parseMarkdownSections(
 		}
 
 		const lineStart = h.position.start.line;
+		const rawTitle: string = h.heading || "";
 
 		const node: SectionNode = {
 			id: `section-${i}-${h.position.start.line}`,
-			title: h.heading,
+			title: rawTitle,
+			displayTitle: stripHeadingLinksToPlainText(rawTitle) || rawTitle,
 			level: h.level,
 			lineStart,
 			lineEnd,
@@ -115,11 +144,25 @@ export function parseMarkdownSections(
 	});
 
 	for (const node of headingNodes) {
+		if (node.children.length === 0) {
+			const bodyOnly = lines
+				.slice(node.lineStart + 1, node.lineEnd + 1)
+				.join("\n")
+				.replace(/^[\s\-*_]+$/gm, "")
+				.trim();
+			const trimmedTitle = node.title.trim();
+			node.isPureLinkLeaf =
+				bodyOnly.length === 0 &&
+				(/^\[\[[^\]]+\]\]$/.test(trimmedTitle) || /^\[[^\]\n]+\]\([^)\n]+\)$/.test(trimmedTitle));
+		} else {
+			node.isPureLinkLeaf = false;
+		}
+	}
+
+	for (const node of headingNodes) {
 		if (node.children.length > 0) {
 			const intro = lines.slice(node.lineStart, node.children[0].lineStart).join("\n");
-			const childHeadings = node.children
-				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex}">${c.title}</div>`)
-				.join("\n");
+			const childHeadings = buildChildHeadingsHtml(node.children, false);
 			node.rawOwnMarkdown = intro;
 			node.childHeadingsHtml = childHeadings;
 			node.contentMarkdown = `${intro}\n${childHeadings}`;
@@ -140,6 +183,7 @@ export function parseMarkdownSections(
 export function findCurrentSectionNode(flatNodes: SectionNode[], cursorLine: number): SectionNode {
 	let bestMatch: SectionNode | null = null;
 	for (const node of flatNodes) {
+		if (node.isVirtualDeleted) continue;
 		if (cursorLine >= node.lineStart && cursorLine <= node.lineEnd) {
 			if (!bestMatch || node.level >= bestMatch.level) {
 				bestMatch = node;

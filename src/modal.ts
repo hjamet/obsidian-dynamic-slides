@@ -272,6 +272,21 @@ export class PresentationModal extends Component {
 				}
 			}
 
+			const directChildLinkEl = target.closest(
+				".dynamic-slides-child-heading a.internal-link"
+			) as HTMLElement | null;
+			if (directChildLinkEl) {
+				const href =
+					directChildLinkEl.getAttribute("data-href") ||
+					directChildLinkEl.getAttribute("href");
+				if (href) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					this.onLinkClickCallback?.(href);
+					return;
+				}
+			}
+
 			const childHeadingEl = target.closest('.dynamic-slides-child-heading') as HTMLElement;
 			if (childHeadingEl) {
 				const nodeId = childHeadingEl.getAttribute('data-node-id');
@@ -1045,9 +1060,17 @@ export class PresentationModal extends Component {
 	public decorateModifiedInternalLinks(isDirtyHref: (href: string) => boolean): void {
 		if (!this.contentEl) return;
 		this.contentEl.querySelectorAll(".slideflow-link-dirty-badge").forEach((el) => el.remove());
-		const links = Array.from(this.contentEl.querySelectorAll<HTMLElement>("a.internal-link"));
+		const links = Array.from(
+			this.contentEl.querySelectorAll<HTMLElement>(
+				"a.internal-link, .slideflow-child-heading-linked-title[data-link-href]"
+			)
+		);
 		for (const linkEl of links) {
-			const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "";
+			const href =
+				linkEl.getAttribute("data-href") ||
+				linkEl.getAttribute("data-link-href") ||
+				linkEl.getAttribute("href") ||
+				"";
 			if (!href) continue;
 			if (isDirtyHref(href)) {
 				linkEl.addClass("slideflow-link-has-diff");

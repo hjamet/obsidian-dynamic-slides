@@ -14,6 +14,7 @@
 
 import { AnchorRect } from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
+import { readImageAsDataUrl } from "./commentImages";
 
 export interface SlideCommentsRailCallbacks {
 	onEditComment: (comment: ReviewComment, anchorRect?: AnchorRect | null) => void;
@@ -200,6 +201,12 @@ export class SlideCommentsRail {
 				text: "+diff",
 			});
 		}
+		if (comment.images && comment.images.length > 0) {
+			badges.createSpan({
+				cls: "slideflow-rail-img-pill",
+				text: `${comment.images.length} img`,
+			});
+		}
 		if (isFailed) {
 			badges.createSpan({
 				cls: "slideflow-rail-failed-pill",
@@ -248,10 +255,25 @@ export class SlideCommentsRail {
 		}
 
 		// Comment body
-		pop.createDiv({
-			cls: "slideflow-rail-popover-body",
-			text: comment.commentText,
-		});
+		if (comment.commentText && comment.commentText.trim().length > 0) {
+			pop.createDiv({
+				cls: "slideflow-rail-popover-body",
+				text: comment.commentText,
+			});
+		}
+
+		if (comment.images && comment.images.length > 0) {
+			const strip = pop.createDiv({ cls: "slideflow-rail-popover-images" });
+			for (const img of comment.images) {
+				const imgEl = strip.createEl("img", {
+					cls: "slideflow-rail-popover-thumb",
+					attr: { alt: img.fileName, title: `${img.fileName}\n${img.path}` },
+				});
+				void readImageAsDataUrl(img.path, img.mimeType).then((dataUrl) => {
+					if (dataUrl && imgEl.isConnected) imgEl.src = dataUrl;
+				});
+			}
+		}
 
 		// Prefer opening to the RIGHT of the icon when right margin fits (zero overlap over slide text!),
 		// automatically flipping to the LEFT when near the viewport right edge.

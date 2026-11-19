@@ -9,6 +9,7 @@
  */
 
 import { SectionNode } from "./parser";
+import { stripHeadingLinksToPlainText } from "./headingUtils";
 
 export interface SeenSlideRecord {
 	hash: string;
@@ -27,6 +28,18 @@ export interface SlideDiffInfo {
 	currentHash: string;
 }
 
+export interface DeletedSectionItem {
+	id: string;
+	slideKey: string;
+	title: string;
+	displayTitle: string;
+	level: number;
+	parentNormTitle: string | null;
+	diffMarkdown: string;
+	rawOldMarkdown: string;
+	hash: string;
+}
+
 export interface NoteDiffContext {
 	notePath: string;
 	baselineMarkdown: string;
@@ -34,8 +47,7 @@ export interface NoteDiffContext {
 	dirtySlideKeys: string[];
 	currentHashesByKey: Record<string, string>;
 	descendantDirtyNodeIds: Set<string>;
-	deletedSectionsMarkdown: string | null;
-	deletedSectionsHash: string | null;
+	deletedSections: DeletedSectionItem[];
 	totalDirtySlides: number;
 }
 
@@ -44,6 +56,7 @@ interface FlatSectionSlice {
 	level: number;
 	title: string;
 	normTitle: string;
+	parentNormTitle: string | null;
 	ownLines: string[];
 	ownMarkdown: string;
 }
@@ -55,7 +68,7 @@ export function stripFrontmatter(md: string): string {
 }
 
 export function normalizeTitle(title: string): string {
-	return title
+	return stripHeadingLinksToPlainText(title)
 		.toLowerCase()
 		.replace(/^[0-9.\s\-:#]+/, "")
 		.replace(/[^\p{L}\p{N}\s]/gu, "")
@@ -103,10 +116,12 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 	const clean = stripFrontmatter(markdown);
 	const lines = clean.split("\n");
 	const sections: FlatSectionSlice[] = [];
+	const headingStack: Array<{ level: number; normTitle: string }> = [];
 
 	let currHeading = "";
 	let currLevel = 0;
 	let currTitle = "Preamble";
+	let currParentNormTitle: string | null = null;
 	let currLines: string[] = [];
 	let inFenceChar = "";
 	let inFenceLen = 0;
@@ -121,6 +136,7 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 				level: currLevel,
 				title: currTitle,
 				normTitle: normalizeTitle(currTitle),
+				parentNormTitle: currParentNormTitle,
 				ownLines: currLines,
 				ownMarkdown,
 			});
@@ -152,6 +168,11 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 			currLevel = mHead[1].length;
 			currTitle = mHead[2].trim();
 			currHeading = `${mHead[1]} ${currTitle}`;
+			while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= currLevel) {
+				headingStack.pop();
+			}
+			currParentNormTitle = headingStack.length > 0 ? headingStack[headingStack.length - 1].normTitle : null;
+			headingStack.push({ level: currLevel, normTitle: normalizeTitle(currTitle) });
 			currLines = [];
 		} else {
 			currLines.push(line);
@@ -609,6 +630,37 @@ function diffSingleSlideMarkdown(
 	};
 }
 
+function extractSignificantWords(text: string): Set<string> {
+	const words = text
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}\s]/gu, " ")
+		.split(/\s+/)
+		.filter((w) => w.length >= 4);
+	return new Set(words);
+}
+
+function bodyWordSimilarity(oldBody: string, newBody: string): number {
+	const setA = extractSignificantWords(oldBody);
+	const setB = extractSignificantWords(newBody);
+	if (setA.size === 0 || setB.size === 0) return 0;
+	let inter = 0;
+	for (const w of setA) {
+		if (setB.has(w)) inter++;
+	}
+	return (2 * inter) / (setA.size + setB.size);
+}
+
+function buildDeletedSectionDiffMarkdown(slice: FlatSectionSlice): string {
+	const outParts: string[] = [];
+	const hashes = "#".repeat(Math.min(6, Math.max(1, slice.level || 2)));
+	outParts.push(`${hashes} <del class="dv-del">${slice.title}</del>`);
+	outParts.push(`<div class="slideflow-deleted-sections-title">Section removed since last review</div>`);
+	for (const b of splitSectionIntoBlocks(slice.ownLines)) {
+		outParts.push(wrapBlockSpan(b, false));
+	}
+	return outParts.join("\n\n");
+}
+
 export function buildNoteDiffContext(
 	notePath: string,
 	baselineMarkdown: string,
@@ -624,12 +676,59 @@ export function buildNoteDiffContext(
 	const currentHashesByKey: Record<string, string> = {};
 	const descendantDirtyNodeIds = new Set<string>();
 
-	const hasHeadings = flatNodes.length > 1;
-	const targetNodes = hasHeadings ? flatNodes.slice(1) : flatNodes;
+	const realFlatNodes = flatNodes.filter((n) => !n.isVirtualDeleted);
+	const hasHeadings = realFlatNodes.length > 1;
+	const targetNodes = hasHeadings ? realFlatNodes.slice(1) : realFlatNodes;
+
+	// Best-first greedy matching combining heading similarity & body content overlap so
+	// renamed/updated subsections match their own predecessor instead of spawning ghost deletions.
+	const matchedOldIdxByNodeIdx = new Map<number, number>();
+	const candidatePairs: Array<{ nodeIdx: number; oldIdx: number; score: number }> = [];
+
+	for (let nodeIdx = 0; nodeIdx < targetNodes.length; nodeIdx++) {
+		const node = targetNodes[nodeIdx];
+		if (node.level === 0) continue;
+		const normT = normalizeTitle(node.title);
+		const currBody = node.rawOwnMarkdown.replace(/\r\n/g, "\n").split("\n").slice(1).join("\n");
+
+		for (let oldIdx = 0; oldIdx < oldSlices.length; oldIdx++) {
+			const o = oldSlices[oldIdx];
+			if (o.level === 0) continue;
+
+			if (o.normTitle === normT && o.level === node.level) {
+				candidatePairs.push({ nodeIdx, oldIdx, score: 1.0 });
+				continue;
+			}
+			if (o.normTitle === normT) {
+				candidatePairs.push({ nodeIdx, oldIdx, score: 0.99 });
+				continue;
+			}
+
+			const tSim = titleSimilarity(o.normTitle, normT);
+			const bSim = bodyWordSimilarity(o.ownLines.join("\n"), currBody);
+
+			if (o.level === node.level) {
+				const combined = Math.max(tSim, bSim * 0.95, 0.55 * tSim + 0.45 * bSim);
+				if (combined >= 0.40 || (tSim >= 0.32 && bSim >= 0.22)) {
+					candidatePairs.push({ nodeIdx, oldIdx, score: combined });
+				}
+			} else if (tSim >= 0.55 || (tSim >= 0.40 && bSim >= 0.45)) {
+				candidatePairs.push({ nodeIdx, oldIdx, score: Math.max(tSim, 0.5 * tSim + 0.5 * bSim) * 0.92 });
+			}
+		}
+	}
+
+	candidatePairs.sort((a, b) => b.score - a.score);
+	for (const pair of candidatePairs) {
+		if (matchedOldIdxByNodeIdx.has(pair.nodeIdx) || usedOld.has(pair.oldIdx)) continue;
+		matchedOldIdxByNodeIdx.set(pair.nodeIdx, pair.oldIdx);
+		usedOld.add(pair.oldIdx);
+	}
 
 	const keyOccurrences = new Map<string, number>();
 
-	for (const node of targetNodes) {
+	for (let nodeIdx = 0; nodeIdx < targetNodes.length; nodeIdx++) {
+		const node = targetNodes[nodeIdx];
 		const normT = node.level === 0 ? "root" : normalizeTitle(node.title);
 		const baseKey = `L${node.level}:${normT}`;
 		const occ = (keyOccurrences.get(baseKey) || 0) + 1;
@@ -639,44 +738,24 @@ export function buildNoteDiffContext(
 		const currentOwnMd = node.rawOwnMarkdown.replace(/\r\n/g, "\n").trim();
 		const currentHash = hashText(currentOwnMd);
 
-		// Match against baseline slices
 		let matchedIdx = -1;
 		if (node.level === 0) {
 			matchedIdx = oldSlices.findIndex((s, idx) => !usedOld.has(idx) && s.level === 0);
+			if (matchedIdx !== -1) usedOld.add(matchedIdx);
 		} else {
-			let bestScore = 0;
-			for (let idx = 0; idx < oldSlices.length; idx++) {
-				if (usedOld.has(idx)) continue;
-				const o = oldSlices[idx];
-				if (o.level === 0) continue;
-				if (o.normTitle === normT && o.level === node.level) {
-					matchedIdx = idx;
-					break;
-				}
-				if (o.normTitle === normT && bestScore < 0.99) {
-					matchedIdx = idx;
-					bestScore = 0.99;
-					continue;
-				}
-				const sim = titleSimilarity(o.normTitle, normT);
-				if (sim > 0.55 && sim > bestScore) {
-					bestScore = sim;
-					matchedIdx = idx;
-				}
-			}
+			matchedIdx = matchedOldIdxByNodeIdx.get(nodeIdx) ?? -1;
 		}
 
 		let baselineOwnMd: string | null = null;
 		if (matchedIdx !== -1) {
-			usedOld.add(matchedIdx);
 			baselineOwnMd = oldSlices[matchedIdx].ownMarkdown;
 		} else if (node.level === 0) {
 			baselineOwnMd = stripFrontmatter(baselineMarkdown).trim();
 		}
 
 		// Respect per-slide read tracking (`seenSlides`):
-		// If Henri already viewed this slide (>1s) at this exact content hash in a previous session, no diff!
-		// If the slide changed AGAIN since Henri viewed it, diff against the text Henri last saw!
+		// If already validated at this exact content hash, no diff!
+		// If the slide changed AGAIN since validation, diff against the text last validated!
 		const seenRec = seenSlides[slideKey];
 		let effectiveOldMd: string | null = baselineOwnMd;
 		let alreadySeenUnchanged = false;
@@ -728,26 +807,56 @@ export function buildNoteDiffContext(
 		}
 	}
 
-	// Collect any completely deleted baseline sections (non-empty)
-	const deletedParts: string[] = [];
+	// Collect any truly deleted baseline sections as standalone deleted-section items
+	// (NEVER dumped inside a parent slide that hides subsection content!)
+	const deletedSections: DeletedSectionItem[] = [];
+	const delKeyOcc = new Map<string, number>();
+
 	for (let idx = 0; idx < oldSlices.length; idx++) {
 		if (usedOld.has(idx)) continue;
 		const o = oldSlices[idx];
 		if (!o.ownMarkdown.trim()) continue;
 		if (o.level === 0 && hasHeadings) continue;
-		deletedParts.push(wrapBlockSpan(o.ownMarkdown, false));
-	}
 
-	let deletedSectionsMarkdown: string | null = null;
-	let deletedSectionsHash: string | null = null;
-	if (deletedParts.length > 0) {
-		const rawDel = deletedParts.join("\n\n");
-		const delHash = hashText(rawDel);
-		const seenDel = seenSlides["__deleted__"];
-		if (!seenDel || seenDel.hash !== delHash) {
-			deletedSectionsMarkdown = `<div class="slideflow-deleted-sections"><div class="slideflow-deleted-sections-title">Sections removed since last review</div>\n\n${rawDel}\n\n</div>`;
-			deletedSectionsHash = delHash;
+		const baseDelKey = `__deleted__:L${o.level}:${o.normTitle || "section"}`;
+		const occ = (delKeyOcc.get(baseDelKey) || 0) + 1;
+		delKeyOcc.set(baseDelKey, occ);
+		const delSlideKey = occ === 1 ? baseDelKey : `${baseDelKey}#${occ}`;
+		const delHash = hashText(o.ownMarkdown);
+
+		const seenDel = seenSlides[delSlideKey];
+		if (seenDel && seenDel.hash === delHash) {
+			continue;
 		}
+
+		const id = `deleted-section-${idx}`;
+		const diffMarkdown = buildDeletedSectionDiffMarkdown(o);
+		const displayTitle = stripHeadingLinksToPlainText(o.title) || o.title;
+
+		deletedSections.push({
+			id,
+			slideKey: delSlideKey,
+			title: o.title,
+			displayTitle,
+			level: o.level || 2,
+			parentNormTitle: o.parentNormTitle,
+			diffMarkdown,
+			rawOldMarkdown: o.ownMarkdown,
+			hash: delHash,
+		});
+
+		slideDiffs.set(id, {
+			slideKey: delSlideKey,
+			hasChanges: true,
+			diffMarkdown,
+			rawNewMarkdown: "",
+			rawOldMarkdown: o.ownMarkdown,
+			addedCount: 0,
+			removedCount: Math.max(1, splitSectionIntoBlocks(o.ownLines).length),
+			currentHash: delHash,
+		});
+		dirtySlideKeys.push(delSlideKey);
+		currentHashesByKey[delSlideKey] = delHash;
 	}
 
 	return {
@@ -757,8 +866,7 @@ export function buildNoteDiffContext(
 		dirtySlideKeys,
 		currentHashesByKey,
 		descendantDirtyNodeIds,
-		deletedSectionsMarkdown,
-		deletedSectionsHash,
+		deletedSections,
 		totalDirtySlides: dirtySlideKeys.length,
 	};
 }

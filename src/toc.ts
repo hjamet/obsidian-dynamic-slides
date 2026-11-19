@@ -4,6 +4,7 @@ export interface TOCVisualMeta {
 	dirtyNodeIds?: Set<string>;
 	descendantDirtyNodeIds?: Set<string>;
 	commentCountByHeading?: Map<string, number>;
+	showVirtualDeleted?: boolean;
 }
 
 function isAncestorOf(ancestor: SectionNode, target: SectionNode): boolean {
@@ -107,6 +108,9 @@ export class TOCComponent {
 		activeNode: SectionNode,
 		meta?: TOCVisualMeta
 	): void {
+		if (node.isVirtualDeleted && !meta?.showVirtualDeleted) {
+			return;
+		}
 		const li = containerUl.createEl("li", { cls: "dynamic-slides-toc-node" });
 		const isCurrent = node.id === activeNode.id;
 		const hasChildren = node.children && node.children.length > 0;
@@ -117,7 +121,7 @@ export class TOCComponent {
 		const commentCount = meta?.commentCountByHeading?.get(node.title) || 0;
 
 		const itemEl = li.createDiv({
-			cls: `dynamic-slides-toc-item level-${node.level} ${isCurrent ? "is-active" : ""} ${isDirty ? "has-diff" : ""}`
+			cls: `dynamic-slides-toc-item level-${node.level} ${isCurrent ? "is-active" : ""} ${isDirty ? "has-diff" : ""} ${node.isVirtualDeleted ? "is-deleted-section" : ""}`
 		});
 
 		itemEl.createEl("span", {
@@ -127,7 +131,7 @@ export class TOCComponent {
 
 		itemEl.createEl("span", {
 			cls: "dynamic-slides-toc-title",
-			text: node.title
+			text: node.displayTitle || node.title
 		});
 
 		if (isDirty) {

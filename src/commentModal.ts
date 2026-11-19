@@ -1,16 +1,22 @@
 /**
  * CommentOverlayModal — Modale flottante discrète (sans voile sombre) dans SlideFlow.
  *
- * - Sans sélection : ancrée proprement à gauche pour laisser la slide 100 % lisible à côté.
+ * - Sans sélection : ancrée sous la slide si la hauteur le permet, sinon à droite.
  * - Avec sélection de texte : ancrée juste sous le passage surligné en vert (façon Antigravity).
- * - Raccourcis : `C` texte, `V` dictée immédiate, `Ctrl+M` bascule micro, `Entrée` valider,
- *   `Shift+Entrée` saut de ligne, `Échap` fermer.
+ * - Raccourcis : `C` texte, `V` dictée immédiate, `Ctrl+M` bascule micro, `Ctrl+V` coller une image,
+ *   `Entrée` valider, `Shift+Entrée` saut de ligne, `Échap` fermer.
  */
 
 import { Notice } from "obsidian";
 import { AnchorRect, setGreenSelectionHighlight } from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
 import { VoiceDictationService } from "./voiceDictation";
+import {
+	CommentImageAttachment,
+	deleteTempImageSafe,
+	readImageAsDataUrl,
+	saveImageBufferToTemp,
+} from "./commentImages";
 
 export interface CommentModalContext {
 	noteTitle: string;
@@ -28,10 +34,17 @@ export interface CommentModalContext {
 }
 
 export interface CommentModalCallbacks {
-	onSubmit: (commentText: string, editingId?: string) => Promise<void>;
+	onSubmit: (
+		commentText: string,
+		editingId?: string,
+		images?: CommentImageAttachment[]
+	) => Promise<void>;
 	onDeleteExisting: (commentId: string) => Promise<void>;
 	onClose: () => void;
 }
+
+const IMAGE_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`;
+const MIC_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 
 export class CommentOverlayModal {
 	private parentEl: HTMLElement;
@@ -40,6 +53,8 @@ export class CommentOverlayModal {
 
 	private cardEl: HTMLElement | null = null;
 	private textareaEl: HTMLTextAreaElement | null = null;
+	private imagesStripEl: HTMLElement | null = null;
+	private fileInputEl: HTMLInputElement | null = null;
 	private micBtnEl: HTMLButtonElement | null = null;
 	private submitBtnEl: HTMLButtonElement | null = null;
 	private voiceFeedbackEl: HTMLElement | null = null;
@@ -50,10 +65,14 @@ export class CommentOverlayModal {
 	private isOpenFlag: boolean = false;
 	private isBusyTranscribing: boolean = false;
 	private editingId: string | null = null;
+	private attachedImages: CommentImageAttachment[] = [];
+	private newlyCreatedTempPaths: Set<string> = new Set();
+	private submittedSuccessfully: boolean = false;
 	private recStartTime: number = 0;
 	private recTimerId: number | null = null;
 	private boundKeyHandler: (evt: KeyboardEvent) => void;
 	private boundOutsideClickHandler: (evt: MouseEvent) => void;
+	private boundPasteHandler: (evt: ClipboardEvent) => void;
 
 	constructor(
 		parentEl: HTMLElement,
@@ -65,6 +84,7 @@ export class CommentOverlayModal {
 		this.callbacks = callbacks;
 		this.boundKeyHandler = this.handleKeyDown.bind(this);
 		this.boundOutsideClickHandler = this.handleOutsideMouseDown.bind(this);
+		this.boundPasteHandler = this.handlePaste.bind(this);
 	}
 
 	public isOpen(): boolean {
@@ -74,9 +94,12 @@ export class CommentOverlayModal {
 	public open(ctx: CommentModalContext): void {
 		this.close(false);
 		this.isOpenFlag = true;
+		this.submittedSuccessfully = false;
 		this.parentEl.addClass("is-comment-modal-open");
 		this.isBusyTranscribing = false;
 		this.editingId = ctx.editingComment ? ctx.editingComment.id : null;
+		this.attachedImages = ctx.editingComment?.images ? [...ctx.editingComment.images] : [];
+		this.newlyCreatedTempPaths = new Set();
 
 		if (ctx.highlightRange) {
 			setGreenSelectionHighlight(ctx.highlightRange);
@@ -123,7 +146,30 @@ export class CommentOverlayModal {
 		this.cardEl.addEventListener("click", (evt) => evt.stopPropagation());
 		this.cardEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
 
-		// Subtle 1-line scope header (no emojis, ultra clean)
+		// Drag & drop image files directly onto the comment card
+		this.cardEl.addEventListener("dragover", (evt) => {
+			if (evt.dataTransfer && Array.from(evt.dataTransfer.types).includes("Files")) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.cardEl?.addClass("is-drag-over");
+			}
+		});
+		this.cardEl.addEventListener("dragleave", () => {
+			this.cardEl?.removeClass("is-drag-over");
+		});
+		this.cardEl.addEventListener("drop", (evt) => {
+			this.cardEl?.removeClass("is-drag-over");
+			const files = Array.from(evt.dataTransfer?.files || []).filter((f) =>
+				f.type.startsWith("image/")
+			);
+			if (files.length > 0) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				void this.attachImageFiles(files);
+			}
+		});
+
+		// Subtle 1-line scope header
 		const headerEl = this.cardEl.createDiv({ cls: "slideflow-comment-header" });
 		const metaText = headerEl.createSpan({ cls: "slideflow-comment-meta" });
 		metaText.setText(ctx.scopeLabel);
@@ -140,13 +186,38 @@ export class CommentOverlayModal {
 			cls: "slideflow-comment-textarea",
 			attr: {
 				rows: "2",
-				placeholder: "Leave a comment",
+				placeholder: "Leave a comment (Ctrl+V to paste image)",
 			},
 		});
 		if (ctx.editingComment) {
 			this.textareaEl.value = ctx.editingComment.commentText;
 		}
 		this.textareaEl.addEventListener("input", () => this.autoResizeTextarea());
+
+		// Thumbnail strip for pasted/attached temporary images
+		this.imagesStripEl = this.cardEl.createDiv({ cls: "slideflow-comment-images-strip" });
+		this.imagesStripEl.style.display = "none";
+		this.renderAttachedImages();
+
+		// Hidden file picker for optional click-to-attach image
+		this.fileInputEl = this.cardEl.createEl("input", {
+			cls: "slideflow-comment-file-input",
+			attr: {
+				type: "file",
+				accept: "image/*",
+				multiple: "multiple",
+			},
+		});
+		this.fileInputEl.style.display = "none";
+		this.fileInputEl.addEventListener("change", () => {
+			const files = Array.from(this.fileInputEl?.files || []).filter((f) =>
+				f.type.startsWith("image/")
+			);
+			if (files.length > 0) {
+				void this.attachImageFiles(files);
+			}
+			if (this.fileInputEl) this.fileInputEl.value = "";
+		});
 
 		// Live voice feedback bar (hidden unless recording, transcribing, or error)
 		this.voiceFeedbackEl = this.cardEl.createDiv({ cls: "slideflow-comment-voice-feedback" });
@@ -155,7 +226,7 @@ export class CommentOverlayModal {
 		const meterTrack = this.voiceFeedbackEl.createDiv({ cls: "slideflow-voice-meter-track" });
 		this.levelFillEl = meterTrack.createDiv({ cls: "slideflow-voice-meter-fill" });
 
-		// Minimal footer: Cancel | Mic icon | Add Comment pill
+		// Minimal footer: Cancel | Attach image | Mic icon | Add Comment pill
 		const footerEl = this.cardEl.createDiv({ cls: "slideflow-comment-footer" });
 
 		const cancelBtn = footerEl.createEl("button", {
@@ -170,6 +241,20 @@ export class CommentOverlayModal {
 
 		const rightActions = footerEl.createDiv({ cls: "slideflow-comment-right-actions" });
 
+		const imgBtn = rightActions.createEl("button", {
+			cls: "slideflow-comment-img-btn",
+			attr: {
+				type: "button",
+				title: "Attach image (or paste with Ctrl+V)",
+				"aria-label": "Attach image",
+			},
+		});
+		imgBtn.innerHTML = IMAGE_ICON_SVG;
+		imgBtn.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.fileInputEl?.click();
+		});
+
 		this.micBtnEl = rightActions.createEl("button", {
 			cls: "slideflow-comment-mic-btn",
 			attr: {
@@ -178,7 +263,7 @@ export class CommentOverlayModal {
 				"aria-label": "Toggle voice dictation (Ctrl+M)",
 			},
 		});
-		this.micBtnEl.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
+		this.micBtnEl.innerHTML = MIC_ICON_SVG;
 		this.micBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			void this.toggleVoiceDictation();
@@ -204,6 +289,7 @@ export class CommentOverlayModal {
 		}
 
 		window.addEventListener("keydown", this.boundKeyHandler, true);
+		window.addEventListener("paste", this.boundPasteHandler, true);
 		window.setTimeout(() => {
 			window.addEventListener("mousedown", this.boundOutsideClickHandler, true);
 		}, 0);
@@ -221,10 +307,129 @@ export class CommentOverlayModal {
 		});
 	}
 
+	private handlePaste(evt: ClipboardEvent): void {
+		if (!this.isOpenFlag) return;
+		const dt = evt.clipboardData;
+		const imageFiles: File[] = [];
+
+		if (dt?.items) {
+			for (let i = 0; i < dt.items.length; i++) {
+				const item = dt.items[i];
+				if (item.kind === "file" && item.type.startsWith("image/")) {
+					const f = item.getAsFile();
+					if (f) imageFiles.push(f);
+				}
+			}
+		}
+
+		if (imageFiles.length === 0 && dt?.files && dt.files.length > 0) {
+			for (let i = 0; i < dt.files.length; i++) {
+				const f = dt.files[i];
+				if (f.type.startsWith("image/")) {
+					imageFiles.push(f);
+				}
+			}
+		}
+
+		if (imageFiles.length > 0) {
+			evt.preventDefault();
+			evt.stopPropagation();
+			void this.attachImageFiles(imageFiles);
+			return;
+		}
+
+		// Electron native clipboard fallback (Windows Snipping Tool / raw DIB bitmaps)
+		const hasPlainText = Boolean(dt?.getData("text/plain"));
+		if (!hasPlainText) {
+			try {
+				// eslint-disable-next-line @typescript-eslint/no-var-requires
+				const electronMod = (window as any).require?.("electron");
+				const nativeImg = electronMod?.clipboard?.readImage?.();
+				if (nativeImg && !nativeImg.isEmpty()) {
+					const pngBuf: Buffer = nativeImg.toPNG();
+					if (pngBuf && pngBuf.length > 0) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						void this.attachImageBuffer(pngBuf, "image/png");
+					}
+				}
+			} catch {
+				// non-Electron or clipboard unavailable — let default paste proceed
+			}
+		}
+	}
+
+	private async attachImageFiles(files: File[]): Promise<void> {
+		for (const file of files) {
+			try {
+				const arrBuf = await file.arrayBuffer();
+				const buf = Buffer.from(arrBuf);
+				await this.attachImageBuffer(buf, file.type || "image/png");
+			} catch (err: any) {
+				const msg = err?.message || String(err);
+				this.setStatus(`Image error: ${msg}`, "error");
+				new Notice(`SlideFlow image attach failed: ${msg}`);
+			}
+		}
+	}
+
+	private async attachImageBuffer(buffer: Buffer, mimeType: string): Promise<void> {
+		const attachment = await saveImageBufferToTemp(buffer, mimeType);
+		this.attachedImages.push(attachment);
+		this.newlyCreatedTempPaths.add(attachment.path);
+		this.renderAttachedImages();
+		this.setStatus("", "hidden");
+		this.textareaEl?.focus();
+	}
+
+	private renderAttachedImages(): void {
+		if (!this.imagesStripEl) return;
+		this.imagesStripEl.empty();
+
+		if (this.attachedImages.length === 0) {
+			this.imagesStripEl.style.display = "none";
+			return;
+		}
+
+		this.imagesStripEl.style.display = "flex";
+		for (const img of this.attachedImages) {
+			const chip = this.imagesStripEl.createDiv({
+				cls: "slideflow-comment-image-thumb-wrap",
+				attr: { title: `${img.fileName} (${Math.max(1, Math.round(img.sizeBytes / 1024))} KB)\n${img.path}` },
+			});
+
+			const imgEl = chip.createEl("img", {
+				cls: "slideflow-comment-image-thumb",
+				attr: { alt: img.fileName },
+			});
+			void readImageAsDataUrl(img.path, img.mimeType).then((dataUrl) => {
+				if (dataUrl && imgEl.isConnected) {
+					imgEl.src = dataUrl;
+				}
+			});
+
+			const removeBtn = chip.createEl("button", {
+				cls: "slideflow-comment-image-remove-btn",
+				text: "×",
+				attr: { type: "button", title: "Remove image", "aria-label": "Remove image" },
+			});
+			removeBtn.addEventListener("click", (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.attachedImages = this.attachedImages.filter((a) => a.id !== img.id);
+				if (this.newlyCreatedTempPaths.has(img.path)) {
+					deleteTempImageSafe(img.path);
+					this.newlyCreatedTempPaths.delete(img.path);
+				}
+				this.renderAttachedImages();
+			});
+		}
+	}
+
 	private positionNearAnchor(rect: AnchorRect): void {
 		if (!this.cardEl) return;
 		const cardWidth = 370;
-		const estimatedHeight = 160;
+		const estimatedHeight = 175;
 		const margin = 16;
 
 		let left = rect.left;
@@ -253,8 +458,10 @@ export class CommentOverlayModal {
 		if (!this.isOpenFlag || !this.cardEl) return;
 		const target = evt.target as Node | null;
 		if (target && this.cardEl.contains(target)) return;
-		// Allow scrolling or reading without accidentally losing typed text if non-empty
-		const hasDraft = Boolean(this.textareaEl?.value.trim()) || this.voiceService.isRecording();
+		const hasDraft =
+			Boolean(this.textareaEl?.value.trim()) ||
+			this.attachedImages.length > 0 ||
+			this.voiceService.isRecording();
 		if (!hasDraft) {
 			this.close(true);
 		}
@@ -270,7 +477,11 @@ export class CommentOverlayModal {
 		this.existingListEl.style.display = "flex";
 		for (const c of comments) {
 			const row = this.existingListEl.createDiv({ cls: "slideflow-existing-comment-row" });
-			row.createSpan({ cls: "slideflow-existing-comment-text", text: c.commentText });
+			const imgTag = c.images && c.images.length > 0 ? ` [${c.images.length} img]` : "";
+			row.createSpan({
+				cls: "slideflow-existing-comment-text",
+				text: `${c.commentText || "(Image attached)"}${imgTag}`,
+			});
 
 			const btns = row.createDiv({ cls: "slideflow-existing-comment-btns" });
 			const editBtn = btns.createEl("button", {
@@ -281,6 +492,8 @@ export class CommentOverlayModal {
 			editBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
 				this.editingId = c.id;
+				this.attachedImages = c.images ? [...c.images] : [];
+				this.renderAttachedImages();
 				if (this.textareaEl) {
 					this.textareaEl.value = c.commentText;
 					this.autoResizeTextarea();
@@ -436,15 +649,17 @@ export class CommentOverlayModal {
 		}
 
 		const text = (this.textareaEl?.value || "").trim();
-		if (!text) {
+		const imagesSnapshot = [...this.attachedImages];
+		if (!text && imagesSnapshot.length === 0) {
 			this.setStatus("Comment is empty.", "error");
 			this.textareaEl?.focus();
 			return;
 		}
 
 		const editId = this.editingId || undefined;
+		this.submittedSuccessfully = true;
 		this.close(false);
-		await this.callbacks.onSubmit(text, editId);
+		await this.callbacks.onSubmit(text, editId, imagesSnapshot);
 	}
 
 	public close(invokeOnCloseCallback: boolean = true): void {
@@ -457,13 +672,26 @@ export class CommentOverlayModal {
 		if (this.voiceService.isRecording()) {
 			this.voiceService.cancelRecording();
 		}
+		// Clean up newly pasted images that were cancelled without submitting
+		if (!this.submittedSuccessfully && this.newlyCreatedTempPaths.size > 0) {
+			for (const p of this.newlyCreatedTempPaths) {
+				deleteTempImageSafe(p);
+			}
+		}
+		this.newlyCreatedTempPaths.clear();
+		this.attachedImages = [];
+		this.submittedSuccessfully = false;
+
 		window.removeEventListener("keydown", this.boundKeyHandler, true);
+		window.removeEventListener("paste", this.boundPasteHandler, true);
 		window.removeEventListener("mousedown", this.boundOutsideClickHandler, true);
 		if (this.cardEl) {
 			this.cardEl.remove();
 			this.cardEl = null;
 		}
 		this.textareaEl = null;
+		this.imagesStripEl = null;
+		this.fileInputEl = null;
 		this.micBtnEl = null;
 		this.submitBtnEl = null;
 		this.voiceFeedbackEl = null;

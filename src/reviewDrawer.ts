@@ -13,6 +13,8 @@
 
 import { ConfirmOverlayModal } from "./confirmModal";
 import { ReviewComment } from "./reviewStore";
+import { stripHeadingLinksToPlainText } from "./headingUtils";
+import { readImageAsDataUrl } from "./commentImages";
 
 export interface ReviewDrawerOpenOptions {
 	comments: ReviewComment[];
@@ -255,7 +257,7 @@ export class ReviewDrawer {
 				const metaEl = itemEl.createDiv({ cls: "slideflow-drawer-item-meta" });
 				metaEl.createSpan({
 					cls: "slideflow-drawer-item-heading",
-					text: c.sectionHeading,
+					text: stripHeadingLinksToPlainText(c.sectionHeading) || c.sectionHeading,
 				});
 				if (c.scopeLabel) {
 					metaEl.createSpan({
@@ -267,6 +269,12 @@ export class ReviewDrawer {
 					metaEl.createSpan({
 						cls: "slideflow-drawer-item-diff-badge",
 						text: "+old diff",
+					});
+				}
+				if (c.images && c.images.length > 0) {
+					metaEl.createSpan({
+						cls: "slideflow-drawer-item-img-badge",
+						text: `${c.images.length} img`,
 					});
 				}
 				if (isFailed) {
@@ -284,10 +292,25 @@ export class ReviewDrawer {
 					});
 				}
 
-				itemEl.createDiv({
-					cls: "slideflow-drawer-item-body",
-					text: c.commentText,
-				});
+				if (c.commentText && c.commentText.trim().length > 0) {
+					itemEl.createDiv({
+						cls: "slideflow-drawer-item-body",
+						text: c.commentText,
+					});
+				}
+
+				if (c.images && c.images.length > 0) {
+					const strip = itemEl.createDiv({ cls: "slideflow-drawer-item-images" });
+					for (const img of c.images) {
+						const imgEl = strip.createEl("img", {
+							cls: "slideflow-drawer-item-thumb",
+							attr: { alt: img.fileName, title: `${img.fileName}\n${img.path}` },
+						});
+						void readImageAsDataUrl(img.path, img.mimeType).then((dataUrl) => {
+							if (dataUrl && imgEl.isConnected) imgEl.src = dataUrl;
+						});
+					}
+				}
 
 				const actionsEl = itemEl.createDiv({ cls: "slideflow-drawer-item-actions" });
 				const editBtn = actionsEl.createEl("button", {

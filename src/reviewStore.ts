@@ -16,6 +16,9 @@
 import { App } from "obsidian";
 import * as path from "path";
 import { CommentScopeType } from "./contextExtractor";
+import { CommentImageAttachment, deleteTempImageSafe } from "./commentImages";
+
+export type { CommentImageAttachment };
 
 export interface ReviewComment {
 	id: string;
@@ -37,6 +40,7 @@ export interface ReviewComment {
 	hadDiff: boolean;
 	oldExcerpt?: string | null;
 	commentText: string;
+	images?: CommentImageAttachment[];
 	createdAt: string;
 	updatedAt?: string;
 	copiedAt?: string;
@@ -166,6 +170,34 @@ export class ReviewStore {
 		return this.comments.length > 0;
 	}
 
+	public getAllReferencedImagePaths(): Set<string> {
+		const paths = new Set<string>();
+		for (const c of this.comments) {
+			for (const img of c.images || []) {
+				if (img?.path) paths.add(path.resolve(img.path).toLowerCase());
+			}
+		}
+		for (const b of this.wipBatches) {
+			for (const c of b.comments) {
+				for (const img of c.images || []) {
+					if (img?.path) paths.add(path.resolve(img.path).toLowerCase());
+				}
+			}
+		}
+		return paths;
+	}
+
+	private cleanupUnreferencedImages(candidatePaths: string[]): void {
+		if (candidatePaths.length === 0) return;
+		const stillUsed = this.getAllReferencedImagePaths();
+		for (const p of candidatePaths) {
+			if (!p) continue;
+			if (!stillUsed.has(path.resolve(p).toLowerCase())) {
+				deleteTempImageSafe(p);
+			}
+		}
+	}
+
 	public addComment(
 		input: Omit<ReviewComment, "id" | "createdAt">
 	): Promise<ReviewComment> {
@@ -173,6 +205,7 @@ export class ReviewStore {
 			const id = `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 			const item: ReviewComment = {
 				...input,
+				images: input.images && input.images.length > 0 ? [...input.images] : undefined,
 				id,
 				createdAt: new Date().toISOString(),
 			};
@@ -182,27 +215,38 @@ export class ReviewStore {
 		});
 	}
 
-	public updateComment(id: string, newText: string): Promise<ReviewComment | null> {
+	public updateComment(
+		id: string,
+		newText: string,
+		newImages?: CommentImageAttachment[]
+	): Promise<ReviewComment | null> {
 		return this.enqueue(async () => {
 			const target = this.comments.find((c) => c.id === id);
 			if (!target) return null;
+			const oldImagePaths = (target.images || []).map((img) => img.path);
 			target.commentText = newText.trim();
+			if (newImages !== undefined) {
+				target.images = newImages.length > 0 ? [...newImages] : undefined;
+			}
 			target.updatedAt = new Date().toISOString();
 			target.copiedAt = undefined;
 			await this.saveToDiskUnlocked();
+			if (newImages !== undefined && oldImagePaths.length > 0) {
+				this.cleanupUnreferencedImages(oldImagePaths);
+			}
 			return target;
 		});
 	}
 
 	public deleteComment(id: string): Promise<boolean> {
 		return this.enqueue(async () => {
-			const before = this.comments.length;
+			const target = this.comments.find((c) => c.id === id);
+			if (!target) return false;
+			const removedPaths = (target.images || []).map((img) => img.path);
 			this.comments = this.comments.filter((c) => c.id !== id);
-			if (this.comments.length !== before) {
-				await this.saveToDiskUnlocked();
-				return true;
-			}
-			return false;
+			await this.saveToDiskUnlocked();
+			this.cleanupUnreferencedImages(removedPaths);
+			return true;
 		});
 	}
 
@@ -219,8 +263,10 @@ export class ReviewStore {
 	public clearAll(): Promise<number> {
 		return this.enqueue(async () => {
 			const count = this.comments.length;
+			const removedPaths = this.comments.flatMap((c) => (c.images || []).map((img) => img.path));
 			this.comments = [];
 			await this.saveToDiskUnlocked();
+			this.cleanupUnreferencedImages(removedPaths);
 			return count;
 		});
 	}
@@ -283,9 +329,12 @@ export class ReviewStore {
 		return this.enqueue(async () => {
 			const idx = this.wipBatches.findIndex((b) => b.jobId === jobId);
 			if (idx === -1) return 0;
-			const count = this.wipBatches[idx].comments.length;
+			const batch = this.wipBatches[idx];
+			const count = batch.comments.length;
+			const removedPaths = batch.comments.flatMap((c) => (c.images || []).map((img) => img.path));
 			this.wipBatches.splice(idx, 1);
 			await this.saveToDiskUnlocked();
+			this.cleanupUnreferencedImages(removedPaths);
 			return count;
 		});
 	}
@@ -399,7 +448,23 @@ export class ReviewStore {
 
 				lines.push(`      <comments>`);
 				for (const item of groupItems) {
-					lines.push(`        <comment>${escapeXmlText(item.commentText)}</comment>`);
+					const imgs = item.images || [];
+					if (imgs.length === 0) {
+						lines.push(`        <comment>${escapeXmlText(item.commentText)}</comment>`);
+					} else {
+						lines.push(`        <comment>`);
+						if (item.commentText && item.commentText.trim().length > 0) {
+							lines.push(`          ${escapeXmlText(item.commentText)}`);
+						}
+						lines.push(`          <attachments>`);
+						for (const img of imgs) {
+							lines.push(
+								`            <image path="${escapeXmlAttr(img.path)}" mime="${escapeXmlAttr(img.mimeType)}" />`
+							);
+						}
+						lines.push(`          </attachments>`);
+						lines.push(`        </comment>`);
+					}
 				}
 				lines.push(`      </comments>`);
 				lines.push(`    </target>`);

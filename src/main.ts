@@ -1,12 +1,18 @@
 import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile } from "obsidian";
 import * as path from "path";
-import { parseMarkdownSections, findCurrentSectionNode, SectionNode } from "./parser";
+import {
+	buildChildHeadingsHtml,
+	parseMarkdownSections,
+	findCurrentSectionNode,
+	SectionNode,
+} from "./parser";
 import { PresentationModal, SlideRenderDecoration } from "./modal";
 import { KeyboardNavigator } from "./keyboard";
 import { TOCComponent, TOCVisualMeta } from "./toc";
 import {
 	buildNoteDiffContext,
 	DEFAULT_BLOCK_DIFF_THRESHOLD,
+	normalizeTitle,
 	NoteDiffContext,
 	SlideDiffInfo,
 } from "./diffEngine";
@@ -19,6 +25,7 @@ import {
 	extractZoomContext,
 } from "./contextExtractor";
 import { ReviewComment, ReviewStore } from "./reviewStore";
+import { CommentImageAttachment, pruneStaleTempImages } from "./commentImages";
 import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
 import { ReviewDrawer } from "./reviewDrawer";
@@ -128,6 +135,9 @@ export default class SlideFlowPlugin extends Plugin {
 			void this.reviewStore
 				.loadFromDisk()
 				.then(() => this.reconcileOrphanWipBatches())
+				.then(() => {
+					pruneStaleTempImages(this.reviewStore.getAllReferencedImagePaths());
+				})
 				.then(() => this.activeJobsTracker.refreshAndSync())
 				.catch((err) => console.error("[SlideFlow] Startup reconcile failed:", err));
 		});
@@ -201,12 +211,69 @@ export default class SlideFlowPlugin extends Plugin {
 			this.settings.blockDiffThreshold
 		);
 
-		if (ctx.totalDirtySlides === 0 && !ctx.deletedSectionsMarkdown) {
+		if (ctx.totalDirtySlides === 0 && ctx.deletedSections.length === 0) {
 			await this.baselinesStore.markEntireNoteRead(normPath);
 			return { ctx: null, autoEnable: false };
 		}
 
+		this.attachDeletedSectionNodes(flatNodes, ctx);
 		return { ctx, autoEnable: true };
+	}
+
+	private attachDeletedSectionNodes(flatNodes: SectionNode[], ctx: NoteDiffContext): void {
+		if (ctx.deletedSections.length === 0 || flatNodes.length <= 1) return;
+
+		const defaultParent = flatNodes[1] || flatNodes[0];
+
+		for (const del of ctx.deletedSections) {
+			let parentNode = defaultParent;
+			if (del.parentNormTitle) {
+				const found = flatNodes.find(
+					(n) =>
+						!n.isVirtualDeleted &&
+						n.level > 0 &&
+						n.level < del.level &&
+						normalizeTitle(n.title) === del.parentNormTitle
+				);
+				if (found) parentNode = found;
+			}
+			if (parentNode.level >= del.level && parentNode.parent) {
+				parentNode = parentNode.parent;
+			}
+
+			const vNode: SectionNode = {
+				id: del.id,
+				title: del.title,
+				displayTitle: del.displayTitle,
+				level: Math.max(parentNode.level + 1, del.level),
+				lineStart: parentNode.lineEnd,
+				lineEnd: parentNode.lineEnd,
+				parent: parentNode,
+				children: [],
+				contentMarkdown: del.diffMarkdown,
+				rawOwnMarkdown: "",
+				childHeadingsHtml: "",
+				isPureLinkLeaf: false,
+				isVirtualDeleted: true,
+			};
+
+			parentNode.children.push(vNode);
+			flatNodes.push(vNode);
+
+			let anc: SectionNode | null = parentNode;
+			while (anc) {
+				ctx.descendantDirtyNodeIds.add(anc.id);
+				anc = anc.parent;
+			}
+		}
+
+		flatNodes.forEach((n, idx) => {
+			n.flatIndex = idx;
+			if (n.children.length > 0) {
+				n.childHeadingsHtml = buildChildHeadingsHtml(n.children, false);
+				n.contentMarkdown = `${n.rawOwnMarkdown}\n${n.childHeadingsHtml}`;
+			}
+		});
 	}
 
 	private getDirtyNodeIdSet(): Set<string> {
@@ -233,6 +300,7 @@ export default class SlideFlowPlugin extends Plugin {
 			dirtyNodeIds: this.getDirtyNodeIdSet(),
 			descendantDirtyNodeIds: this.activeDiffContext?.descendantDirtyNodeIds,
 			commentCountByHeading: this.getCommentCountByHeadingForActiveNote(),
+			showVirtualDeleted: this.diffEnabled,
 		};
 	}
 
@@ -272,7 +340,6 @@ export default class SlideFlowPlugin extends Plugin {
 	private buildSlideRenderDecoration(node: SectionNode): SlideRenderDecoration {
 		let overrideMarkdown: string | undefined = undefined;
 		const slideDiff = this.activeDiffContext?.slideDiffs.get(node.id);
-		const firstHeadingId = this.flatNodes.length > 1 ? this.flatNodes[1].id : this.flatNodes[0]?.id;
 
 		if (this.diffEnabled && this.activeDiffContext) {
 			const parts: string[] = [];
@@ -281,11 +348,11 @@ export default class SlideFlowPlugin extends Plugin {
 			} else {
 				parts.push(node.rawOwnMarkdown);
 			}
-			if (node.childHeadingsHtml) {
-				parts.push(node.childHeadingsHtml);
-			}
-			if (node.id === firstHeadingId && this.activeDiffContext.deletedSectionsMarkdown) {
-				parts.push(this.activeDiffContext.deletedSectionsMarkdown);
+			if (node.children.length > 0) {
+				const childHtml = buildChildHeadingsHtml(node.children, true);
+				if (childHtml) {
+					parts.push(childHtml);
+				}
 			}
 			overrideMarkdown = parts.join("\n\n");
 		}
@@ -296,25 +363,17 @@ export default class SlideFlowPlugin extends Plugin {
 	private updateCockpitUI() {
 		if (!this.activeModal || !this.currentNode) return;
 		const slideDiff = this.activeDiffContext?.slideDiffs.get(this.currentNode.id);
-		const firstHeadingId = this.flatNodes.length > 1 ? this.flatNodes[1].id : this.flatNodes[0]?.id;
-		const hasDeletedHere = Boolean(
-			this.activeDiffContext &&
-				this.currentNode.id === firstHeadingId &&
-				this.activeDiffContext.deletedSectionsMarkdown
-		);
 		const currentSlideComments = this.reviewStore.getForSlide(
 			this.activeSourcePath,
 			this.currentNode.title
 		);
 		this.activeModal.updateCockpitBar({
 			hasNoteDiff: Boolean(
-				this.activeDiffContext &&
-					(this.activeDiffContext.totalDirtySlides > 0 ||
-						this.activeDiffContext.deletedSectionsMarkdown)
+				this.activeDiffContext && this.activeDiffContext.totalDirtySlides > 0
 			),
 			diffEnabled: this.diffEnabled,
 			dirtySlidesCount: this.activeDiffContext?.totalDirtySlides || 0,
-			currentSlideHasDiff: Boolean(slideDiff?.hasChanges || hasDeletedHere),
+			currentSlideHasDiff: Boolean(slideDiff?.hasChanges),
 			currentSlideCommentsCount: currentSlideComments.length,
 			totalPendingCommentsCount: this.reviewStore.getCount(),
 			directCliEnabled: this.settings.directCliEnabled,
@@ -407,11 +466,7 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!ctx || !node) return false;
 
 		const slideDiff = ctx.slideDiffs.get(node.id);
-		const firstHeadingId = this.flatNodes.length > 1 ? this.flatNodes[1].id : this.flatNodes[0]?.id;
-		const hasDeletedHere = Boolean(node.id === firstHeadingId && ctx.deletedSectionsHash);
-
-		if (!slideDiff) return false;
-		if (!slideDiff.hasChanges && !hasDeletedHere) return false;
+		if (!slideDiff || !slideDiff.hasChanges) return false;
 
 		await this.baselinesStore.markSlideSeen(
 			this.activeSourcePath,
@@ -419,7 +474,7 @@ export default class SlideFlowPlugin extends Plugin {
 			slideDiff.rawNewMarkdown,
 			ctx.dirtySlideKeys,
 			ctx.currentHashesByKey,
-			hasDeletedHere ? ctx.deletedSectionsHash : null
+			null
 		);
 
 		if (clearVisuallyNow) {
@@ -431,10 +486,28 @@ export default class SlideFlowPlugin extends Plugin {
 
 			ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => k !== slideDiff.slideKey);
 			ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
+			ctx.deletedSections = ctx.deletedSections.filter((d) => d.id !== node.id);
 
-			if (hasDeletedHere) {
-				ctx.deletedSectionsMarkdown = null;
-				ctx.deletedSectionsHash = null;
+			let jumpTargetAfterDelete: SectionNode | null = null;
+			if (node.isVirtualDeleted) {
+				const parent = node.parent;
+				if (parent) {
+					parent.children = parent.children.filter((c) => c.id !== node.id);
+					parent.childHeadingsHtml = buildChildHeadingsHtml(parent.children, false);
+					parent.contentMarkdown =
+						parent.children.length > 0
+							? `${parent.rawOwnMarkdown}\n${parent.childHeadingsHtml}`
+							: parent.rawOwnMarkdown;
+				}
+				this.flatNodes = this.flatNodes.filter((n) => n.id !== node.id);
+				this.flatNodes.forEach((n, idx) => {
+					n.flatIndex = idx;
+				});
+				jumpTargetAfterDelete =
+					parent ||
+					this.flatNodes.find((n) => !n.isVirtualDeleted && n.level > 0) ||
+					this.flatNodes[0] ||
+					null;
 			}
 
 			ctx.descendantDirtyNodeIds = new Set<string>();
@@ -449,19 +522,23 @@ export default class SlideFlowPlugin extends Plugin {
 				}
 			}
 
-			if (ctx.totalDirtySlides === 0 && !ctx.deletedSectionsMarkdown) {
+			if (ctx.totalDirtySlides === 0 && ctx.deletedSections.length === 0) {
 				this.activeDiffContext = null;
 				this.diffEnabled = false;
 			}
 
-			if (this.activeModal) {
+			if (jumpTargetAfterDelete) {
+				await this.goToNode(jumpTargetAfterDelete, "zoom-out", "start");
+			} else if (this.activeModal) {
 				await this.activeModal.refreshSlideInPlace(
 					node,
 					this.activeSourcePath,
 					this.buildSlideRenderDecoration(node)
 				);
+				this.refreshAllActiveUI();
+			} else {
+				this.refreshAllActiveUI();
 			}
-			this.refreshAllActiveUI();
 		}
 
 		return true;
@@ -600,8 +677,12 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 
 		this.commentModal = new CommentOverlayModal(overlayEl, this.voiceService, {
-			onSubmit: async (commentText: string, editingId?: string) => {
-				await this.saveSlideComment(commentText, editingId);
+			onSubmit: async (
+				commentText: string,
+				editingId?: string,
+				images?: CommentImageAttachment[]
+			) => {
+				await this.saveSlideComment(commentText, editingId, images);
 			},
 			onDeleteExisting: async (commentId: string) => {
 				await this.reviewStore.deleteComment(commentId);
@@ -804,15 +885,22 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private toggleDiffMode() {
-		if (
-			!this.activeDiffContext ||
-			(this.activeDiffContext.totalDirtySlides === 0 &&
-				!this.activeDiffContext.deletedSectionsMarkdown)
-		) {
+		if (!this.activeDiffContext || this.activeDiffContext.totalDirtySlides === 0) {
 			new Notice("No unread diff on this note.");
 			return;
 		}
 		this.diffEnabled = !this.diffEnabled;
+		if (!this.diffEnabled && this.currentNode?.isVirtualDeleted) {
+			const fallback =
+				this.currentNode.parent ||
+				this.flatNodes.find((n) => !n.isVirtualDeleted && n.level > 0) ||
+				this.flatNodes[0];
+			if (fallback) {
+				void this.goToNode(fallback, "zoom-out", "start");
+				new Notice("Diff view hidden");
+				return;
+			}
+		}
 		if (this.activeModal && this.currentNode) {
 			void this.activeModal.refreshSlideInPlace(
 				this.currentNode,
@@ -921,10 +1009,14 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 	}
 
-	private async saveSlideComment(commentText: string, editingId?: string) {
+	private async saveSlideComment(
+		commentText: string,
+		editingId?: string,
+		images?: CommentImageAttachment[]
+	) {
 		if (!this.currentNode) return;
 		if (editingId) {
-			await this.reviewStore.updateComment(editingId, commentText);
+			await this.reviewStore.updateComment(editingId, commentText, images);
 			new Notice("Comment updated.");
 		} else {
 			const currentFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
@@ -957,12 +1049,15 @@ export default class SlideFlowPlugin extends Plugin {
 				hadDiff,
 				oldExcerpt,
 				commentText,
+				images: images && images.length > 0 ? images : undefined,
 			});
 
 			void this.markCurrentSlideDiffRead(false);
 
-			const snippet = commentText.length > 52 ? commentText.slice(0, 52) + "…" : commentText;
-			new Notice(`Comment saved (${ctx?.scopeLabel || "Slide"}): "${snippet}"`);
+			const imgSuffix = images && images.length > 0 ? ` + ${images.length} img` : "";
+			const baseText = commentText || "(Image attached)";
+			const snippet = baseText.length > 52 ? baseText.slice(0, 52) + "…" : baseText;
+			new Notice(`Comment saved (${ctx?.scopeLabel || "Slide"}${imgSuffix}): "${snippet}"`);
 		}
 
 		this.pendingCommentContext = null;
@@ -1185,11 +1280,18 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 	}
 
+	private getNavigableNodes(): SectionNode[] {
+		return this.diffEnabled
+			? this.flatNodes
+			: this.flatNodes.filter((n) => !n.isVirtualDeleted);
+	}
+
 	private updateSlideCounter() {
 		if (!this.activeModal || !this.currentNode) return;
-		const total = this.flatNodes.length > 1 ? this.flatNodes.length - 1 : 1;
-		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
-		const current = this.flatNodes.length > 1 ? idx : 1;
+		const nav = this.getNavigableNodes();
+		const total = nav.length > 1 ? nav.length - 1 : 1;
+		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
+		const current = nav.length > 1 ? Math.max(1, idx) : 1;
 		this.activeModal.setCounter(current, total);
 	}
 
@@ -1466,23 +1568,25 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private nextSlide() {
 		if (!this.currentNode) return;
-		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
-		if (idx === -1 && this.flatNodes.length > 0) {
-			void this.goToNode(this.flatNodes[0], undefined, 'start');
+		const nav = this.getNavigableNodes();
+		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
+		if (idx === -1 && nav.length > 0) {
+			void this.goToNode(nav[0], undefined, 'start');
 			return;
 		}
-		if (idx >= 0 && idx < this.flatNodes.length - 1) {
-			void this.goToNode(this.flatNodes[idx + 1], undefined, 'start');
-		} else if (idx === this.flatNodes.length - 1) {
+		if (idx >= 0 && idx < nav.length - 1) {
+			void this.goToNode(nav[idx + 1], undefined, 'start');
+		} else if (idx === nav.length - 1) {
 			new Notice("End of presentation reached.");
 		}
 	}
 
 	private prevSlide(enterFrom: 'start' | 'end' = 'end') {
 		if (!this.currentNode) return;
-		const idx = this.flatNodes.findIndex(n => n.id === this.currentNode?.id);
+		const nav = this.getNavigableNodes();
+		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
 		if (idx > 0) {
-			void this.goToNode(this.flatNodes[idx - 1], undefined, enterFrom);
+			void this.goToNode(nav[idx - 1], undefined, enterFrom);
 		} else {
 			if (this.documentStack.length > 0) {
 				void this.popDocumentStack();

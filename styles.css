@@ -2610,3 +2610,154 @@ mark.slideflow-comment-mark.is-failed {
 	box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
 	pointer-events: none;
 }
+
+
+/* ==========================================================================
+   SlideFlow v2.7.0 — Child Heading Links, Deleted Subsection Titles & Comment Images
+   ========================================================================== */
+
+.dynamic-slides-child-heading a.slideflow-child-heading-internal-link {
+	color: inherit !important;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+.dynamic-slides-child-heading.is-deleted-child-heading {
+	color: var(--sf-diff-del-fg, #dc2626) !important;
+	opacity: 0.85;
+}
+
+.dynamic-slides-child-heading.is-deleted-child-heading del.dv-del {
+	background: var(--sf-diff-del-bg, rgba(220, 38, 38, 0.14));
+	color: var(--sf-diff-del-fg, #dc2626);
+	padding: 2px 6px;
+	border-radius: 4px;
+}
+
+.dynamic-slides-toc-item.is-deleted-section .dynamic-slides-toc-title {
+	text-decoration: line-through;
+	color: var(--sf-diff-del-fg, #dc2626);
+	opacity: 0.85;
+}
+
+/* Comment modal drag-and-drop + image attach button + thumbnail strip */
+.slideflow-comment-card.is-drag-over {
+	border-color: var(--interactive-accent) !important;
+	box-shadow: 0 0 0 2px rgba(var(--interactive-accent-rgb, 99, 102, 241), 0.3), 0 18px 46px rgba(0, 0, 0, 0.25) !important;
+}
+
+.slideflow-comment-img-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 30px;
+	height: 30px;
+	border-radius: 50%;
+	border: none !important;
+	background: transparent !important;
+	color: var(--text-muted) !important;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	cursor: pointer;
+	box-shadow: none !important;
+	transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.slideflow-comment-img-btn:hover {
+	color: var(--text-normal) !important;
+	background: var(--background-modifier-hover) !important;
+}
+
+.slideflow-comment-images-strip {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 2px;
+	padding: 6px 0 2px 0;
+}
+
+.slideflow-comment-image-thumb-wrap {
+	position: relative;
+	width: 58px;
+	height: 58px;
+	border-radius: 8px;
+	overflow: visible;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	flex-shrink: 0;
+}
+
+.slideflow-comment-image-thumb {
+	display: block !important;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	border-radius: 7px;
+}
+
+.slideflow-comment-image-remove-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	position: absolute;
+	top: -6px;
+	right: -6px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	border: 1px solid rgba(255, 255, 255, 0.35) !important;
+	background: #dc2626 !important;
+	color: #ffffff !important;
+	font-size: 0.72rem;
+	font-weight: 700;
+	line-height: 1;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28) !important;
+}
+
+.slideflow-comment-image-remove-btn:hover {
+	background: #b91c1c !important;
+	transform: scale(1.08);
+}
+
+/* Image pills & thumbnails in Right-Side Rail Popover & Review Drawer */
+.slideflow-rail-img-pill,
+.slideflow-drawer-item-img-badge {
+	font-size: 0.67rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(59, 130, 246, 0.14);
+	color: #2563eb;
+	border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.theme-dark .slideflow-rail-img-pill,
+.theme-dark .slideflow-drawer-item-img-badge {
+	background: rgba(96, 165, 250, 0.2);
+	color: #93c5fd;
+	border-color: rgba(96, 165, 250, 0.38);
+}
+
+.slideflow-rail-popover-images,
+.slideflow-drawer-item-images {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.slideflow-rail-popover-thumb,
+.slideflow-drawer-item-thumb {
+	display: block !important;
+	width: 48px;
+	height: 48px;
+	object-fit: cover;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
