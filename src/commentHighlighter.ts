@@ -219,7 +219,10 @@ function wrapTextSlice(
 		comment.commentText.length > 140
 			? comment.commentText.slice(0, 140) + "…"
 			: comment.commentText;
-	const tooltip = `Click to edit comment: ${preview}`;
+	const isFailed = Boolean(comment.failedAt || comment.failedReason);
+	const tooltip = isFailed
+		? `[FAILED: ${comment.failedReason || "retry"}] Click to edit: ${preview}`
+		: `Click to edit comment: ${preview}`;
 
 	// Wrap in reverse document order so splitText never invalidates earlier segments
 	for (let i = intersecting.length - 1; i >= 0; i--) {
@@ -242,7 +245,7 @@ function wrapTextSlice(
 		}
 
 		const mark = document.createElement("mark");
-		mark.className = "slideflow-comment-mark";
+		mark.className = isFailed ? "slideflow-comment-mark is-failed" : "slideflow-comment-mark";
 		mark.setAttribute("data-comment-id", comment.id);
 		mark.setAttribute("title", tooltip);
 

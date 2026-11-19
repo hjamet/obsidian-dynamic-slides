@@ -5,12 +5,10 @@
  * - ArrowUp / ArrowDown : move selection across comments
  * - Enter               : jump to slide AND open the selected comment for editing
  * - Delete              : open inline confirmation modal (Enter confirms, Esc cancels)
- * - Ctrl+Enter          : copy XML (clipboard mode) or launch CLI & auto-clear on exit 0 (direct CLI mode)
+ * - Ctrl+Enter          : copy XML (clipboard mode) or launch CLI & move batch to WIP (direct CLI mode)
  * - Esc / R             : close drawer
  *
- * Footer buttons:
- * - Clipboard mode : Copy /one-shot (XML) + Clear queue (manual clear with confirmation)
- * - Direct CLI mode: Send to <cli> (auto-clears on successful exit code 0)
+ * Failed CLI batches reappear here stamped with a red `failed` badge ready to be re-sent.
  */
 
 import { ConfirmOverlayModal } from "./confirmModal";
@@ -20,7 +18,8 @@ export interface ReviewDrawerOpenOptions {
 	comments: ReviewComment[];
 	directCliEnabled: boolean;
 	cliDisplayName: string;
-	inFlightIds?: Set<string>;
+	wipBatchCount?: number;
+	wipCommentCount?: number;
 }
 
 export interface ReviewDrawerCallbacks {
@@ -38,6 +37,7 @@ export class ReviewDrawer {
 
 	private backdropEl: HTMLElement | null = null;
 	private titleEl: HTMLElement | null = null;
+	private wipBadgeEl: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
 	private primaryBtnEl: HTMLButtonElement | null = null;
 	private clearBtnEl: HTMLButtonElement | null = null;
@@ -45,7 +45,8 @@ export class ReviewDrawer {
 	private isOpenFlag: boolean = false;
 	private directCliEnabled: boolean = false;
 	private cliDisplayName: string = "CLI";
-	private inFlightIds: Set<string> = new Set();
+	private wipBatchCount: number = 0;
+	private wipCommentCount: number = 0;
 	private comments: ReviewComment[] = [];
 	private flatRows: Array<{ comment: ReviewComment; el: HTMLElement }> = [];
 	private selectedIndex: number = -1;
@@ -69,7 +70,8 @@ export class ReviewDrawer {
 		this.comments = [...options.comments];
 		this.directCliEnabled = options.directCliEnabled;
 		this.cliDisplayName = options.cliDisplayName || "CLI";
-		this.inFlightIds = new Set(options.inFlightIds || []);
+		this.wipBatchCount = options.wipBatchCount || 0;
+		this.wipCommentCount = options.wipCommentCount || 0;
 		this.selectedIndex = this.comments.length > 0 ? 0 : -1;
 
 		this.backdropEl = this.parentEl.createDiv({ cls: "slideflow-drawer-backdrop" });
@@ -84,10 +86,12 @@ export class ReviewDrawer {
 		panelEl.addEventListener("click", (evt) => evt.stopPropagation());
 
 		const headerEl = panelEl.createDiv({ cls: "slideflow-drawer-header" });
-		this.titleEl = headerEl.createEl("h3", {
+		const titleWrap = headerEl.createDiv({ cls: "slideflow-drawer-title-wrap" });
+		this.titleEl = titleWrap.createEl("h3", {
 			cls: "slideflow-drawer-title",
 			text: `Review Queue (${this.comments.length})`,
 		});
+		this.wipBadgeEl = titleWrap.createSpan({ cls: "slideflow-drawer-wip-pill" });
 
 		const closeBtn = headerEl.createEl("button", {
 			cls: "slideflow-drawer-close-btn",
@@ -117,7 +121,6 @@ export class ReviewDrawer {
 			await this.callbacks.onPrimaryAction();
 		});
 
-		// In Clipboard mode, comments are manually cleared via "Clear queue"
 		if (!this.directCliEnabled) {
 			this.clearBtnEl = footerEl.createEl("button", {
 				cls: "slideflow-drawer-danger-btn",
@@ -136,7 +139,11 @@ export class ReviewDrawer {
 		window.addEventListener("keydown", this.boundKeyHandler, true);
 	}
 
-	public refresh(comments: ReviewComment[], inFlightIds?: Set<string>): void {
+	public refresh(
+		comments: ReviewComment[],
+		wipBatchCount?: number,
+		wipCommentCount?: number
+	): void {
 		if (!this.isOpenFlag) return;
 		const prevSelectedId =
 			this.selectedIndex >= 0 && this.selectedIndex < this.flatRows.length
@@ -144,9 +151,8 @@ export class ReviewDrawer {
 				: null;
 
 		this.comments = [...comments];
-		if (inFlightIds) {
-			this.inFlightIds = new Set(inFlightIds);
-		}
+		if (wipBatchCount !== undefined) this.wipBatchCount = wipBatchCount;
+		if (wipCommentCount !== undefined) this.wipCommentCount = wipCommentCount;
 
 		this.renderList();
 
@@ -167,14 +173,27 @@ export class ReviewDrawer {
 		if (this.titleEl) {
 			this.titleEl.setText(`Review Queue (${this.comments.length})`);
 		}
+		if (this.wipBadgeEl) {
+			if (this.wipBatchCount > 0) {
+				this.wipBadgeEl.style.display = "inline-flex";
+				this.wipBadgeEl.setText(
+					`${this.wipBatchCount} ${this.cliDisplayName} WIP (${this.wipCommentCount})`
+				);
+				this.wipBadgeEl.setAttribute(
+					"title",
+					`${this.wipCommentCount} comment(s) running in background. They will auto-purge on success or reappear as failed if the process fails.`
+				);
+			} else {
+				this.wipBadgeEl.style.display = "none";
+			}
+		}
 		if (this.primaryBtnEl) {
-			const unsentCount = this.comments.filter((c) => !this.inFlightIds.has(c.id)).length;
 			if (this.directCliEnabled) {
-				this.primaryBtnEl.innerHTML =
-					unsentCount === 0 && this.comments.length > 0
-						? `Sending to ${this.cliDisplayName}…`
-						: `Send to ${this.cliDisplayName} <strong>Ctrl+↵</strong>`;
-				this.primaryBtnEl.disabled = unsentCount === 0;
+				const hasFailed = this.comments.some((c) => Boolean(c.failedAt || c.failedReason));
+				this.primaryBtnEl.innerHTML = hasFailed
+					? `Send / Retry with ${this.cliDisplayName} <strong>Ctrl+↵</strong>`
+					: `Send to ${this.cliDisplayName} <strong>Ctrl+↵</strong>`;
+				this.primaryBtnEl.disabled = this.comments.length === 0;
 			} else {
 				this.primaryBtnEl.innerHTML = `Copy /one-shot (XML) <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
@@ -191,9 +210,13 @@ export class ReviewDrawer {
 		this.flatRows = [];
 
 		if (this.comments.length === 0) {
+			const msg =
+				this.wipBatchCount > 0
+					? `Queue is clear for your next project (${this.wipBatchCount} ${this.cliDisplayName} batch running in background).`
+					: "No comments yet. Press C (text) or V (voice), or highlight text on any slide.";
 			this.listEl.createDiv({
 				cls: "slideflow-drawer-empty",
-				text: "No comments yet. Press C (text) or V (voice), or highlight text on any slide.",
+				text: msg,
 			});
 			return;
 		}
@@ -214,7 +237,10 @@ export class ReviewDrawer {
 
 			for (const c of items) {
 				const rowIdx = this.flatRows.length;
-				const itemEl = groupEl.createDiv({ cls: "slideflow-drawer-item" });
+				const isFailed = Boolean(c.failedAt || c.failedReason);
+				const itemEl = groupEl.createDiv({
+					cls: `slideflow-drawer-item${isFailed ? " is-failed" : ""}`,
+				});
 				itemEl.addEventListener("click", (evt) => {
 					evt.stopPropagation();
 					this.selectedIndex = rowIdx;
@@ -242,10 +268,13 @@ export class ReviewDrawer {
 						text: "+old diff",
 					});
 				}
-				if (this.inFlightIds.has(c.id)) {
+				if (isFailed) {
 					metaEl.createSpan({
-						cls: "slideflow-drawer-item-copied-badge",
-						text: "sending…",
+						cls: "slideflow-drawer-item-failed-badge",
+						text: "failed",
+						attr: {
+							title: c.failedReason || "Previous CLI command failed — ready to retry",
+						},
 					});
 				} else if (c.copiedAt) {
 					metaEl.createSpan({
@@ -438,6 +467,7 @@ export class ReviewDrawer {
 			this.backdropEl = null;
 		}
 		this.titleEl = null;
+		this.wipBadgeEl = null;
 		this.listEl = null;
 		this.primaryBtnEl = null;
 		this.clearBtnEl = null;

@@ -83,8 +83,11 @@ export function pruneAndHealJobs(jobs: SlideFlowCliJob[], nowMs: number = Date.n
 		const copy: SlideFlowCliJob = { ...job };
 		if (copy.status === "running") {
 			if (copy.pid && !isPidAlive(copy.pid)) {
-				// Process already exited (e.g. while Obsidian was closed/reloaded)
-				copy.status = "done";
+				// Fail-Fast: PID vanished without receiving exit code 0 confirmation
+				copy.status = "error";
+				copy.exitCode = copy.exitCode ?? -1;
+				copy.errorSummary =
+					copy.errorSummary || `PID ${copy.pid} terminé sans code de succès confirmé`;
 				copy.finishedAt = copy.finishedAt || new Date(nowMs).toISOString();
 				changed = true;
 			}

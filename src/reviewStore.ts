@@ -1,13 +1,16 @@
 /**
- * ReviewStore — Persistent review comment store for SlideFlow (`.obsidian/plugins/slideflow/pending_reviews.json`).
+ * ReviewStore — Persistent transactional review comment store for SlideFlow
+ * (`.obsidian/plugins/slideflow/pending_reviews.json`).
  *
- * - Always persisted across sessions in BOTH Clipboard mode and Direct CLI (`agy`) mode so no comment
- *   is ever lost on exit.
- * - Clipboard mode: comments are cleared manually via "Clear queue" in the Review Queue (`R`).
- * - Direct CLI (`agy`) mode: sent comments are automatically cleared ONLY after the CLI command
- *   finishes with exit code 0.
- * - Clean XML export (`/one-shot` + `<slideflow_review>`) so Markdown code blocks, headings,
- *   and blockquotes inside notes never collide with the comment structure.
+ * - Always persisted across sessions in BOTH Clipboard mode and Direct CLI (`agy`) mode.
+ * - Direct CLI (`agy`) WIP isolation:
+ *   When comments are sent to `agy`, they are IMMEDIATELY moved out of the visible `comments` queue
+ *   into `wipBatches` bound to `{ jobId, pid }`, leaving the visible queue clean for the next project!
+ *   - On `exitCode === 0`: ONLY that `jobId`'s WIP batch is purged permanently.
+ *   - On error OR if the OS PID disappears without a positive exit confirmation: ONLY that `jobId`'s
+ *     comments are restored back into the visible queue stamped with `failedReason` / `failedAt`,
+ *     ready to be re-sent!
+ * - Serialized write chain prevents any race between concurrent `agy` completions and user edits.
  */
 
 import { App } from "obsidian";
@@ -36,11 +39,23 @@ export interface ReviewComment {
 	createdAt: string;
 	updatedAt?: string;
 	copiedAt?: string;
+	failedReason?: string | null;
+	failedAt?: string | null;
+}
+
+export interface WipCommentBatch {
+	jobId: string;
+	pid: number | null;
+	cli: string;
+	model: string;
+	startedAt: string;
+	comments: ReviewComment[];
 }
 
 interface PendingReviewsFile {
 	version: number;
 	comments: ReviewComment[];
+	wipBatches?: WipCommentBatch[];
 }
 
 function escapeXmlAttr(value: string): string {
@@ -69,6 +84,8 @@ export class ReviewStore {
 	private app: App;
 	private pluginDir: string;
 	private comments: ReviewComment[] = [];
+	private wipBatches: WipCommentBatch[] = [];
+	private writeChain: Promise<void> = Promise.resolve();
 
 	constructor(app: App, pluginDir: string) {
 		this.app = app;
@@ -79,28 +96,39 @@ export class ReviewStore {
 		return `${this.pluginDir}/pending_reviews.json`;
 	}
 
-	public async loadFromDisk(): Promise<ReviewComment[]> {
-		const adapter = this.app.vault.adapter;
-		if (!(await adapter.exists(this.pendingFilePath))) {
-			this.comments = [];
-			return this.comments;
-		}
-		const raw = await adapter.read(this.pendingFilePath);
-		const parsed = JSON.parse(raw) as PendingReviewsFile;
-		this.comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
-		return this.comments;
+	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+		const next = this.writeChain.then(fn, fn);
+		this.writeChain = next.then(() => undefined, () => undefined);
+		return next;
 	}
 
-	private async saveToDisk(): Promise<void> {
+	private async saveToDiskUnlocked(): Promise<void> {
 		const adapter = this.app.vault.adapter;
 		if (!(await adapter.exists(this.pluginDir))) {
 			await adapter.mkdir(this.pluginDir);
 		}
 		const payload: PendingReviewsFile = {
-			version: 1,
+			version: 2,
 			comments: this.comments,
+			wipBatches: this.wipBatches,
 		};
 		await adapter.write(this.pendingFilePath, JSON.stringify(payload, null, 2));
+	}
+
+	public loadFromDisk(): Promise<ReviewComment[]> {
+		return this.enqueue(async () => {
+			const adapter = this.app.vault.adapter;
+			if (!(await adapter.exists(this.pendingFilePath))) {
+				this.comments = [];
+				this.wipBatches = [];
+				return this.comments;
+			}
+			const raw = await adapter.read(this.pendingFilePath);
+			const parsed = JSON.parse(raw) as PendingReviewsFile;
+			this.comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+			this.wipBatches = Array.isArray(parsed?.wipBatches) ? parsed.wipBatches : [];
+			return [...this.comments];
+		});
 	}
 
 	public getAll(): ReviewComment[] {
@@ -109,6 +137,14 @@ export class ReviewStore {
 
 	public getCount(): number {
 		return this.comments.length;
+	}
+
+	public getWipBatches(): WipCommentBatch[] {
+		return this.wipBatches.map((b) => ({ ...b, comments: [...b.comments] }));
+	}
+
+	public getWipCommentCount(): number {
+		return this.wipBatches.reduce((sum, b) => sum + b.comments.length, 0);
 	}
 
 	public getForSlide(notePath: string, sectionHeading: string): ReviewComment[] {
@@ -125,68 +161,163 @@ export class ReviewStore {
 		return this.comments.some((c) => !c.copiedAt);
 	}
 
-	public hasUnsentComments(inFlightIds?: Set<string>): boolean {
-		return this.comments.some((c) => !inFlightIds?.has(c.id));
+	public hasUnsentComments(): boolean {
+		return this.comments.length > 0;
 	}
 
-	public async addComment(
+	public addComment(
 		input: Omit<ReviewComment, "id" | "createdAt">
 	): Promise<ReviewComment> {
-		const id = `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		const item: ReviewComment = {
-			...input,
-			id,
-			createdAt: new Date().toISOString(),
-		};
-		this.comments.push(item);
-		await this.saveToDisk();
-		return item;
+		return this.enqueue(async () => {
+			const id = `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+			const item: ReviewComment = {
+				...input,
+				id,
+				createdAt: new Date().toISOString(),
+			};
+			this.comments.push(item);
+			await this.saveToDiskUnlocked();
+			return item;
+		});
 	}
 
-	public async updateComment(id: string, newText: string): Promise<ReviewComment | null> {
-		const target = this.comments.find((c) => c.id === id);
-		if (!target) return null;
-		target.commentText = newText.trim();
-		target.updatedAt = new Date().toISOString();
-		target.copiedAt = undefined;
-		await this.saveToDisk();
-		return target;
+	public updateComment(id: string, newText: string): Promise<ReviewComment | null> {
+		return this.enqueue(async () => {
+			const target = this.comments.find((c) => c.id === id);
+			if (!target) return null;
+			target.commentText = newText.trim();
+			target.updatedAt = new Date().toISOString();
+			target.copiedAt = undefined;
+			await this.saveToDiskUnlocked();
+			return target;
+		});
 	}
 
-	public async deleteComment(id: string): Promise<boolean> {
-		const before = this.comments.length;
-		this.comments = this.comments.filter((c) => c.id !== id);
-		if (this.comments.length !== before) {
-			await this.saveToDisk();
-			return true;
-		}
-		return false;
+	public deleteComment(id: string): Promise<boolean> {
+		return this.enqueue(async () => {
+			const before = this.comments.length;
+			this.comments = this.comments.filter((c) => c.id !== id);
+			if (this.comments.length !== before) {
+				await this.saveToDiskUnlocked();
+				return true;
+			}
+			return false;
+		});
 	}
 
-	public async removeCommentsByIds(ids: string[]): Promise<number> {
-		const idSet = new Set(ids);
-		const before = this.comments.length;
-		this.comments = this.comments.filter((c) => !idSet.has(c.id));
-		const removed = before - this.comments.length;
-		if (removed > 0) {
-			await this.saveToDisk();
-		}
-		return removed;
+	public markAllCopied(): Promise<void> {
+		return this.enqueue(async () => {
+			const now = new Date().toISOString();
+			for (const c of this.comments) {
+				c.copiedAt = now;
+			}
+			await this.saveToDiskUnlocked();
+		});
 	}
 
-	public async markAllCopied(): Promise<void> {
-		const now = new Date().toISOString();
-		for (const c of this.comments) {
-			c.copiedAt = now;
-		}
-		await this.saveToDisk();
+	public clearAll(): Promise<number> {
+		return this.enqueue(async () => {
+			const count = this.comments.length;
+			this.comments = [];
+			await this.saveToDiskUnlocked();
+			return count;
+		});
 	}
 
-	public async clearAll(): Promise<number> {
-		const count = this.comments.length;
-		this.comments = [];
-		await this.saveToDisk();
-		return count;
+	/**
+	 * Atomically moves the specified comments out of the active visible queue into an isolated
+	 * WIP batch tied to `jobId` (and later `pid`), immediately clearing the visible queue so
+	 * the user can start reviewing another project in parallel!
+	 */
+	public moveCommentsToWip(
+		commentIds: string[],
+		meta: { jobId: string; cli: string; model: string; startedAt: string }
+	): Promise<ReviewComment[]> {
+		return this.enqueue(async () => {
+			const idSet = new Set(commentIds);
+			const moved: ReviewComment[] = [];
+			const remaining: ReviewComment[] = [];
+
+			for (const c of this.comments) {
+				if (idSet.has(c.id)) {
+					// Clear any stale failed state when re-submitting
+					const clean: ReviewComment = { ...c };
+					delete clean.failedReason;
+					delete clean.failedAt;
+					moved.push(clean);
+				} else {
+					remaining.push(c);
+				}
+			}
+
+			if (moved.length === 0) return [];
+
+			this.comments = remaining;
+			this.wipBatches.push({
+				jobId: meta.jobId,
+				pid: null,
+				cli: meta.cli,
+				model: meta.model,
+				startedAt: meta.startedAt,
+				comments: moved,
+			});
+			await this.saveToDiskUnlocked();
+			return moved;
+		});
+	}
+
+	public setWipBatchPid(jobId: string, pid: number | null): Promise<void> {
+		return this.enqueue(async () => {
+			const batch = this.wipBatches.find((b) => b.jobId === jobId);
+			if (!batch || !pid) return;
+			batch.pid = pid;
+			await this.saveToDiskUnlocked();
+		});
+	}
+
+	/**
+	 * Permanently purges ONLY the WIP batch belonging to `jobId` after exit code === 0.
+	 */
+	public purgeWipBatch(jobId: string): Promise<number> {
+		return this.enqueue(async () => {
+			const idx = this.wipBatches.findIndex((b) => b.jobId === jobId);
+			if (idx === -1) return 0;
+			const count = this.wipBatches[idx].comments.length;
+			this.wipBatches.splice(idx, 1);
+			await this.saveToDiskUnlocked();
+			return count;
+		});
+	}
+
+	/**
+	 * Restores ONLY `jobId`'s WIP comments back into the visible queue stamped with `failedReason` /
+	 * `failedAt`, ready to be inspected and re-sent!
+	 */
+	public restoreWipBatchAsFailed(jobId: string, reason: string): Promise<number> {
+		return this.enqueue(async () => {
+			const idx = this.wipBatches.findIndex((b) => b.jobId === jobId);
+			if (idx === -1) return 0;
+			const batch = this.wipBatches[idx];
+			this.wipBatches.splice(idx, 1);
+
+			const nowIso = new Date().toISOString();
+			const existingIds = new Set(this.comments.map((c) => c.id));
+			const restored: ReviewComment[] = [];
+
+			for (const c of batch.comments) {
+				if (existingIds.has(c.id)) continue;
+				restored.push({
+					...c,
+					failedReason: reason || "Command failed",
+					failedAt: nowIso,
+				});
+			}
+
+			// Put restored failed comments at the top so they are immediately visible in Review Queue
+			this.comments = [...restored, ...this.comments];
+			await this.saveToDiskUnlocked();
+			return restored.length;
+		});
 	}
 
 	public getVaultBasePath(): string {

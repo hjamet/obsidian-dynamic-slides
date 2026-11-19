@@ -33,6 +33,7 @@ import {
 import {
 	ActiveJobsTracker,
 	extractModelLabelFromCommand,
+	isPidAlive,
 } from "./activeJobsTracker";
 
 export interface SlideFlowSettings {
@@ -110,7 +111,7 @@ export default class SlideFlowPlugin extends Plugin {
 	private activeDiffContext: NoteDiffContext | null = null;
 	private diffEnabled: boolean = false;
 	private pendingCommentContext: ExtractedCommentContext | null = null;
-	private inFlightCliCommentIds: Set<string> = new Set();
+	private liveOwnedJobIds: Set<string> = new Set();
 
 	async onload() {
 		console.log("Loading SlideFlow plugin");
@@ -122,12 +123,18 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeJobsTracker = new ActiveJobsTracker(this.app, pluginDir);
 
 		this.app.workspace.onLayoutReady(() => {
-			void this.activeJobsTracker.refreshAndSync();
+			void this.reviewStore
+				.loadFromDisk()
+				.then(() => this.reconcileOrphanWipBatches())
+				.then(() => this.activeJobsTracker.refreshAndSync())
+				.catch((err) => console.error("[SlideFlow] Startup reconcile failed:", err));
 		});
 		this.registerInterval(
 			window.setInterval(() => {
-				void this.activeJobsTracker.refreshAndSync();
-			}, 30000)
+				void this.reconcileOrphanWipBatches()
+					.then(() => this.activeJobsTracker.refreshAndSync())
+					.catch(() => undefined);
+			}, 20000)
 		);
 
 		this.voiceService = new VoiceDictationService(this.app, pluginDir, () => ({
@@ -328,8 +335,62 @@ export default class SlideFlowPlugin extends Plugin {
 			this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 		}
 		if (this.reviewDrawer?.isOpen()) {
-			this.reviewDrawer.refresh(this.reviewStore.getAll(), this.inFlightCliCommentIds);
+			const wipBatches = this.reviewStore.getWipBatches();
+			this.reviewDrawer.refresh(
+				this.reviewStore.getAll(),
+				wipBatches.length,
+				this.reviewStore.getWipCommentCount()
+			);
 		}
+	}
+
+	/**
+	 * Checks persisted WIP batches against live OS PIDs.
+	 * If a WIP batch's PID no longer exists without a confirmed exit code 0 purge
+	 * (e.g. process crashed/killed or Obsidian reloaded before exit), restores ONLY
+	 * that batch's comments into the visible queue with a `failed` badge!
+	 */
+	private async reconcileOrphanWipBatches(): Promise<number> {
+		const batches = this.reviewStore.getWipBatches();
+		if (batches.length === 0) return 0;
+
+		let totalRestored = 0;
+		const nowMs = Date.now();
+
+		for (const batch of batches) {
+			// If spawned by this live Obsidian session, let child.on("close") handle its exit code
+			if (this.liveOwnedJobIds.has(batch.jobId)) {
+				continue;
+			}
+
+			// If the process is still alive in the OS (e.g. survived an Obsidian reload), keep it in WIP
+			if (batch.pid && isPidAlive(batch.pid)) {
+				continue;
+			}
+
+			// Grace window for brand-new batch waiting on spawn PID
+			const ageMs = nowMs - new Date(batch.startedAt).getTime();
+			if (!batch.pid && ageMs < 15000) {
+				continue;
+			}
+
+			const reason = batch.pid
+				? `PID ${batch.pid} ended without confirmed success (exit 0 not received)`
+				: `${batch.cli} did not report a running PID`;
+			const restoredCount = await this.reviewStore.restoreWipBatchAsFailed(batch.jobId, reason);
+			await this.activeJobsTracker.completeJob(batch.jobId, -1, reason);
+			totalRestored += restoredCount;
+		}
+
+		if (totalRestored > 0) {
+			this.refreshAllActiveUI();
+			new Notice(
+				`SlideFlow: ${totalRestored} WIP comment(s) restored as failed (process exited without confirmation). Ready to retry.`,
+				9000
+			);
+		}
+
+		return totalRestored;
 	}
 
 	private async markCurrentSlideDiffRead(clearVisuallyNow: boolean): Promise<boolean> {
@@ -422,9 +483,12 @@ export default class SlideFlowPlugin extends Plugin {
 				console.error("[SlideFlow] Failed reading unread_baselines.json:", err);
 				new Notice(`SlideFlow: failed reading baselines (${err.message})`);
 			}),
-			this.reviewStore.loadFromDisk().catch((err) => {
-				console.error("[SlideFlow] Failed reading pending_reviews.json:", err);
-			}),
+			this.reviewStore
+				.loadFromDisk()
+				.then(() => this.reconcileOrphanWipBatches())
+				.catch((err) => {
+					console.error("[SlideFlow] Failed reading pending_reviews.json:", err);
+				}),
 		]);
 
 		void this.voiceService.prewarmServer();
@@ -537,13 +601,18 @@ export default class SlideFlowPlugin extends Plugin {
 			},
 			onPrimaryAction: async () => {
 				if (this.settings.directCliEnabled) {
-					const launched = this.sendPendingCommentsToCli();
+					const launched = await this.sendPendingCommentsToCli();
 					if (launched) {
 						this.reviewDrawer?.close(false);
 					}
 				} else {
 					await this.copyPendingCommentsExport(true);
-					this.reviewDrawer?.refresh(this.reviewStore.getAll(), this.inFlightCliCommentIds);
+					const wipBatches = this.reviewStore.getWipBatches();
+					this.reviewDrawer?.refresh(
+						this.reviewStore.getAll(),
+						wipBatches.length,
+						this.reviewStore.getWipCommentCount()
+					);
 				}
 			},
 			onClose: () => {
@@ -619,25 +688,23 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 
 		if (this.settings.directCliEnabled) {
-			if (!this.reviewStore.hasUnsentComments(this.inFlightCliCommentIds)) {
+			if (!this.reviewStore.hasUnsentComments()) {
 				this.closePresentation();
 				return;
 			}
-			const unsentCount = this.reviewStore
-				.getAll()
-				.filter((c) => !this.inFlightCliCommentIds.has(c.id)).length;
+			const unsentCount = this.reviewStore.getCount();
 			const cliName = getCliDisplayName(this.settings.directCliCommand);
 
 			this.exitConfirmModal.open({
 				title: `Unsent comments (${unsentCount})`,
-				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments stay saved and clear automatically once ${cliName} succeeds.`,
+				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments move to background WIP and purge automatically on success (or reappear as failed on error).`,
 				confirmLabelHtml: `Send & Exit <strong>Ctrl+↵</strong>`,
 				confirmVariant: "primary",
 				confirmShortcut: "Ctrl+Enter",
 				cancelLabelHtml: `Return <strong>Esc</strong>`,
 				discardLabel: "Exit & Keep",
-				onConfirm: () => {
-					const launched = this.sendPendingCommentsToCli();
+				onConfirm: async () => {
+					const launched = await this.sendPendingCommentsToCli();
 					if (launched) {
 						this.closePresentation();
 					}
@@ -646,7 +713,6 @@ export default class SlideFlowPlugin extends Plugin {
 					// Stay in presentation
 				},
 				onDiscard: () => {
-					// Exit cleanly without deleting persisted comments
 					this.closePresentation();
 				},
 			});
@@ -880,11 +946,16 @@ export default class SlideFlowPlugin extends Plugin {
 		if (this.reviewDrawer.isOpen()) {
 			this.reviewDrawer.close(true);
 		} else {
-			this.reviewDrawer.open({
-				comments: this.reviewStore.getAll(),
-				directCliEnabled: this.settings.directCliEnabled,
-				cliDisplayName: getCliDisplayName(this.settings.directCliCommand),
-				inFlightIds: this.inFlightCliCommentIds,
+			void this.reconcileOrphanWipBatches().then(() => {
+				if (!this.reviewDrawer) return;
+				const wipBatches = this.reviewStore.getWipBatches();
+				this.reviewDrawer.open({
+					comments: this.reviewStore.getAll(),
+					directCliEnabled: this.settings.directCliEnabled,
+					cliDisplayName: getCliDisplayName(this.settings.directCliCommand),
+					wipBatchCount: wipBatches.length,
+					wipCommentCount: this.reviewStore.getWipCommentCount(),
+				});
 			});
 		}
 	}
@@ -907,17 +978,17 @@ export default class SlideFlowPlugin extends Plugin {
 		new Notice(`Copied ${count} comment(s) (XML /one-shot).`);
 	}
 
-	private sendPendingCommentsToCli(): boolean {
-		const toSend = this.reviewStore
-			.getAll()
-			.filter((c) => !this.inFlightCliCommentIds.has(c.id));
-
+	/**
+	 * Moves all visible comments immediately into an isolated WIP batch tied to `{ jobId, pid }`
+	 * so the visible queue becomes empty immediately for the next project!
+	 * - On `exitCode === 0`: purges ONLY this `jobId`'s WIP batch permanently.
+	 * - On non-zero exit / spawn error / dead orphan PID: restores ONLY this `jobId`'s comments
+	 *   back into the visible queue with a red `failed` badge ready to be re-sent!
+	 */
+	private async sendPendingCommentsToCli(): Promise<boolean> {
+		const toSend = this.reviewStore.getAll();
 		if (toSend.length === 0) {
-			if (this.inFlightCliCommentIds.size > 0) {
-				new Notice("CLI invocation is already running for these comments…");
-			} else {
-				new Notice("No pending comments to send.");
-			}
+			new Notice("No pending comments to send.");
 			return false;
 		}
 
@@ -934,15 +1005,25 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 
 		const sentIds = toSend.map((c) => c.id);
-		for (const id of sentIds) {
-			this.inFlightCliCommentIds.add(id);
-		}
-		this.refreshAllActiveUI();
-
 		const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+		const startedAt = new Date().toISOString();
 		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
 		const noteTitles = Array.from(new Set(toSend.map((c) => c.noteTitle || c.notePath)));
 		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
+
+		// Immediately move this batch into WIP so the visible queue is clean for the next project!
+		const moved = await this.reviewStore.moveCommentsToWip(sentIds, {
+			jobId,
+			cli: cliDisplayName,
+			model: modelLabel,
+			startedAt,
+		});
+		if (moved.length === 0) {
+			return false;
+		}
+
+		this.liveOwnedJobIds.add(jobId);
+		this.refreshAllActiveUI();
 
 		void this.activeJobsTracker.registerJob({
 			id: jobId,
@@ -950,13 +1031,16 @@ export default class SlideFlowPlugin extends Plugin {
 			cli: cliDisplayName,
 			model: modelLabel,
 			status: "running",
-			startedAt: new Date().toISOString(),
-			commentCount: sentIds.length,
+			startedAt,
+			commentCount: moved.length,
 			notes: noteTitles,
 			logPath: path.join(jobsDir, `${jobId}.log`),
 		});
 
-		new Notice(`Sending ${sentIds.length} comment(s) to ${cliDisplayName}…`, 5000);
+		new Notice(
+			`Sent ${moved.length} comment(s) to ${cliDisplayName} (WIP) — queue is now clear for your next project.`,
+			5000
+		);
 
 		const cwd = this.reviewStore.getVaultBasePath();
 		void runCliCommand(this.settings.directCliCommand, formatted, {
@@ -964,44 +1048,44 @@ export default class SlideFlowPlugin extends Plugin {
 			jobsDir,
 			jobId,
 			onSpawn: (pid) => {
+				void this.reviewStore.setWipBatchPid(jobId, pid);
 				void this.activeJobsTracker.updateJobPid(jobId, pid);
 			},
 		})
 			.then(async (res) => {
-				for (const id of sentIds) {
-					this.inFlightCliCommentIds.delete(id);
-				}
+				this.liveOwnedJobIds.delete(jobId);
 
 				if (res.exitCode === 0) {
-					await this.reviewStore.removeCommentsByIds(sentIds);
+					const purged = await this.reviewStore.purgeWipBatch(jobId);
 					await this.activeJobsTracker.completeJob(jobId, 0, null);
 					this.refreshAllActiveUI();
 					new Notice(
-						`${res.displayName} finished — ${sentIds.length} comment(s) sent & cleared.`,
+						`${res.displayName} finished — ${purged} comment(s) completed & purged.`,
 						6000
 					);
 				} else {
 					const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
 					const detail = rawErr ? rawErr.slice(0, 140) : "";
+					const reason = `exit ${res.exitCode}${detail ? `: ${detail}` : ""}`;
+					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, reason);
 					await this.activeJobsTracker.completeJob(jobId, res.exitCode, detail || null);
 					this.refreshAllActiveUI();
 					console.error("[SlideFlow CLI] Non-zero exit:", res);
 					new Notice(
-						`SlideFlow: ${res.displayName} failed (exit ${res.exitCode}). Comments kept in queue.${detail ? " " + detail : ""}`,
+						`SlideFlow: ${res.displayName} failed (${reason}). ${restored} comment(s) restored as failed in queue.`,
 						10000
 					);
 				}
 			})
 			.catch(async (err: any) => {
-				for (const id of sentIds) {
-					this.inFlightCliCommentIds.delete(id);
-				}
+				this.liveOwnedJobIds.delete(jobId);
 				const errMsg = err?.message || String(err);
+				const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
 				await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
 				this.refreshAllActiveUI();
 				console.error("[SlideFlow CLI] Execution failed:", err);
 				new Notice(
-					`SlideFlow CLI error: ${errMsg}. Comments kept in queue.`,
+					`SlideFlow CLI error: ${errMsg}. ${restored} comment(s) restored as failed in queue.`,
 					10000
 				);
 			});
