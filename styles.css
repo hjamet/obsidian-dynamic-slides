@@ -1044,3 +1044,700 @@ body.is-dynamic-slides-active {
 .dynamic-slides-return-btn.is-visible {
 	display: flex;
 }
+
+
+/* ==========================================================================
+   SlideFlow v2 — Cockpit Bar, Surgical Diffs, Comment Modal & Review Drawer
+   ========================================================================== */
+
+.dynamic-slides-overlay {
+	--sf-diff-ins-bg: #dcfce7;
+	--sf-diff-ins-fg: #166534;
+	--sf-diff-ins-border: rgba(22, 163, 74, 0.35);
+	--sf-diff-del-bg: #fee2e2;
+	--sf-diff-del-fg: #991b1b;
+	--sf-diff-del-border: rgba(220, 38, 38, 0.35);
+}
+
+.theme-dark .dynamic-slides-overlay {
+	--sf-diff-ins-bg: rgba(34, 197, 94, 0.2);
+	--sf-diff-ins-fg: #86efac;
+	--sf-diff-ins-border: rgba(34, 197, 94, 0.4);
+	--sf-diff-del-bg: rgba(239, 68, 68, 0.2);
+	--sf-diff-del-fg: #fca5a5;
+	--sf-diff-del-border: rgba(239, 68, 68, 0.4);
+}
+
+/* Surgical Inline & Block Diffs */
+.dynamic-slides-content ins.dv-ins {
+	background-color: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+	text-decoration: none;
+	padding: 1px 4px;
+	border-radius: 4px;
+	overflow-wrap: anywhere;
+}
+
+.dynamic-slides-content del.dv-del {
+	background-color: var(--sf-diff-del-bg);
+	color: var(--sf-diff-del-fg);
+	text-decoration: line-through;
+	padding: 1px 4px;
+	border-radius: 4px;
+	overflow-wrap: anywhere;
+}
+
+.dynamic-slides-content .dv-block-ins,
+.dynamic-slides-content pre.dv-pre-ins {
+	background-color: var(--sf-diff-ins-bg) !important;
+	color: var(--sf-diff-ins-fg) !important;
+	border-left: 4px solid var(--sf-diff-ins-border);
+	border-radius: 6px;
+	padding: 8px 14px;
+	margin: 8px 0;
+}
+
+.dynamic-slides-content .dv-block-del,
+.dynamic-slides-content pre.dv-pre-del {
+	background-color: var(--sf-diff-del-bg) !important;
+	color: var(--sf-diff-del-fg) !important;
+	border-left: 4px solid var(--sf-diff-del-border);
+	border-radius: 6px;
+	padding: 8px 14px;
+	margin: 8px 0;
+	opacity: 0.9;
+}
+
+.dynamic-slides-content .dv-block-del p,
+.dynamic-slides-content .dv-block-del li {
+	text-decoration: line-through;
+}
+
+.slideflow-deleted-sections {
+	margin-top: 1.5rem;
+	padding: 12px 16px;
+	border-radius: 10px;
+	border: 1px dashed var(--sf-diff-del-border);
+	background: var(--sf-diff-del-bg);
+}
+
+.slideflow-deleted-sections-title {
+	font-size: 0.85rem;
+	font-weight: 700;
+	color: var(--sf-diff-del-fg);
+	margin-bottom: 8px;
+}
+
+/* Top-Center SlideFlow Cockpit Bar */
+.slideflow-cockpit-bar {
+	position: fixed;
+	top: 16px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 10015;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 8px;
+	border-radius: 999px;
+	background: var(--background-secondary-alt, var(--background-secondary));
+	border: 1px solid var(--background-modifier-border);
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+	opacity: 0.72;
+	transition: opacity 0.22s ease, transform 0.2s ease, box-shadow 0.2s ease;
+	user-select: none;
+}
+
+.slideflow-cockpit-bar:hover {
+	opacity: 1;
+	box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
+}
+
+.slideflow-pill-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	border: 1px solid transparent;
+	border-radius: 999px;
+	padding: 5px 12px;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--text-normal);
+	background: transparent;
+	cursor: pointer;
+	transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+	white-space: nowrap;
+}
+
+.slideflow-pill-btn:hover {
+	background-color: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border);
+}
+
+.slideflow-pill-btn:active {
+	transform: scale(0.97);
+}
+
+.slideflow-diff-btn.is-active {
+	background-color: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+	border-color: var(--sf-diff-ins-border);
+}
+
+.slideflow-comment-btn.has-comments {
+	background-color: rgba(124, 58, 237, 0.15);
+	color: var(--text-accent);
+	border-color: rgba(124, 58, 237, 0.35);
+}
+
+.slideflow-queue-btn {
+	background-color: #16a34a;
+	color: #ffffff !important;
+	border-color: #15803d;
+}
+
+.slideflow-queue-btn:hover {
+	background-color: #15803d;
+	border-color: #166534;
+}
+
+/* Modified Link Pill & Child Heading Diff Badges */
+.slideflow-modified-pill {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 6px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	font-size: 0.68em;
+	font-weight: 700;
+	vertical-align: middle;
+	background-color: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+	border: 1px solid var(--sf-diff-ins-border);
+	text-decoration: none !important;
+	white-space: nowrap;
+}
+
+.slideflow-child-diff-badge {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 8px;
+	padding: 1px 8px;
+	border-radius: 999px;
+	font-size: 0.72rem;
+	font-weight: 700;
+	background-color: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+	border: 1px solid var(--sf-diff-ins-border);
+	vertical-align: middle;
+}
+
+.slideflow-child-diff-badge.is-sub {
+	padding: 0 4px;
+	background: transparent;
+	border: none;
+}
+
+/* TOC Diff Dot & Comment Counter */
+.slideflow-toc-diff-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background-color: #22c55e;
+	flex-shrink: 0;
+	box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+
+.slideflow-toc-diff-dot.is-descendant {
+	background-color: transparent;
+	border: 2px solid #22c55e;
+	box-shadow: none;
+}
+
+.slideflow-toc-comment-badge {
+	font-size: 0.72rem;
+	font-weight: 700;
+	padding: 1px 5px;
+	border-radius: 999px;
+	background: rgba(124, 58, 237, 0.2);
+	color: inherit;
+	flex-shrink: 0;
+}
+
+/* ==========================================================================
+   SlideFlow Comment Modal (Text C / Voice V / Ctrl+M)
+   ========================================================================== */
+
+.slideflow-comment-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100200;
+	background: rgba(0, 0, 0, 0.42);
+	backdrop-filter: blur(4px);
+	-webkit-backdrop-filter: blur(4px);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	animation: slideFadeIn 0.16s ease forwards;
+}
+
+.slideflow-comment-card {
+	width: 100%;
+	max-width: 640px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 18px;
+	padding: 16px 18px 14px 18px;
+	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	box-sizing: border-box;
+}
+
+.slideflow-comment-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.slideflow-comment-context {
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
+}
+
+.slideflow-comment-diff-pill {
+	font-size: 0.73rem;
+	font-weight: 700;
+	padding: 2px 9px;
+	border-radius: 999px;
+	background: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+	border: 1px solid var(--sf-diff-ins-border);
+	white-space: nowrap;
+}
+
+.slideflow-comment-existing-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-height: 140px;
+	overflow-y: auto;
+	padding-right: 2px;
+}
+
+.slideflow-existing-comment-row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 10px;
+	border-radius: 10px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	font-size: 0.84rem;
+}
+
+.slideflow-existing-comment-text {
+	flex: 1;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--text-normal);
+}
+
+.slideflow-existing-comment-btns {
+	display: flex;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.slideflow-mini-icon-btn {
+	background: transparent;
+	border: none;
+	border-radius: 6px;
+	padding: 2px 5px;
+	cursor: pointer;
+	font-size: 0.85rem;
+	opacity: 0.75;
+	transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.slideflow-mini-icon-btn:hover {
+	opacity: 1;
+	background-color: var(--background-modifier-hover);
+}
+
+.slideflow-comment-textarea {
+	width: 100%;
+	min-height: 96px;
+	resize: vertical;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	padding: 12px 14px;
+	font-family: var(--font-text);
+	font-size: 1rem;
+	line-height: 1.5;
+	box-sizing: border-box;
+	outline: none;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.slideflow-comment-textarea:focus {
+	border-color: #22c55e;
+	box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+}
+
+.slideflow-comment-voice-bar {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.slideflow-comment-status {
+	font-size: 0.78rem;
+	color: var(--text-muted);
+	transition: color 0.15s ease;
+}
+
+.slideflow-comment-status.is-recording {
+	color: #ef4444;
+	font-weight: 600;
+}
+
+.slideflow-comment-status.is-busy {
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+.slideflow-comment-status.is-error {
+	color: #ef4444;
+	font-weight: 600;
+}
+
+.slideflow-voice-meter-track {
+	width: 100%;
+	height: 4px;
+	border-radius: 999px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+}
+
+.slideflow-voice-meter-fill {
+	width: 0%;
+	height: 100%;
+	border-radius: 999px;
+	background: linear-gradient(90deg, #22c55e, #ef4444);
+	transition: width 0.08s linear;
+}
+
+.slideflow-comment-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding-top: 2px;
+}
+
+.slideflow-comment-cancel-btn {
+	background: transparent;
+	border: none;
+	color: var(--text-muted);
+	font-size: 0.92rem;
+	font-weight: 500;
+	padding: 6px 10px;
+	border-radius: 8px;
+	cursor: pointer;
+	transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.slideflow-comment-cancel-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.slideflow-comment-right-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+@keyframes sfMicPulse {
+	0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+	70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+	100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.slideflow-comment-mic-btn {
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	padding: 0;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.slideflow-comment-mic-btn:hover {
+	background: var(--background-modifier-hover);
+	border-color: var(--interactive-accent);
+}
+
+.slideflow-comment-mic-btn.is-recording {
+	background: #ef4444;
+	border-color: #dc2626;
+	color: #ffffff;
+	animation: sfMicPulse 1.3s infinite;
+}
+
+.slideflow-comment-submit-btn {
+	background: #22b814;
+	color: #ffffff;
+	border: none;
+	border-radius: 999px;
+	padding: 8px 18px;
+	font-size: 0.92rem;
+	font-weight: 700;
+	cursor: pointer;
+	box-shadow: 0 4px 12px rgba(34, 184, 20, 0.35);
+	transition: background-color 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+}
+
+.slideflow-comment-submit-btn:hover:not(:disabled) {
+	background: #1ea311;
+	transform: translateY(-1px);
+}
+
+.slideflow-comment-submit-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+/* ==========================================================================
+   SlideFlow Review Queue Drawer (Key R)
+   ========================================================================== */
+
+.slideflow-drawer-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100180;
+	background: rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(4px);
+	-webkit-backdrop-filter: blur(4px);
+	display: flex;
+	justify-content: flex-end;
+	animation: slideFadeIn 0.16s ease forwards;
+}
+
+.slideflow-drawer-panel {
+	width: 100%;
+	max-width: 520px;
+	height: 100vh;
+	background: var(--background-primary);
+	border-left: 1px solid var(--background-modifier-border);
+	box-shadow: -16px 0 48px rgba(0, 0, 0, 0.35);
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+}
+
+.slideflow-drawer-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 18px 20px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.slideflow-drawer-title {
+	margin: 0;
+	font-size: 1.05rem;
+	font-weight: 700;
+	color: var(--text-normal);
+}
+
+.slideflow-drawer-close-btn {
+	background: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	width: 30px;
+	height: 30px;
+	cursor: pointer;
+	color: var(--text-muted);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.slideflow-drawer-close-btn:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.slideflow-drawer-list {
+	flex: 1;
+	overflow-y: auto;
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.slideflow-drawer-empty {
+	padding: 32px 16px;
+	text-align: center;
+	color: var(--text-muted);
+	font-size: 0.92rem;
+}
+
+.slideflow-drawer-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.slideflow-drawer-group-title {
+	font-size: 0.82rem;
+	font-weight: 700;
+	color: var(--text-accent);
+	word-break: break-word;
+}
+
+.slideflow-drawer-item {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.slideflow-drawer-item-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.slideflow-drawer-item-heading {
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--text-muted);
+}
+
+.slideflow-drawer-item-diff-badge {
+	font-size: 0.7rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--sf-diff-ins-bg);
+	color: var(--sf-diff-ins-fg);
+}
+
+.slideflow-drawer-item-copied-badge {
+	font-size: 0.7rem;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+}
+
+.slideflow-drawer-item-body {
+	font-size: 0.92rem;
+	line-height: 1.45;
+	color: var(--text-normal);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.slideflow-drawer-item-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}
+
+.slideflow-mini-action-btn {
+	font-size: 0.78rem;
+	padding: 4px 10px;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.slideflow-mini-action-btn:hover {
+	border-color: var(--interactive-accent);
+}
+
+.slideflow-mini-action-btn.danger:hover {
+	border-color: #ef4444;
+	color: #ef4444;
+}
+
+.slideflow-drawer-footer {
+	padding: 14px 20px;
+	border-top: 1px solid var(--background-modifier-border);
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.slideflow-drawer-primary-btn {
+	flex: 1 1 100%;
+	background: #16a34a;
+	color: #ffffff;
+	border: none;
+	border-radius: 10px;
+	padding: 10px 16px;
+	font-size: 0.92rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.slideflow-drawer-primary-btn:hover:not(:disabled) {
+	background: #15803d;
+}
+
+.slideflow-drawer-secondary-btn,
+.slideflow-drawer-danger-btn {
+	flex: 1;
+	padding: 8px 12px;
+	border-radius: 10px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: 0.84rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.slideflow-drawer-danger-btn:hover:not(:disabled) {
+	border-color: #ef4444;
+	color: #ef4444;
+}
+
+.slideflow-drawer-primary-btn:disabled,
+.slideflow-drawer-secondary-btn:disabled,
+.slideflow-drawer-danger-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}

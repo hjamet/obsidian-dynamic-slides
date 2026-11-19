@@ -5,6 +5,22 @@ import { TOCComponent } from "./toc";
 
 export const SCROLL_PHASE = -1;
 
+export interface CockpitBarState {
+	hasNoteDiff: boolean;
+	diffEnabled: boolean;
+	dirtySlidesCount: number;
+	currentSlideHasDiff: boolean;
+	currentSlideCommentsCount: number;
+	totalPendingCommentsCount: number;
+}
+
+export interface SlideRenderDecoration {
+	overrideMarkdown?: string;
+	dirtyNodeIds?: Set<string>;
+	descendantDirtyNodeIds?: Set<string>;
+	isLinkModified?: (href: string) => boolean;
+}
+
 export class PresentationModal extends Component {
 	public static readonly MIN_ZOOM: number = 0.7;
 	public static readonly MAX_ZOOM: number = 2.0;
@@ -24,10 +40,22 @@ export class PresentationModal extends Component {
 	public onZoomChangeCallback?: (zoom: number) => void;
 	public onReturnClickCallback?: () => void;
 	public onChildHeadingClickCallback?: (nodeId: string) => void;
+	public onToggleDiffClickCallback?: () => void;
+	public onCommentTextClickCallback?: () => void;
+	public onCommentVoiceClickCallback?: () => void;
+	public onOpenQueueClickCallback?: () => void;
+	public onCopyOneShotClickCallback?: () => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
 	private subNoteBannerEl: HTMLElement | null = null;
+
+	// SlideFlow Cockpit Top Bar
+	private cockpitBarEl: HTMLElement;
+	private diffToggleBtnEl: HTMLButtonElement;
+	private commentTextBtnEl: HTMLButtonElement;
+	private commentVoiceBtnEl: HTMLButtonElement;
+	private queueBtnEl: HTMLButtonElement;
 
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
@@ -63,6 +91,51 @@ export class PresentationModal extends Component {
 		);
 
 		this.overlayEl = document.body.createDiv({ cls: "dynamic-slides-overlay" });
+
+		// Top-center SlideFlow Cockpit Bar (Diff toggle, Comment C, Voice V, Pending Queue R / Ctrl+Enter)
+		this.cockpitBarEl = this.overlayEl.createDiv({ cls: "slideflow-cockpit-bar" });
+
+		this.diffToggleBtnEl = this.cockpitBarEl.createEl("button", {
+			cls: "slideflow-pill-btn slideflow-diff-btn",
+			text: "Diff (D)",
+			attr: { type: "button", title: "Afficher/Masquer les diffs (Touche D · N = diff suivante)" }
+		});
+		this.diffToggleBtnEl.style.display = "none";
+		this.diffToggleBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onToggleDiffClickCallback?.();
+		});
+
+		this.commentTextBtnEl = this.cockpitBarEl.createEl("button", {
+			cls: "slideflow-pill-btn slideflow-comment-btn",
+			text: "💬 Commenter (C)",
+			attr: { type: "button", title: "Laisser un commentaire texte sur cette slide (Touche C)" }
+		});
+		this.commentTextBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onCommentTextClickCallback?.();
+		});
+
+		this.commentVoiceBtnEl = this.cockpitBarEl.createEl("button", {
+			cls: "slideflow-pill-btn slideflow-voice-btn",
+			text: "🎤 (V)",
+			attr: { type: "button", title: "Commentaire vocal immédiat Faster-Whisper GPU (Touche V)" }
+		});
+		this.commentVoiceBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onCommentVoiceClickCallback?.();
+		});
+
+		this.queueBtnEl = this.cockpitBarEl.createEl("button", {
+			cls: "slideflow-pill-btn slideflow-queue-btn",
+			text: "📋 0 → /one-shot",
+			attr: { type: "button", title: "Voir la file de commentaires (R) ou copier /one-shot (Ctrl+Entrée)" }
+		});
+		this.queueBtnEl.style.display = "none";
+		this.queueBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onOpenQueueClickCallback?.();
+		});
 
 		this.returnBtnEl = this.overlayEl.createEl("button", {
 			cls: "dynamic-slides-return-btn"
@@ -193,6 +266,55 @@ export class PresentationModal extends Component {
 		});
 	}
 
+	public updateCockpitBar(state: CockpitBarState): void {
+		if (state.hasNoteDiff) {
+			this.diffToggleBtnEl.style.display = "inline-flex";
+			const label = state.diffEnabled
+				? `🟢 Diff ON (${state.dirtySlidesCount})`
+				: `Diff OFF (${state.dirtySlidesCount})`;
+			this.diffToggleBtnEl.setText(label);
+			this.diffToggleBtnEl.toggleClass("is-active", state.diffEnabled);
+			this.diffToggleBtnEl.toggleClass("is-slide-dirty", state.currentSlideHasDiff);
+		} else {
+			this.diffToggleBtnEl.style.display = "none";
+		}
+
+		if (state.currentSlideCommentsCount > 0) {
+			this.commentTextBtnEl.setText(`💬 ${state.currentSlideCommentsCount} (C)`);
+			this.commentTextBtnEl.addClass("has-comments");
+		} else {
+			this.commentTextBtnEl.setText("💬 (C)");
+			this.commentTextBtnEl.removeClass("has-comments");
+		}
+
+		if (state.totalPendingCommentsCount > 0) {
+			this.queueBtnEl.style.display = "inline-flex";
+			this.queueBtnEl.setText(`📋 ${state.totalPendingCommentsCount} · /one-shot (Ctrl+↵)`);
+		} else {
+			this.queueBtnEl.style.display = "none";
+		}
+	}
+
+	public refreshLinkModifiedBadges(isLinkModified: (href: string) => boolean): void {
+		const applyToRoot = (root: HTMLElement | null) => {
+			if (!root) return;
+			root.querySelectorAll(".slideflow-modified-pill").forEach((el) => el.remove());
+			const links = root.querySelectorAll<HTMLElement>("a.internal-link");
+			links.forEach((linkEl) => {
+				const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "";
+				if (href && isLinkModified(href)) {
+					const pill = document.createElement("span");
+					pill.className = "slideflow-modified-pill";
+					pill.textContent = "🟢 Modifié";
+					pill.setAttribute("title", "Modifications non lues dans cette note");
+					linkEl.appendChild(pill);
+				}
+			});
+		};
+		applyToRoot(this.contentEl);
+		applyToRoot(this.zoomContentEl);
+	}
+
 	public setZoom(zoom: number, triggerCallback: boolean = true): void {
 		const clamped = Math.max(
 			PresentationModal.MIN_ZOOM,
@@ -255,7 +377,7 @@ export class PresentationModal extends Component {
 
 	public setReturnButton(parentTitle: string | null) {
 		if (parentTitle) {
-			this.returnBtnEl.setText("↩ Back to original note");
+			this.returnBtnEl.setText(`↩ ${parentTitle}`);
 			this.returnBtnEl.addClass("is-visible");
 		} else {
 			this.returnBtnEl.removeClass("is-visible");
@@ -272,7 +394,7 @@ export class PresentationModal extends Component {
 		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-title", text: noteTitle });
 		const returnBtn = this.subNoteBannerEl.createEl("button", {
 			cls: "dynamic-slides-subnote-return-btn",
-			text: "Return to main presentation"
+			text: "↩ Retour (Échap)"
 		});
 
 		returnBtn.addEventListener("click", (evt) => {
@@ -342,10 +464,6 @@ export class PresentationModal extends Component {
 			}
 
 			const startTime = performance.now();
-
-			// Pure symmetrical bell-curve easing (sinusoidal / half-period cosine)
-			// Yields a smooth symmetrical bell-shaped velocity profile v(t) = (π/2) * sin(π * t)
-			// with gentle, balanced acceleration and deceleration without sudden bursts.
 			const easeInOutSine = (t: number): number => {
 				return 0.5 * (1 - Math.cos(Math.PI * t));
 			};
@@ -471,6 +589,19 @@ export class PresentationModal extends Component {
 			this.zoomContentEl = this.zoomOverlayEl.createDiv({ cls: "dynamic-slides-media-zoom-content" });
 			this.zoomOverlayEl.addEventListener("click", (evt) => {
 				const target = evt.target as HTMLElement;
+				// Allow clicking internal links directly inside zoomed tables (e.g., 🎯 Projets.md!)
+				const linkEl = target.closest(".internal-link") as HTMLElement | null;
+				if (linkEl) {
+					const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href");
+					if (href) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						this.closeMediaZoom(false);
+						this.activeZoomIndex = -1;
+						this.onLinkClickCallback?.(href);
+						return;
+					}
+				}
 				if (target === this.zoomOverlayEl || target === this.zoomContentEl || target.closest(".dynamic-slides-zoom-close-btn")) {
 					evt.stopPropagation();
 					this.closeMediaZoom(true);
@@ -519,7 +650,6 @@ export class PresentationModal extends Component {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
 				wrapper.appendChild(clone);
 			} else {
-				// Images and other media
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-image" });
 				wrapper.appendChild(clone);
 				enhanceMermaidSvgElements(wrapper);
@@ -542,9 +672,10 @@ export class PresentationModal extends Component {
 				elToClose.remove();
 			}
 		}
+		this.activeZoomIndex = -1;
 		try {
 			window.focus();
-		} catch (e) {
+		} catch {
 			// ignore
 		}
 		if (this.contentEl) {
@@ -566,41 +697,32 @@ export class PresentationModal extends Component {
 		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
 
 		if (isOnlyZoomable) {
-			// 1. Initial View (activeZoomIndex === -1): advance to activeZoomIndex = 0, open full-screen zoom overlay, return true.
 			if (this.activeZoomIndex === -1) {
 				this.activeZoomIndex = 0;
 				this.openMediaZoom(0);
 				return true;
 			}
-
-			// 2. Zoom View (activeZoomIndex < mediaElements.length - 1): advance to next zoom item, return true.
 			if (this.activeZoomIndex < mediaElements.length - 1) {
 				this.activeZoomIndex++;
 				this.openMediaZoom(this.activeZoomIndex);
 				return true;
 			}
-
-			// 3. Last Zoom Item (activeZoomIndex === mediaElements.length - 1): close zoom overlay and return false IMMEDIATELY.
 			if (this.isMediaZoomActive() || this.activeZoomIndex === mediaElements.length - 1) {
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
 				this.hasCompletedAllSteps = true;
 				return false;
 			}
-
 			this.hasCompletedAllSteps = true;
 			return false;
 		}
 
-		// Standard slide behavior (Scroll-First-Zoom-Last)
-		// 1. If currently in media zoom overlay
 		if (this.isMediaZoomActive() || this.activeZoomIndex >= 0) {
 			if (this.activeZoomIndex < mediaElements.length - 1) {
 				this.activeZoomIndex++;
 				this.openMediaZoom(this.activeZoomIndex);
 				return true;
 			} else {
-				// Step 4: After closing last zoom item, proceeds to next slide!
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
 				this.hasCompletedAllSteps = true;
@@ -608,20 +730,17 @@ export class PresentationModal extends Component {
 			}
 		}
 
-		// 2. Step 2 (Press ArrowRight): If canScrollDown(), performs scrollDown().
 		if (!wasAnimating && this.canScrollDown()) {
 			this.scrollDown();
 			return true;
 		}
 
-		// 3. Step 3: Once scrolled to bottom (or if not scrollable / scroll canceled), opens Zoom Overlay 0, Zoom Overlay 1...
 		if (mediaElements.length > 0) {
 			this.activeZoomIndex = 0;
 			this.openMediaZoom(0);
 			return true;
 		}
 
-		// Step 4: No media elements and cannot scroll down -> proceed to next slide
 		this.hasCompletedAllSteps = true;
 		return false;
 	}
@@ -638,37 +757,25 @@ export class PresentationModal extends Component {
 		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
 
 		if (isOnlyZoomable) {
-			// Zoom View (> 0): Go to previous zoom element
 			if (this.activeZoomIndex > 0 && this.activeZoomIndex < mediaElements.length) {
 				this.activeZoomIndex--;
 				this.openMediaZoom(this.activeZoomIndex);
 				return true;
 			}
-
-			// First Zoom Element (activeZoomIndex === 0): Close zoom overlay, return to initial inline view (-1)
 			if (this.activeZoomIndex === 0) {
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
 				return true;
 			}
-
-			// Initial View (activeZoomIndex === -1): Go to previous slide
-			if (this.activeZoomIndex === -1) {
-				return false;
-			}
-
 			return false;
 		}
 
-		// Standard slide behavior (Step-by-step reverse navigation)
-		// 1. If currently in media zoom overlay
 		if (this.isMediaZoomActive() || this.activeZoomIndex >= 0) {
 			if (this.activeZoomIndex > 0) {
 				this.activeZoomIndex--;
 				this.openMediaZoom(this.activeZoomIndex);
 				return true;
 			} else {
-				// In Zoom Overlay 0: closing zoom sets contentEl.scrollTop = contentEl.scrollHeight (at bottom of scroll) and returns true
 				this.closeMediaZoom(true);
 				this.activeZoomIndex = -1;
 				if (this.contentEl) {
@@ -678,17 +785,19 @@ export class PresentationModal extends Component {
 			}
 		}
 
-		// 2. If in Scroll Phase: scrollUp() moves scroll up by 75% height and returns true
 		if (!wasAnimating && this.canScrollUp()) {
 			this.scrollUp();
 			return true;
 		}
 
-		// 3. Only when scrollTop <= 10 (or scroll canceled) does handlePrev() return false to move to previous slide
 		return false;
 	}
 
-	public async open(initialNode: SectionNode, sourcePath: string) {
+	public async open(
+		initialNode: SectionNode,
+		sourcePath: string,
+		decoration?: SlideRenderDecoration
+	) {
 		document.body.addClass("is-dynamic-slides-active");
 		this.overlayEl.style.setProperty('--dynamic-slides-duration', `${this.transitionDuration}s`);
 		this.overlayEl.style.setProperty('--dynamic-slides-zoom', `${this.zoomLevel}`);
@@ -700,17 +809,18 @@ export class PresentationModal extends Component {
 				await this.overlayEl.requestFullscreen();
 			}
 		} catch (e) {
-			console.warn("[DynamicSlides] Fullscreen request failed or denied:", e);
+			console.warn("[SlideFlow] Fullscreen request failed or denied:", e);
 		}
 
-		await this.updateSlide(initialNode, sourcePath, 'jump', 'start');
+		await this.updateSlide(initialNode, sourcePath, 'jump', 'start', decoration);
 	}
 
 	public async updateSlide(
 		node: SectionNode,
 		sourcePath: string,
 		direction: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump' = 'jump',
-		enterFrom: 'start' | 'end' = 'start'
+		enterFrom: 'start' | 'end' = 'start',
+		decoration?: SlideRenderDecoration
 	) {
 		this.cancelScrollAnimation(false);
 		this.hasCompletedAllSteps = false;
@@ -732,7 +842,6 @@ export class PresentationModal extends Component {
 			this.currentSlideComponent = null;
 		}
 
-		// Re-trigger slide transition animation
 		this.contentEl.removeClass(
 			"slide-anim-next",
 			"slide-anim-prev",
@@ -743,13 +852,31 @@ export class PresentationModal extends Component {
 		void this.contentEl.offsetWidth;
 		this.contentEl.addClass(`slide-anim-${direction}`);
 
+		const markdownToRender = decoration?.overrideMarkdown ?? node.contentMarkdown;
 		this.currentSlideComponent = await renderSlideContent(
 			this.appRef,
-			node.contentMarkdown,
+			markdownToRender,
 			this.contentEl,
 			sourcePath,
 			this
 		);
+
+		// Decorate child headings with unread diff dot
+		if (decoration?.dirtyNodeIds || decoration?.descendantDirtyNodeIds) {
+			this.contentEl.querySelectorAll<HTMLElement>(".dynamic-slides-child-heading").forEach((el) => {
+				const cid = el.getAttribute("data-node-id") || "";
+				if (decoration.dirtyNodeIds?.has(cid)) {
+					el.createSpan({ cls: "slideflow-child-diff-badge", text: "🟢 Modifié" });
+				} else if (decoration.descendantDirtyNodeIds?.has(cid)) {
+					el.createSpan({ cls: "slideflow-child-diff-badge is-sub", text: "🟢" });
+				}
+			});
+		}
+
+		// Decorate internal links pointing to notes/sub-notes with unread diffs
+		if (decoration?.isLinkModified) {
+			this.refreshLinkModifiedBadges(decoration.isLinkModified);
+		}
 
 		const mediaElements = this.detectMediaElements();
 		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
@@ -776,13 +903,13 @@ export class PresentationModal extends Component {
 
 	public close() {
 		this.cancelScrollAnimation(false);
-		this.closeMediaZoom();
+		this.closeMediaZoom(false);
 		this.hideSubNoteBanner();
 
 		if (document.fullscreenElement === this.overlayEl) {
 			try {
-				document.exitFullscreen();
-			} catch (e) {
+				void document.exitFullscreen();
+			} catch {
 				// ignore
 			}
 		}

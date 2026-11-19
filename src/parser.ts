@@ -7,16 +7,28 @@ export interface SectionNode {
 	parent: SectionNode | null;
 	children: SectionNode[];
 	contentMarkdown: string;
+	rawOwnMarkdown: string;
+	childHeadingsHtml: string;
 	flatIndex?: number;
+}
+
+export function stripFrontmatterWithOffset(markdown: string): { text: string; strippedLines: number } {
+	const normalized = markdown.replace(/\r\n/g, "\n");
+	const m = normalized.match(/^---\n[\s\S]*?\n---(?:\n|$)/);
+	if (!m) return { text: normalized, strippedLines: 0 };
+	const strippedLines = m[0].split("\n").length - 1;
+	return { text: normalized.slice(m[0].length), strippedLines };
 }
 
 export function parseMarkdownSections(
 	markdown: string,
 	headings: any[] | undefined
 ): { root: SectionNode; flatNodes: SectionNode[]; error?: string } {
-	const lines = markdown.split("\n");
+	const normalizedMd = markdown.replace(/\r\n/g, "\n");
+	const lines = normalizedMd.split("\n");
 
 	if (!headings || headings.length === 0) {
+		const { text: cleanBody } = stripFrontmatterWithOffset(normalizedMd);
 		const rootNode: SectionNode = {
 			id: "node-root",
 			title: "0. Full document",
@@ -25,7 +37,9 @@ export function parseMarkdownSections(
 			lineEnd: Math.max(0, lines.length - 1),
 			parent: null,
 			children: [],
-			contentMarkdown: markdown,
+			contentMarkdown: cleanBody,
+			rawOwnMarkdown: cleanBody,
+			childHeadingsHtml: "",
 			flatIndex: 0
 		};
 		return {
@@ -35,6 +49,7 @@ export function parseMarkdownSections(
 		};
 	}
 
+	const { text: cleanFullBody } = stripFrontmatterWithOffset(normalizedMd);
 	const rootNode: SectionNode = {
 		id: "node-root",
 		title: "0. Full document",
@@ -43,7 +58,9 @@ export function parseMarkdownSections(
 		lineEnd: lines.length - 1,
 		parent: null,
 		children: [],
-		contentMarkdown: markdown
+		contentMarkdown: cleanFullBody,
+		rawOwnMarkdown: cleanFullBody,
+		childHeadingsHtml: ""
 	};
 
 	const headingNodes: SectionNode[] = [];
@@ -75,7 +92,9 @@ export function parseMarkdownSections(
 			lineEnd,
 			parent: null,
 			children: [],
-			contentMarkdown: ""
+			contentMarkdown: "",
+			rawOwnMarkdown: "",
+			childHeadingsHtml: ""
 		};
 
 		while (stack.length > 1 && stack[stack.length - 1].level >= h.level) {
@@ -101,9 +120,14 @@ export function parseMarkdownSections(
 			const childHeadings = node.children
 				.map((c) => `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex}">${c.title}</div>`)
 				.join("\n");
+			node.rawOwnMarkdown = intro;
+			node.childHeadingsHtml = childHeadings;
 			node.contentMarkdown = `${intro}\n${childHeadings}`;
 		} else {
-			node.contentMarkdown = lines.slice(node.lineStart, node.lineEnd + 1).join("\n");
+			const leafMd = lines.slice(node.lineStart, node.lineEnd + 1).join("\n");
+			node.rawOwnMarkdown = leafMd;
+			node.childHeadingsHtml = "";
+			node.contentMarkdown = leafMd;
 		}
 	}
 

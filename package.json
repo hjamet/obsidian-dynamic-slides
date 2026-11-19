@@ -1,7 +1,7 @@
 {
-  "name": "dynamic-section-slides",
-  "version": "1.2.0",
-  "description": "Dynamic full-screen Markdown section slides with 2D keyboard navigation and hover TOC.",
+  "name": "slideflow",
+  "version": "2.0.0",
+  "description": "SlideFlow: keyboard-first Markdown slide presentation, live AST diffs across notes/sub-notes, and text/voice review comments.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

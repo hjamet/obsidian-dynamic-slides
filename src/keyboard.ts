@@ -3,11 +3,18 @@ export interface KeyboardNavigatorCallbacks {
 	onPrev: () => void;
 	onFastNext: () => void;
 	onFastPrev: () => void;
-	onClose: () => void;
+	onEscape: () => void;
 	onZoomIn?: () => void;
 	onZoomOut?: () => void;
 	onResetZoom?: () => void;
 	onZoomReset?: () => void;
+	onOpenCommentText?: () => void;
+	onOpenCommentVoice?: () => void;
+	onToggleDiff?: () => void;
+	onNextDiffSlide?: () => void;
+	onToggleReviewDrawer?: () => void;
+	onCopyOneShot?: () => void;
+	isInputBlocked?: () => boolean;
 }
 
 export class KeyboardNavigator {
@@ -34,8 +41,69 @@ export class KeyboardNavigator {
 		}
 	}
 
+	private isTypingTarget(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tag = target.tagName.toLowerCase();
+		return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+	}
+
 	private handleKeyDown(evt: KeyboardEvent) {
-		// Check for Zoom shortcuts first (+, -, 0 / Ctrl+=, Ctrl+-, Ctrl+0)
+		if (this.callbacks.isInputBlocked?.() || this.isTypingTarget(evt.target)) {
+			return;
+		}
+
+		// Ctrl+Enter / Cmd+Enter -> Export /one-shot comments to clipboard
+		if ((evt.ctrlKey || evt.metaKey) && !evt.altKey && (evt.key === "Enter" || evt.code === "Enter")) {
+			if (this.callbacks.onCopyOneShot) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onCopyOneShot();
+				return;
+			}
+		}
+
+		// Single-key SlideFlow cockpit shortcuts (ONLY when no Ctrl/Meta/Alt modifier is pressed,
+		// so Ctrl+C / Ctrl+V / Ctrl+D keep their native OS/clipboard meaning!)
+		if (!evt.ctrlKey && !evt.metaKey && !evt.altKey) {
+			const lowerKey = evt.key.toLowerCase();
+
+			if (lowerKey === "c" && this.callbacks.onOpenCommentText) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onOpenCommentText();
+				return;
+			}
+
+			if (lowerKey === "v" && this.callbacks.onOpenCommentVoice) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onOpenCommentVoice();
+				return;
+			}
+
+			if (lowerKey === "d" && this.callbacks.onToggleDiff) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onToggleDiff();
+				return;
+			}
+
+			if (lowerKey === "n" && this.callbacks.onNextDiffSlide) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onNextDiffSlide();
+				return;
+			}
+
+			if (lowerKey === "r" && this.callbacks.onToggleReviewDrawer) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onToggleReviewDrawer();
+				return;
+			}
+		}
+
+		// Zoom shortcuts (+, -, 0 / Ctrl+=, Ctrl+-, Ctrl+0)
 		if (
 			evt.code === "Equal" || evt.key === "+" || evt.key === "=" || evt.code === "NumpadAdd"
 		) {
@@ -89,7 +157,7 @@ export class KeyboardNavigator {
 		}
 
 		if (evt.code === "Escape" || evt.key === "Escape") {
-			this.callbacks.onClose();
+			this.callbacks.onEscape();
 			return;
 		}
 

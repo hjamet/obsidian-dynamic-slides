@@ -1,5 +1,11 @@
 import { SectionNode } from "./parser";
 
+export interface TOCVisualMeta {
+	dirtyNodeIds?: Set<string>;
+	descendantDirtyNodeIds?: Set<string>;
+	commentCountByHeading?: Map<string, number>;
+}
+
 function isAncestorOf(ancestor: SectionNode, target: SectionNode): boolean {
 	let curr: SectionNode | null = target.parent;
 	while (curr) {
@@ -79,11 +85,11 @@ export class TOCComponent {
 		});
 	}
 
-	public update(currentNode: SectionNode, flatNodes: SectionNode[]): void {
+	public update(currentNode: SectionNode, flatNodes: SectionNode[], meta?: TOCVisualMeta): void {
 		this.treeScrollEl.empty();
 		const rootNode = flatNodes[0] || this.getRootNode(currentNode);
 		const treeUl = this.treeScrollEl.createEl("ul", { cls: "dynamic-slides-toc-tree" });
-		this.renderNode(rootNode, treeUl, currentNode);
+		this.renderNode(rootNode, treeUl, currentNode, meta);
 		this.scrollToActive();
 	}
 
@@ -95,14 +101,23 @@ export class TOCComponent {
 		return curr;
 	}
 
-	private renderNode(node: SectionNode, containerUl: HTMLElement, activeNode: SectionNode): void {
+	private renderNode(
+		node: SectionNode,
+		containerUl: HTMLElement,
+		activeNode: SectionNode,
+		meta?: TOCVisualMeta
+	): void {
 		const li = containerUl.createEl("li", { cls: "dynamic-slides-toc-node" });
 		const isCurrent = node.id === activeNode.id;
 		const hasChildren = node.children && node.children.length > 0;
 		const isExpanded = hasChildren && shouldExpandChildren(node, activeNode);
 
+		const isDirty = Boolean(meta?.dirtyNodeIds?.has(node.id));
+		const hasDirtyDesc = Boolean(meta?.descendantDirtyNodeIds?.has(node.id));
+		const commentCount = meta?.commentCountByHeading?.get(node.title) || 0;
+
 		const itemEl = li.createDiv({
-			cls: `dynamic-slides-toc-item level-${node.level} ${isCurrent ? "is-active" : ""}`
+			cls: `dynamic-slides-toc-item level-${node.level} ${isCurrent ? "is-active" : ""} ${isDirty ? "has-diff" : ""}`
 		});
 
 		itemEl.createEl("span", {
@@ -115,6 +130,26 @@ export class TOCComponent {
 			text: node.title
 		});
 
+		if (isDirty) {
+			itemEl.createEl("span", {
+				cls: "slideflow-toc-diff-dot",
+				attr: { title: "Slide modifiée (diff non lu)" }
+			});
+		} else if (hasDirtyDesc && node.level > 0) {
+			itemEl.createEl("span", {
+				cls: "slideflow-toc-diff-dot is-descendant",
+				attr: { title: "Contient des sous-sections modifiées" }
+			});
+		}
+
+		if (commentCount > 0) {
+			itemEl.createEl("span", {
+				cls: "slideflow-toc-comment-badge",
+				text: `💬${commentCount}`,
+				attr: { title: `${commentCount} commentaire(s) sur cette slide` }
+			});
+		}
+
 		itemEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.onSelectCallback(node);
@@ -124,7 +159,7 @@ export class TOCComponent {
 			const childrenUl = li.createEl("ul", { cls: "dynamic-slides-toc-children" });
 			childrenUl.style.display = isExpanded ? "block" : "none";
 			for (const child of node.children) {
-				this.renderNode(child, childrenUl, activeNode);
+				this.renderNode(child, childrenUl, activeNode, meta);
 			}
 		}
 	}
@@ -133,5 +168,3 @@ export class TOCComponent {
 		this.containerEl.remove();
 	}
 }
-
-
