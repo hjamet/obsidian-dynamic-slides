@@ -10,6 +10,7 @@
 import { App, TFile } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
+import { GENERAL_NOTE_PATH } from "./reviewStore";
 
 export const ACTIVE_JOBS_FILE_PATH = "_agents/slideflow_active_jobs.json";
 export const JOBS_BLOCK_START = "<!-- SLIDEFLOW_AGY_JOBS_START -->";
@@ -256,7 +257,12 @@ export class ActiveJobsTracker {
 	}
 
 	public async orderNotesForJob(
-		comments: Array<{ notePath: string; noteTitle?: string; stackDepth?: number }>
+		comments: Array<{
+			notePath: string;
+			noteTitle?: string;
+			stackDepth?: number;
+			scopeType?: string;
+		}>
 	): Promise<string[]> {
 		const dashboardPath = await this.resolveDashboardVaultPath();
 		const byNote = new Map<
@@ -265,6 +271,7 @@ export class ActiveJobsTracker {
 		>();
 
 		comments.forEach((c, idx) => {
+			if (c.scopeType === "general" || c.notePath === GENERAL_NOTE_PATH) return;
 			const label = (c.noteTitle || c.notePath || "").trim();
 			if (!label) return;
 			const key = (c.notePath || label).replace(/\\/g, "/").toLowerCase();

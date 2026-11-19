@@ -2027,6 +2027,13 @@ mark.slideflow-comment-mark.is-failed {
 	word-break: break-word;
 }
 
+.slideflow-drawer-group-title.is-general {
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	font-size: 0.72rem;
+}
+
 .slideflow-drawer-item {
 	background: var(--background-secondary);
 	border: 1.5px solid var(--background-modifier-border);
@@ -2074,6 +2081,18 @@ mark.slideflow-comment-mark.is-failed {
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	color: var(--text-muted);
+}
+
+.slideflow-drawer-item-scope-badge.is-general {
+	background: rgba(59, 130, 246, 0.12);
+	border-color: rgba(59, 130, 246, 0.3);
+	color: #2563eb;
+}
+
+.theme-dark .slideflow-drawer-item-scope-badge.is-general {
+	background: rgba(96, 165, 250, 0.16);
+	border-color: rgba(96, 165, 250, 0.35);
+	color: #93c5fd;
 }
 
 .slideflow-drawer-item-diff-badge {
@@ -2149,8 +2168,75 @@ mark.slideflow-comment-mark.is-failed {
 	color: #ef4444 !important;
 }
 
+.slideflow-drawer-general-box {
+	padding: 10px 20px 10px 20px;
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	display: flex;
+	align-items: flex-end;
+	gap: 8px;
+}
+
+.slideflow-drawer-general-input {
+	flex: 1;
+	min-height: 40px;
+	max-height: 110px;
+	resize: none;
+	border-radius: 10px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	padding: 8px 11px;
+	font-family: var(--font-text);
+	font-size: 0.88rem;
+	line-height: 1.42;
+	box-sizing: border-box;
+	outline: none;
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.slideflow-drawer-general-input:focus {
+	border-color: rgba(22, 163, 74, 0.55);
+	box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.14);
+}
+
+.slideflow-drawer-general-add-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	flex-shrink: 0;
+	height: 36px;
+	padding: 0 12px;
+	border-radius: 9px;
+	border: 1px solid var(--background-modifier-border) !important;
+	box-shadow: none !important;
+	background: var(--background-secondary) !important;
+	color: var(--text-normal) !important;
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	transition: background-color 0.14s ease, border-color 0.14s ease, opacity 0.14s ease;
+}
+
+.slideflow-drawer-general-add-btn strong {
+	color: var(--text-muted);
+	font-weight: 700;
+}
+
+.slideflow-drawer-general-add-btn:hover:not(:disabled) {
+	background: var(--background-modifier-hover) !important;
+	border-color: rgba(22, 163, 74, 0.55) !important;
+}
+
+.slideflow-drawer-general-add-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
 .slideflow-drawer-footer {
-	padding: 14px 20px;
+	padding: 12px 20px 14px 20px;
 	border-top: 1px solid var(--background-modifier-border);
 	display: flex;
 	flex-wrap: wrap;

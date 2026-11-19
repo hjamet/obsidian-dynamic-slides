@@ -5,6 +5,7 @@
  * - ArrowUp / ArrowDown : move selection across comments
  * - Enter               : jump to slide AND open the selected comment for editing
  * - Delete              : open inline confirmation modal (Enter confirms, Esc cancels)
+ * - Ctrl+I              : focus general comment input at bottom (Enter submits, Shift+Enter newline, Esc blurs)
  * - Ctrl+Enter          : copy XML (clipboard mode) or launch CLI & move batch to WIP (direct CLI mode)
  * - Esc / R             : close drawer
  *
@@ -12,7 +13,7 @@
  */
 
 import { ConfirmOverlayModal } from "./confirmModal";
-import { ReviewComment } from "./reviewStore";
+import { GENERAL_NOTE_PATH, isGeneralComment, ReviewComment } from "./reviewStore";
 import { stripHeadingLinksToPlainText } from "./headingUtils";
 import { readImageAsDataUrl } from "./commentImages";
 
@@ -22,9 +23,11 @@ export interface ReviewDrawerOpenOptions {
 	cliDisplayName: string;
 	wipBatchCount?: number;
 	wipCommentCount?: number;
+	focusGeneralInput?: boolean;
 }
 
 export interface ReviewDrawerCallbacks {
+	onAddGeneralComment: (commentText: string) => Promise<ReviewComment | null>;
 	onEditComment: (comment: ReviewComment) => void | Promise<void>;
 	onDeleteComment: (commentId: string) => Promise<void>;
 	onClearAll: () => Promise<void>;
@@ -41,10 +44,13 @@ export class ReviewDrawer {
 	private titleEl: HTMLElement | null = null;
 	private wipBadgeEl: HTMLElement | null = null;
 	private listEl: HTMLElement | null = null;
+	private generalInputEl: HTMLTextAreaElement | null = null;
+	private generalAddBtnEl: HTMLButtonElement | null = null;
 	private primaryBtnEl: HTMLButtonElement | null = null;
 	private clearBtnEl: HTMLButtonElement | null = null;
 
 	private isOpenFlag: boolean = false;
+	private isSubmittingGeneral: boolean = false;
 	private directCliEnabled: boolean = false;
 	private cliDisplayName: string = "CLI";
 	private wipBatchCount: number = 0;
@@ -107,10 +113,37 @@ export class ReviewDrawer {
 		});
 
 		const hintsEl = panelEl.createDiv({ cls: "slideflow-drawer-hints" });
-		hintsEl.innerHTML = `<span><strong>↑↓</strong> select</span><span><strong>↵</strong> edit</span><span><strong>Del</strong> delete</span><span><strong>Ctrl+↵</strong> ${this.directCliEnabled ? `send to ${this.cliDisplayName}` : "copy XML"}</span>`;
+		hintsEl.innerHTML = `<span><strong>↑↓</strong> select</span><span><strong>↵</strong> edit</span><span><strong>Del</strong> delete</span><span><strong>Ctrl+I</strong> general</span><span><strong>Ctrl+↵</strong> ${this.directCliEnabled ? `send to ${this.cliDisplayName}` : "copy XML"}</span>`;
 
 		this.listEl = panelEl.createDiv({ cls: "slideflow-drawer-list" });
 		this.renderList();
+
+		const generalBoxEl = panelEl.createDiv({ cls: "slideflow-drawer-general-box" });
+		this.generalInputEl = generalBoxEl.createEl("textarea", {
+			cls: "slideflow-drawer-general-input",
+			attr: {
+				rows: "2",
+				placeholder: "Add a general comment… (Ctrl+I · Enter to add, Shift+Enter newline)",
+			},
+		});
+		this.generalInputEl.addEventListener("input", () => {
+			this.autoResizeGeneralInput();
+			this.updateGeneralAddButtonState();
+		});
+
+		this.generalAddBtnEl = generalBoxEl.createEl("button", {
+			cls: "slideflow-drawer-general-add-btn",
+			attr: {
+				type: "button",
+				title: "Add general comment (Enter)",
+			},
+		});
+		this.generalAddBtnEl.innerHTML = `Add <strong>↵</strong>`;
+		this.generalAddBtnEl.disabled = true;
+		this.generalAddBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			void this.submitGeneralComment();
+		});
 
 		const footerEl = panelEl.createDiv({ cls: "slideflow-drawer-footer" });
 
@@ -140,6 +173,64 @@ export class ReviewDrawer {
 
 		this.updateHeaderAndFooter();
 		window.addEventListener("keydown", this.boundKeyHandler, true);
+
+		if (options.focusGeneralInput) {
+			window.requestAnimationFrame(() => this.focusGeneralInput());
+		}
+	}
+
+	public focusGeneralInput(): void {
+		if (!this.isOpenFlag || !this.generalInputEl) return;
+		this.generalInputEl.focus();
+		const len = this.generalInputEl.value.length;
+		this.generalInputEl.setSelectionRange(len, len);
+	}
+
+	private autoResizeGeneralInput(): void {
+		if (!this.generalInputEl) return;
+		this.generalInputEl.style.height = "auto";
+		const nextHeight = Math.min(110, Math.max(40, this.generalInputEl.scrollHeight));
+		this.generalInputEl.style.height = `${nextHeight}px`;
+	}
+
+	private updateGeneralAddButtonState(): void {
+		if (!this.generalAddBtnEl || !this.generalInputEl) return;
+		this.generalAddBtnEl.disabled =
+			this.isSubmittingGeneral || this.generalInputEl.value.trim().length === 0;
+	}
+
+	private async submitGeneralComment(): Promise<boolean> {
+		if (!this.generalInputEl || this.isSubmittingGeneral) return false;
+		const trimmed = this.generalInputEl.value.trim();
+		if (!trimmed) return false;
+
+		this.isSubmittingGeneral = true;
+		this.updateGeneralAddButtonState();
+		try {
+			const created = await this.callbacks.onAddGeneralComment(trimmed);
+			if (!created) return false;
+
+			if (this.generalInputEl) {
+				this.generalInputEl.value = "";
+				this.autoResizeGeneralInput();
+			}
+
+			if (!this.comments.some((c) => c.id === created.id)) {
+				this.comments = [...this.comments, created];
+				this.renderList();
+				this.updateHeaderAndFooter();
+			}
+
+			const newIdx = this.flatRows.findIndex((r) => r.comment.id === created.id);
+			if (newIdx !== -1) {
+				this.selectedIndex = newIdx;
+				this.applySelectionHighlight(true);
+			}
+			return true;
+		} finally {
+			this.isSubmittingGeneral = false;
+			this.updateGeneralAddButtonState();
+		}
 	}
 
 	public refresh(
@@ -216,7 +307,7 @@ export class ReviewDrawer {
 			const msg =
 				this.wipBatchCount > 0
 					? `Queue is clear for your next project (${this.wipBatchCount} ${this.cliDisplayName} batch running in background).`
-					: "No comments yet. Press C (text) or V (voice), or highlight text on any slide.";
+					: "No comments yet. Press C (text), V (voice), highlight text on a slide, or press Ctrl+I for a general comment.";
 			this.listEl.createDiv({
 				cls: "slideflow-drawer-empty",
 				text: msg,
@@ -224,25 +315,37 @@ export class ReviewDrawer {
 			return;
 		}
 
-		const groups = new Map<string, ReviewComment[]>();
+		const noteGroups = new Map<string, ReviewComment[]>();
+		const generalItems: ReviewComment[] = [];
 		for (const c of this.comments) {
-			const arr = groups.get(c.notePath) || [];
+			if (isGeneralComment(c)) {
+				generalItems.push(c);
+				continue;
+			}
+			const arr = noteGroups.get(c.notePath) || [];
 			arr.push(c);
-			groups.set(c.notePath, arr);
+			noteGroups.set(c.notePath, arr);
 		}
 
-		for (const [notePath, items] of groups.entries()) {
+		const orderedGroups: Array<[string, ReviewComment[]]> = Array.from(noteGroups.entries());
+		if (generalItems.length > 0) {
+			orderedGroups.push([GENERAL_NOTE_PATH, generalItems]);
+		}
+
+		for (const [notePath, items] of orderedGroups) {
+			const isGeneralGroup = notePath === GENERAL_NOTE_PATH;
 			const groupEl = this.listEl.createDiv({ cls: "slideflow-drawer-group" });
 			groupEl.createDiv({
-				cls: "slideflow-drawer-group-title",
-				text: `${items[0].noteTitle} (${notePath})`,
+				cls: `slideflow-drawer-group-title${isGeneralGroup ? " is-general" : ""}`,
+				text: isGeneralGroup ? "General" : `${items[0].noteTitle} (${notePath})`,
 			});
 
 			for (const c of items) {
 				const rowIdx = this.flatRows.length;
+				const isGeneral = isGeneralComment(c);
 				const isFailed = Boolean(c.failedAt || c.failedReason);
 				const itemEl = groupEl.createDiv({
-					cls: `slideflow-drawer-item${isFailed ? " is-failed" : ""}`,
+					cls: `slideflow-drawer-item${isFailed ? " is-failed" : ""}${isGeneral ? " is-general" : ""}`,
 				});
 				itemEl.addEventListener("click", (evt) => {
 					evt.stopPropagation();
@@ -255,13 +358,15 @@ export class ReviewDrawer {
 				});
 
 				const metaEl = itemEl.createDiv({ cls: "slideflow-drawer-item-meta" });
-				metaEl.createSpan({
-					cls: "slideflow-drawer-item-heading",
-					text: stripHeadingLinksToPlainText(c.sectionHeading) || c.sectionHeading,
-				});
+				if (!isGeneral) {
+					metaEl.createSpan({
+						cls: "slideflow-drawer-item-heading",
+						text: stripHeadingLinksToPlainText(c.sectionHeading) || c.sectionHeading,
+					});
+				}
 				if (c.scopeLabel) {
 					metaEl.createSpan({
-						cls: "slideflow-drawer-item-scope-badge",
+						cls: `slideflow-drawer-item-scope-badge${isGeneral ? " is-general" : ""}`,
 						text: c.scopeLabel,
 					});
 				}
@@ -316,7 +421,12 @@ export class ReviewDrawer {
 				const editBtn = actionsEl.createEl("button", {
 					cls: "slideflow-mini-action-btn",
 					text: "Edit",
-					attr: { type: "button", title: "Jump to slide and edit (Enter)" },
+					attr: {
+						type: "button",
+						title: isGeneral
+							? "Edit general comment (Enter)"
+							: "Jump to slide and edit (Enter)",
+					},
 				});
 				editBtn.addEventListener("click", (evt) => {
 					evt.stopPropagation();
@@ -370,7 +480,9 @@ export class ReviewDrawer {
 
 		this.confirmModal.open({
 			title: "Delete comment?",
-			message: `Remove this comment from "${target.sectionHeading}"?`,
+			message: isGeneralComment(target)
+				? "Remove this general comment?"
+				: `Remove this comment from "${target.sectionHeading}"?`,
 			quotePreview: preview,
 			confirmLabelHtml: `Delete <strong>↵</strong>`,
 			confirmVariant: "danger",
@@ -417,6 +529,57 @@ export class ReviewDrawer {
 	private handleKeyDown(evt: KeyboardEvent): void {
 		if (!this.isOpenFlag) return;
 		if (this.confirmModal.isOpen()) return;
+
+		if (
+			(evt.ctrlKey || evt.metaKey) &&
+			!evt.altKey &&
+			!evt.shiftKey &&
+			evt.key.toLowerCase() === "i"
+		) {
+			evt.preventDefault();
+			evt.stopPropagation();
+			this.focusGeneralInput();
+			return;
+		}
+
+		const isInputFocused = Boolean(
+			this.generalInputEl && document.activeElement === this.generalInputEl
+		);
+		if (isInputFocused) {
+			if (evt.key === "Escape" || evt.code === "Escape") {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.generalInputEl?.blur();
+				return;
+			}
+			if ((evt.ctrlKey || evt.metaKey) && (evt.key === "Enter" || evt.code === "Enter")) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				void (async () => {
+					if (this.generalInputEl && this.generalInputEl.value.trim().length > 0) {
+						await this.submitGeneralComment();
+					}
+					if (this.comments.length > 0) {
+						await this.callbacks.onPrimaryAction();
+					}
+				})();
+				return;
+			}
+			if (
+				(evt.key === "Enter" || evt.code === "Enter") &&
+				!evt.shiftKey &&
+				!evt.ctrlKey &&
+				!evt.metaKey &&
+				!evt.altKey
+			) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				void this.submitGeneralComment();
+				return;
+			}
+			evt.stopPropagation();
+			return;
+		}
 
 		if (
 			evt.key === "Escape" ||
@@ -494,8 +657,11 @@ export class ReviewDrawer {
 		this.titleEl = null;
 		this.wipBadgeEl = null;
 		this.listEl = null;
+		this.generalInputEl = null;
+		this.generalAddBtnEl = null;
 		this.primaryBtnEl = null;
 		this.clearBtnEl = null;
+		this.isSubmittingGeneral = false;
 		this.flatRows = [];
 		this.selectedIndex = -1;
 		if (invokeCallback) {

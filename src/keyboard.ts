@@ -13,6 +13,7 @@ export interface KeyboardNavigatorCallbacks {
 	onToggleDiff?: () => void;
 	onNextDiffSlide?: () => void;
 	onToggleReviewDrawer?: () => void;
+	onOpenGeneralComment?: () => void;
 	onCopyOneShot?: () => void;
 	isInputBlocked?: () => boolean;
 }
@@ -58,6 +59,16 @@ export class KeyboardNavigator {
 				evt.preventDefault();
 				evt.stopPropagation();
 				this.callbacks.onCopyOneShot();
+				return;
+			}
+		}
+
+		// Ctrl+I / Cmd+I -> Open Review Queue & focus general comment input
+		if ((evt.ctrlKey || evt.metaKey) && !evt.altKey && !evt.shiftKey && evt.key.toLowerCase() === "i") {
+			if (this.callbacks.onOpenGeneralComment) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onOpenGeneralComment();
 				return;
 			}
 		}

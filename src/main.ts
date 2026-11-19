@@ -24,7 +24,7 @@ import {
 	extractVisibleSlideContext,
 	extractZoomContext,
 } from "./contextExtractor";
-import { ReviewComment, ReviewStore } from "./reviewStore";
+import { GENERAL_NOTE_PATH, isGeneralComment, ReviewComment, ReviewStore } from "./reviewStore";
 import { CommentImageAttachment, pruneStaleTempImages } from "./commentImages";
 import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
@@ -694,6 +694,26 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 
 		this.reviewDrawer = new ReviewDrawer(overlayEl, {
+			onAddGeneralComment: async (commentText: string) => {
+				const trimmed = commentText.trim();
+				if (!trimmed) return null;
+				const created = await this.reviewStore.addComment({
+					projectRootPath: this.sessionRootProjectPath,
+					notePath: GENERAL_NOTE_PATH,
+					noteTitle: "General",
+					sectionHeading: "General",
+					sectionLevel: 0,
+					lineStart: 0,
+					lineEnd: 0,
+					scopeType: "general",
+					scopeLabel: "General",
+					excerpt: "",
+					hadDiff: false,
+					commentText: trimmed,
+				});
+				this.refreshAllActiveUI();
+				return created;
+			},
 			onEditComment: async (comment: ReviewComment) => {
 				await this.jumpAndEditComment(comment);
 			},
@@ -758,6 +778,7 @@ export default class SlideFlowPlugin extends Plugin {
 			onToggleDiff: () => this.toggleDiffMode(),
 			onNextDiffSlide: () => this.jumpToNextDiffSlide(),
 			onToggleReviewDrawer: () => this.toggleReviewDrawer(),
+			onOpenGeneralComment: () => this.openReviewDrawerForGeneralComment(),
 			onCopyOneShot: () => void this.handleSlideCtrlEnter(),
 			isInputBlocked: () =>
 				Boolean(
@@ -1084,6 +1105,27 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 	}
 
+	private openReviewDrawerForGeneralComment() {
+		if (!this.reviewDrawer) return;
+		this.slideCommentsRail?.hidePopoverImmediate();
+		if (this.reviewDrawer.isOpen()) {
+			this.reviewDrawer.focusGeneralInput();
+			return;
+		}
+		void this.reconcileOrphanWipBatches().then(() => {
+			if (!this.reviewDrawer) return;
+			const wipBatches = this.reviewStore.getWipBatches();
+			this.reviewDrawer.open({
+				comments: this.reviewStore.getAll(),
+				directCliEnabled: this.settings.directCliEnabled,
+				cliDisplayName: getCliDisplayName(this.settings.directCliCommand),
+				wipBatchCount: wipBatches.length,
+				wipCommentCount: this.reviewStore.getWipCommentCount(),
+				focusGeneralInput: true,
+			});
+		});
+	}
+
 	private async copyPendingCommentsExport(includeOneShotPrefix: boolean): Promise<void> {
 		if (!this.activeModal) {
 			await this.reviewStore.loadFromDisk();
@@ -1256,19 +1298,20 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private async jumpAndEditComment(comment: ReviewComment): Promise<void> {
-		await this.jumpToCommentTarget(comment);
+		if (!isGeneralComment(comment)) {
+			await this.jumpToCommentTarget(comment);
+		}
 		if (!this.commentModal || !this.currentNode || !this.activeModal) return;
 
-		const existingComments = this.reviewStore.getForSlide(
-			comment.notePath,
-			comment.sectionHeading
-		);
+		const existingComments = isGeneralComment(comment)
+			? this.reviewStore.getAll().filter(isGeneralComment)
+			: this.reviewStore.getForSlide(comment.notePath, comment.sectionHeading);
 
 		this.commentModal.open({
-			noteTitle: comment.noteTitle,
+			noteTitle: isGeneralComment(comment) ? "General" : comment.noteTitle,
 			notePath: comment.notePath,
-			sectionHeading: comment.sectionHeading,
-			scopeLabel: comment.scopeLabel || "Slide",
+			sectionHeading: isGeneralComment(comment) ? "General" : comment.sectionHeading,
+			scopeLabel: isGeneralComment(comment) ? "General" : comment.scopeLabel || "Slide",
 			hadDiff: comment.hadDiff,
 			existingComments,
 			startWithVoice: false,

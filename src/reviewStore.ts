@@ -20,6 +20,14 @@ import { CommentImageAttachment, deleteTempImageSafe } from "./commentImages";
 
 export type { CommentImageAttachment };
 
+export const GENERAL_NOTE_PATH = "__general__";
+
+export function isGeneralComment(
+	c: Pick<ReviewComment, "scopeType" | "notePath">
+): boolean {
+	return c.scopeType === "general" || c.notePath === GENERAL_NOTE_PATH;
+}
+
 export interface ReviewComment {
 	id: string;
 	projectRootPath: string;
@@ -83,6 +91,26 @@ function wrapCdata(raw: string): string {
 	const clean = raw.replace(/\r\n/g, "\n").trim();
 	const safe = clean.replace(/\]\]>/g, "]]]]><![CDATA[>");
 	return `<![CDATA[\n${safe}\n]]>`;
+}
+
+function appendCommentXmlLines(lines: string[], item: ReviewComment, indent: string): void {
+	const imgs = item.images || [];
+	if (imgs.length === 0) {
+		lines.push(`${indent}<comment>${escapeXmlText(item.commentText)}</comment>`);
+		return;
+	}
+	lines.push(`${indent}<comment>`);
+	if (item.commentText && item.commentText.trim().length > 0) {
+		lines.push(`${indent}  ${escapeXmlText(item.commentText)}`);
+	}
+	lines.push(`${indent}  <attachments>`);
+	for (const img of imgs) {
+		lines.push(
+			`${indent}    <image path="${escapeXmlAttr(img.path)}" mime="${escapeXmlAttr(img.mimeType)}" />`
+		);
+	}
+	lines.push(`${indent}  </attachments>`);
+	lines.push(`${indent}</comment>`);
 }
 
 export class ReviewStore {
@@ -390,8 +418,13 @@ export class ReviewStore {
 		if (list.length === 0) return "";
 
 		const basePath = this.getVaultBasePath();
+		const generalComments: ReviewComment[] = [];
 		const noteGroups = new Map<string, ReviewComment[]>();
 		for (const c of list) {
+			if (isGeneralComment(c)) {
+				generalComments.push(c);
+				continue;
+			}
 			const arr = noteGroups.get(c.notePath) || [];
 			arr.push(c);
 			noteGroups.set(c.notePath, arr);
@@ -406,6 +439,14 @@ export class ReviewStore {
 		lines.push(
 			`<slideflow_review count="${list.length}" notes="${noteGroups.size}">`
 		);
+
+		if (generalComments.length > 0) {
+			lines.push(`  <general_comments>`);
+			for (const item of generalComments) {
+				appendCommentXmlLines(lines, item, "    ");
+			}
+			lines.push(`  </general_comments>`);
+		}
 
 		for (const [notePath, noteItems] of noteGroups.entries()) {
 			const refPath = basePath
@@ -448,23 +489,7 @@ export class ReviewStore {
 
 				lines.push(`      <comments>`);
 				for (const item of groupItems) {
-					const imgs = item.images || [];
-					if (imgs.length === 0) {
-						lines.push(`        <comment>${escapeXmlText(item.commentText)}</comment>`);
-					} else {
-						lines.push(`        <comment>`);
-						if (item.commentText && item.commentText.trim().length > 0) {
-							lines.push(`          ${escapeXmlText(item.commentText)}`);
-						}
-						lines.push(`          <attachments>`);
-						for (const img of imgs) {
-							lines.push(
-								`            <image path="${escapeXmlAttr(img.path)}" mime="${escapeXmlAttr(img.mimeType)}" />`
-							);
-						}
-						lines.push(`          </attachments>`);
-						lines.push(`        </comment>`);
-					}
+					appendCommentXmlLines(lines, item, "        ");
 				}
 				lines.push(`      </comments>`);
 				lines.push(`    </target>`);

@@ -11,7 +11,7 @@
 import { hashText, SlideDiffInfo } from "./diffEngine";
 import { captureSelectionAnchorSnippet } from "./commentHighlighter";
 
-export type CommentScopeType = "selection" | "zoom" | "viewport";
+export type CommentScopeType = "selection" | "zoom" | "viewport" | "general";
 
 export interface AnchorRect {
 	left: number;
