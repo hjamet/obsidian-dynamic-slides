@@ -618,11 +618,6 @@ export default class SlideFlowPlugin extends Plugin {
 			void this.saveSettings();
 			window.setTimeout(() => this.slideCommentsRail?.positionRail(), 260);
 		};
-		this.activeModal.setBreadcrumb(file.basename);
-		this.activeModal.setReturnButton(null);
-		this.activeModal.onReturnClickCallback = () => {
-			void this.popDocumentStack();
-		};
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
 		};
@@ -1528,9 +1523,6 @@ export default class SlideFlowPlugin extends Plugin {
 					'start',
 					this.buildSlideRenderDecoration(this.currentNode)
 				);
-				const parentFrame = this.documentStack[this.documentStack.length - 1];
-				this.activeModal.setBreadcrumb(targetFile.basename, parentFrame?.fileTitle);
-				this.activeModal.setReturnButton(parentFrame ? parentFrame.fileTitle : null);
 				this.updateSlideCounter();
 				this.updateCockpitUI();
 				this.applyCurrentSlideHighlights();
@@ -1568,8 +1560,6 @@ export default class SlideFlowPlugin extends Plugin {
 				'start',
 				this.buildSlideRenderDecoration(this.currentNode)
 			);
-			const prevParent = this.documentStack[this.documentStack.length - 1];
-			this.activeModal.setReturnButton(prevParent ? prevParent.fileTitle : null);
 			if (this.documentStack.length > 0) {
 				this.activeModal.showSubNoteBanner(parentFrame.fileTitle, () => void this.popDocumentStack());
 			} else {

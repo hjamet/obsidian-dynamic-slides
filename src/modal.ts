@@ -50,14 +50,14 @@ export class PresentationModal extends Component {
 	private hoverToggleBtnEl: HTMLButtonElement;
 	private contentEl: HTMLElement;
 	private counterEl: HTMLElement;
-	private returnBtnEl: HTMLElement;
+	private leftHoverStackEl: HTMLElement;
+	private actionDockEl: HTMLElement;
 	private currentSlideComponent: Component | null = null;
 	private onCloseCallback?: () => void;
 	public onLinkClickCallback?: (href: string) => void;
 	public onExternalPdfLinkClickCallback?: (href: string) => void;
 	public onSectionClickCallback?: (nodeId: string) => void;
 	public onZoomChangeCallback?: (zoom: number) => void;
-	public onReturnClickCallback?: () => void;
 	public onChildHeadingClickCallback?: (nodeId: string) => void;
 	public onToggleDiffClickCallback?: () => void;
 	public onCommentTextClickCallback?: () => void;
@@ -123,22 +123,14 @@ export class PresentationModal extends Component {
 
 		this.overlayEl = document.body.createDiv({ cls: "dynamic-slides-overlay" });
 
-		this.returnBtnEl = this.overlayEl.createEl("button", {
-			cls: "dynamic-slides-return-btn"
-		});
-		this.returnBtnEl.setAttribute("aria-label", "Back to original note");
-		this.returnBtnEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			if (this.onReturnClickCallback) {
-				this.onReturnClickCallback();
-			}
-		});
-
-		// Bottom-left hover zone: Action Dock + TOC toggle (slides smoothly in from the left on hover)
+		// Bottom-left hover zone: Sub-note banner (when nested) + Action Dock + TOC toggle
+		// Slides smoothly in from the left only on mouse hover.
 		const bottomLeftZone = this.overlayEl.createDiv({ cls: "dynamic-slides-bottom-left-zone" });
-		const leftStackEl = bottomLeftZone.createDiv({ cls: "slideflow-left-hover-stack" });
+		this.leftHoverStackEl = bottomLeftZone.createDiv({ cls: "slideflow-left-hover-stack" });
 
-		const actionDockEl = leftStackEl.createDiv({ cls: "slideflow-action-dock" });
+		this.actionDockEl = this.leftHoverStackEl.createDiv({ cls: "slideflow-action-dock" });
+		const actionDockEl = this.actionDockEl;
+		const leftStackEl = this.leftHoverStackEl;
 
 		this.diffToggleBtnEl = actionDockEl.createEl("button", {
 			cls: "slideflow-dock-btn slideflow-diff-btn",
@@ -564,32 +556,21 @@ export class PresentationModal extends Component {
 		return this.overlayEl;
 	}
 
-	public setBreadcrumb(currentTitle: string, parentTitle?: string) {
-		this.setReturnButton(parentTitle || null);
-	}
-
-	public setReturnButton(parentTitle: string | null) {
-		if (parentTitle) {
-			this.returnBtnEl.setText(`↩ ${parentTitle}`);
-			this.returnBtnEl.addClass("is-visible");
-		} else {
-			this.returnBtnEl.removeClass("is-visible");
-			this.returnBtnEl.setText("");
-		}
-	}
-
 	public showSubNoteBanner(noteTitle: string, onReturn: () => void) {
 		this.hideSubNoteBanner();
 
-		this.subNoteBannerEl = this.overlayEl.createDiv({ cls: "dynamic-slides-subnote-banner" });
+		const bannerEl = document.createElement("div");
+		bannerEl.className = "dynamic-slides-subnote-banner";
+		this.leftHoverStackEl.insertBefore(bannerEl, this.actionDockEl);
+		this.subNoteBannerEl = bannerEl;
 
-		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-tag", text: "Sub-note" });
-		this.subNoteBannerEl.createDiv({ cls: "dynamic-slides-subnote-title", text: noteTitle });
-		const returnBtn = this.subNoteBannerEl.createEl("button", {
+		bannerEl.createDiv({ cls: "dynamic-slides-subnote-tag", text: "Sub-note" });
+		bannerEl.createDiv({ cls: "dynamic-slides-subnote-title", text: noteTitle });
+		const returnBtn = bannerEl.createEl("button", {
 			cls: "dynamic-slides-subnote-return-btn",
-			text: "Return (Esc)",
-			attr: { type: "button" }
+			attr: { type: "button", title: "Return to parent note (Esc)" }
 		});
+		returnBtn.innerHTML = `<span>Return</span> <strong>Esc</strong>`;
 
 		returnBtn.addEventListener("click", (evt) => {
 			evt.stopPropagation();
