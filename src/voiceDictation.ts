@@ -15,7 +15,7 @@ import { App } from "obsidian";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { spawn } from "child_process";
+import { ChildProcess, spawn } from "child_process";
 import { WHISPER_SERVER_SCRIPT, WHISPER_SERVER_VERSION } from "./whisperServerScript";
 
 export interface VoiceDictationConfig {
@@ -158,6 +158,8 @@ export class VoiceDictationService {
 	private spawnAttemptedAt: number = 0;
 	private cachedReadyPython: string | null = null;
 	private runtimeSetupPromise: Promise<string> | null = null;
+	private managedChild: ChildProcess | null = null;
+	private idleShutdownTimerId: number | null = null;
 
 	constructor(app: App, pluginDirRelative: string, getConfig: () => VoiceDictationConfig) {
 		this.app = app;
@@ -374,6 +376,17 @@ export class VoiceDictationService {
 		}
 	}
 
+	private resolveWindowlessPython(pyExe: string): string {
+		if (process.platform !== "win32") return pyExe;
+		if (/python\.exe$/i.test(pyExe)) {
+			const pyw = pyExe.replace(/python\.exe$/i, "pythonw.exe");
+			if (fs.existsSync(pyw)) {
+				return pyw;
+			}
+		}
+		return pyExe;
+	}
+
 	private async shutdownRunningServer(): Promise<void> {
 		try {
 			await fetch(`${WHISPER_BASE_URL}/shutdown`, { method: "POST" });
@@ -381,6 +394,36 @@ export class VoiceDictationService {
 		} catch {
 			// ignore if already stopped
 		}
+		if (this.managedChild && !this.managedChild.killed) {
+			try {
+				this.managedChild.kill();
+			} catch {
+				// ignore if already exited
+			}
+			this.managedChild = null;
+		}
+	}
+
+	public cancelIdleShutdown(): void {
+		if (this.idleShutdownTimerId !== null) {
+			window.clearTimeout(this.idleShutdownTimerId);
+			this.idleShutdownTimerId = null;
+		}
+	}
+
+	public scheduleIdleShutdown(delayMs: number = 120000): void {
+		this.cancelIdleShutdown();
+		this.idleShutdownTimerId = window.setTimeout(() => {
+			this.idleShutdownTimerId = null;
+			if (!this.recording) {
+				void this.shutdownRunningServer();
+			}
+		}, delayMs);
+	}
+
+	public shutdownNow(): void {
+		this.cancelIdleShutdown();
+		void this.shutdownRunningServer();
 	}
 
 	private async spawnLocalServer(
@@ -393,6 +436,7 @@ export class VoiceDictationService {
 
 		const scriptPath = this.ensureBundledServerScript();
 		const pyExe = await this.resolveOrBootstrapPython(onStatus);
+		const launchExe = this.resolveWindowlessPython(pyExe);
 
 		const args = [
 			scriptPath,
@@ -408,12 +452,20 @@ export class VoiceDictationService {
 			cfg.language || "fr",
 		];
 
-		const child = spawn(pyExe, args, {
-			detached: true,
+		// detached: false + windowsHide: true + pythonw.exe guarantees zero terminal window on Windows 11
+		const child = spawn(launchExe, args, {
+			detached: false,
+			shell: false,
 			stdio: "ignore",
 			windowsHide: true,
 		});
 		child.unref();
+		this.managedChild = child;
+		child.once("exit", () => {
+			if (this.managedChild === child) {
+				this.managedChild = null;
+			}
+		});
 	}
 
 	/**
@@ -421,6 +473,7 @@ export class VoiceDictationService {
 	 * If a server is already running with a different model/version, restarts it cleanly.
 	 */
 	public async prewarmServer(): Promise<void> {
+		this.cancelIdleShutdown();
 		const cfg = this.getConfig();
 		try {
 			const health = await this.fetchHealth();

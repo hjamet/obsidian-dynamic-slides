@@ -180,6 +180,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 	onunload() {
 		this.closePresentation();
+		this.voiceService?.shutdownNow();
 		console.log("Unloading SlideFlow plugin");
 	}
 
@@ -1706,6 +1707,7 @@ export default class SlideFlowPlugin extends Plugin {
 			this.tocComp.destroy();
 			this.tocComp = null;
 		}
+		this.voiceService?.scheduleIdleShutdown(120000);
 	}
 }
 

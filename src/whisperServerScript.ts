@@ -7,13 +7,14 @@
  * automatically on first use — zero path settings required!
  */
 
-export const WHISPER_SERVER_VERSION = "2.3.0";
+export const WHISPER_SERVER_VERSION = "2.7.3";
 
 export const WHISPER_SERVER_SCRIPT = `#!/usr/bin/env python3
 # SLIDEFLOW_WHISPER_VERSION=${WHISPER_SERVER_VERSION}
 """
 SlideFlow managed local Faster-Whisper HTTP dictation server (127.0.0.1 only).
 - Zero ffmpeg/pyaudio dependency (stdlib wave + numpy)
+- Windowless pythonw.exe safe on Windows (redirects null stdout/stderr to temp log)
 - Auto-detects CUDA GPU (float16) vs CPU (int8)
 - Auto-downloads requested Whisper model from HuggingFace if missing from local cache
 - Auto-shuts down after idle timeout (default 1800s) to free VRAM
@@ -29,6 +30,7 @@ import logging
 import os
 import site
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -262,7 +264,27 @@ def is_server_already_running(host: str, port: int) -> bool:
         return False
 
 
+def ensure_windowless_streams() -> Optional[Path]:
+    """Under pythonw.exe on Windows, sys.stdout/sys.stderr are None; bind them safely."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    log_path = Path(tempfile.gettempdir()) / "slideflow_whisper.log"
+    try:
+        log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        log_fp = open(os.devnull, "w", encoding="utf-8")
+        log_path = None
+    if sys.stdout is None:
+        sys.stdout = log_fp
+    if sys.stderr is None:
+        sys.stderr = log_fp
+    return log_path
+
+
 def main() -> None:
+    log_path = ensure_windowless_streams()
+
     parser = argparse.ArgumentParser(description="SlideFlow managed local Faster-Whisper server")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -273,11 +295,15 @@ def main() -> None:
     parser.add_argument("--idle-timeout", type=int, default=1800)
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    log_kwargs = {
+        "level": logging.INFO,
+        "format": "%(asctime)s [%(levelname)s] %(message)s",
+        "datefmt": "%H:%M:%S",
+    }
+    if log_path is not None:
+        log_kwargs["filename"] = str(log_path)
+        log_kwargs["encoding"] = "utf-8"
+    logging.basicConfig(**log_kwargs)
 
     if is_server_already_running(args.host, args.port):
         logger.info("Whisper dictation server already running on http://%s:%d.", args.host, args.port)
