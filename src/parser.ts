@@ -29,12 +29,17 @@ export function buildChildHeadingsHtml(
 		.map((c) => {
 			if (c.isVirtualDeleted) {
 				const inner = renderChildHeadingInnerHtml(c.title, false);
-				return `<div class="dynamic-slides-child-heading level-${c.level} is-deleted-child-heading" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}"><del class="dv-del">${inner}</del></div>`;
+				return `<div class="dynamic-slides-child-heading level-${c.level} is-deleted-child-heading" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}" title="Deleted subsection — click or press → to inspect and validate"><del class="dv-del">${inner}</del></div>`;
 			}
 			const inner = renderChildHeadingInnerHtml(c.title, Boolean(c.isPureLinkLeaf));
 			return `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}">${inner}</div>`;
 		})
 		.join("\n");
+}
+
+export function buildInlineDeletedHeadingHtml(item: { title: string; level: number }): string {
+	const inner = renderChildHeadingInnerHtml(item.title, false);
+	return `<div class="dynamic-slides-child-heading level-${item.level} is-deleted-child-heading is-inline-deleted-heading" title="Deleted title-only subsection — press Ctrl+Enter to validate"><del class="dv-del">${inner}</del></div>`;
 }
 
 export function stripFrontmatterWithOffset(markdown: string): { text: string; strippedLines: number } {

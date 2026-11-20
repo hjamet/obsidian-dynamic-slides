@@ -88,14 +88,13 @@ export class BaselinesStore {
 	}
 
 	/**
-	 * Marks one slide as seen (> 1s consultation) for future openings.
+	 * Marks one or more slide keys as seen for future openings in a single atomic write.
 	 * If ALL dirty slides of this note have now been seen at their current hashes,
 	 * purges the entire note entry from `_agents/unread_baselines.json` (0 byte).
 	 */
-	public markSlideSeen(
+	public markSlidesSeen(
 		notePath: string,
-		slideKey: string,
-		slideOwnMarkdown: string,
+		items: Array<{ slideKey: string; text: string }>,
 		allDirtySlideKeys: string[],
 		currentHashesByKey: Record<string, string>,
 		deletedSectionsHash?: string | null
@@ -111,18 +110,21 @@ export class BaselinesStore {
 				entry.seenSlides = {};
 			}
 
-			const currentHash = currentHashesByKey[slideKey] || hashText(slideOwnMarkdown);
-			entry.seenSlides[slideKey] = {
-				hash: currentHash,
-				text: slideOwnMarkdown,
-				seenAt: new Date().toISOString(),
-			};
+			const nowIso = new Date().toISOString();
+			for (const item of items) {
+				const currentHash = currentHashesByKey[item.slideKey] || hashText(item.text);
+				entry.seenSlides[item.slideKey] = {
+					hash: currentHash,
+					text: item.text,
+					seenAt: nowIso,
+				};
+			}
 
 			if (deletedSectionsHash) {
 				entry.seenSlides["__deleted__"] = {
 					hash: deletedSectionsHash,
 					text: "",
-					seenAt: new Date().toISOString(),
+					seenAt: nowIso,
 				};
 			}
 
@@ -145,6 +147,26 @@ export class BaselinesStore {
 		const chained = this.writeChain.then(run, run);
 		this.writeChain = chained.then(() => undefined, () => undefined);
 		return chained;
+	}
+
+	/**
+	 * Marks one slide as seen for future openings.
+	 */
+	public markSlideSeen(
+		notePath: string,
+		slideKey: string,
+		slideOwnMarkdown: string,
+		allDirtySlideKeys: string[],
+		currentHashesByKey: Record<string, string>,
+		deletedSectionsHash?: string | null
+	): Promise<{ purgedNote: boolean }> {
+		return this.markSlidesSeen(
+			notePath,
+			[{ slideKey, text: slideOwnMarkdown }],
+			allDirtySlideKeys,
+			currentHashesByKey,
+			deletedSectionsHash
+		);
 	}
 
 	public markEntireNoteRead(notePath: string): Promise<boolean> {

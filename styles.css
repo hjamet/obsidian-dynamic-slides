@@ -2246,6 +2246,10 @@ mark.slideflow-comment-mark.is-failed {
 	appearance: none;
 	-webkit-appearance: none;
 	flex: 1 1 100%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
 	background: #15803d !important;
 	color: #ffffff !important;
 	border: none !important;
@@ -2260,6 +2264,7 @@ mark.slideflow-comment-mark.is-failed {
 
 .slideflow-drawer-primary-btn strong {
 	color: #ffffff !important;
+	opacity: 0.92;
 }
 
 .slideflow-drawer-primary-btn:hover:not(:disabled) {
@@ -2717,6 +2722,15 @@ mark.slideflow-comment-mark.is-failed {
 	color: var(--sf-diff-del-fg, #dc2626);
 	padding: 2px 6px;
 	border-radius: 4px;
+}
+
+.dynamic-slides-child-heading.is-inline-deleted-heading {
+	cursor: default;
+}
+
+.dynamic-slides-child-heading.is-inline-deleted-heading:hover {
+	background-color: transparent;
+	transform: none;
 }
 
 .dynamic-slides-toc-item.is-deleted-section .dynamic-slides-toc-title {

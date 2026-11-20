@@ -35,6 +35,8 @@ export interface DeletedSectionItem {
 	displayTitle: string;
 	level: number;
 	parentNormTitle: string | null;
+	prevSiblingNormTitle: string | null;
+	isTitleOnly: boolean;
 	diffMarkdown: string;
 	rawOldMarkdown: string;
 	hash: string;
@@ -48,6 +50,7 @@ export interface NoteDiffContext {
 	currentHashesByKey: Record<string, string>;
 	descendantDirtyNodeIds: Set<string>;
 	deletedSections: DeletedSectionItem[];
+	inlineDeletedByParentId: Map<string, DeletedSectionItem[]>;
 	totalDirtySlides: number;
 }
 
@@ -57,6 +60,7 @@ interface FlatSectionSlice {
 	title: string;
 	normTitle: string;
 	parentNormTitle: string | null;
+	prevSiblingNormTitle: string | null;
 	ownLines: string[];
 	ownMarkdown: string;
 }
@@ -116,12 +120,14 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 	const clean = stripFrontmatter(markdown);
 	const lines = clean.split("\n");
 	const sections: FlatSectionSlice[] = [];
-	const headingStack: Array<{ level: number; normTitle: string }> = [];
+	const headingStack: Array<{ level: number; normTitle: string; lastChildNormTitle: string | null }> = [];
+	let topLevelLastNormTitle: string | null = null;
 
 	let currHeading = "";
 	let currLevel = 0;
 	let currTitle = "Preamble";
 	let currParentNormTitle: string | null = null;
+	let currPrevSiblingNormTitle: string | null = null;
 	let currLines: string[] = [];
 	let inFenceChar = "";
 	let inFenceLen = 0;
@@ -137,6 +143,7 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 				title: currTitle,
 				normTitle: normalizeTitle(currTitle),
 				parentNormTitle: currParentNormTitle,
+				prevSiblingNormTitle: currPrevSiblingNormTitle,
 				ownLines: currLines,
 				ownMarkdown,
 			});
@@ -167,12 +174,20 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 			pushCurrent();
 			currLevel = mHead[1].length;
 			currTitle = mHead[2].trim();
+			const currNormTitle = normalizeTitle(currTitle);
 			currHeading = `${mHead[1]} ${currTitle}`;
 			while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= currLevel) {
 				headingStack.pop();
 			}
-			currParentNormTitle = headingStack.length > 0 ? headingStack[headingStack.length - 1].normTitle : null;
-			headingStack.push({ level: currLevel, normTitle: normalizeTitle(currTitle) });
+			const parentFrame = headingStack.length > 0 ? headingStack[headingStack.length - 1] : null;
+			currParentNormTitle = parentFrame ? parentFrame.normTitle : null;
+			currPrevSiblingNormTitle = parentFrame ? parentFrame.lastChildNormTitle : topLevelLastNormTitle;
+			if (parentFrame) {
+				parentFrame.lastChildNormTitle = currNormTitle;
+			} else {
+				topLevelLastNormTitle = currNormTitle;
+			}
+			headingStack.push({ level: currLevel, normTitle: currNormTitle, lastChildNormTitle: null });
 			currLines = [];
 		} else {
 			currLines.push(line);
@@ -807,10 +822,19 @@ export function buildNoteDiffContext(
 		}
 	}
 
-	// Collect any truly deleted baseline sections as standalone deleted-section items
-	// (NEVER dumped inside a parent slide that hides subsection content!)
+	// Collect any truly deleted baseline sections:
+	// - Title-only deleted subsections (no body other than whitespace/horizontal rules and no deleted children)
+	//   stay inline on their parent slide and validate immediately with the parent's Ctrl+Enter.
+	// - Deleted sections with body content become standalone virtual slides placed in exact DFS tree order
+	//   (NEVER dumped inside a parent slide and NEVER stranded at the end of the presentation!).
 	const deletedSections: DeletedSectionItem[] = [];
 	const delKeyOcc = new Map<string, number>();
+	const unseenDeletedCandidates: Array<{
+		idx: number;
+		slice: FlatSectionSlice;
+		delSlideKey: string;
+		delHash: string;
+	}> = [];
 
 	for (let idx = 0; idx < oldSlices.length; idx++) {
 		if (usedOld.has(idx)) continue;
@@ -829,6 +853,23 @@ export function buildNoteDiffContext(
 			continue;
 		}
 
+		unseenDeletedCandidates.push({ idx, slice: o, delSlideKey, delHash });
+	}
+
+	for (const cand of unseenDeletedCandidates) {
+		const { idx, slice: o, delSlideKey, delHash } = cand;
+		const hasDeletedChild = unseenDeletedCandidates.some(
+			(other) =>
+				other.idx !== idx &&
+				other.slice.parentNormTitle === o.normTitle &&
+				other.slice.level > o.level
+		);
+		const bodyOnly = o.ownLines
+			.join("\n")
+			.replace(/^[\s\-*_]+$/gm, "")
+			.trim();
+		const isTitleOnly = bodyOnly.length === 0 && !hasDeletedChild;
+
 		const id = `deleted-section-${idx}`;
 		const diffMarkdown = buildDeletedSectionDiffMarkdown(o);
 		const displayTitle = stripHeadingLinksToPlainText(o.title) || o.title;
@@ -840,21 +881,25 @@ export function buildNoteDiffContext(
 			displayTitle,
 			level: o.level || 2,
 			parentNormTitle: o.parentNormTitle,
+			prevSiblingNormTitle: o.prevSiblingNormTitle,
+			isTitleOnly,
 			diffMarkdown,
 			rawOldMarkdown: o.ownMarkdown,
 			hash: delHash,
 		});
 
-		slideDiffs.set(id, {
-			slideKey: delSlideKey,
-			hasChanges: true,
-			diffMarkdown,
-			rawNewMarkdown: "",
-			rawOldMarkdown: o.ownMarkdown,
-			addedCount: 0,
-			removedCount: Math.max(1, splitSectionIntoBlocks(o.ownLines).length),
-			currentHash: delHash,
-		});
+		if (!isTitleOnly) {
+			slideDiffs.set(id, {
+				slideKey: delSlideKey,
+				hasChanges: true,
+				diffMarkdown,
+				rawNewMarkdown: "",
+				rawOldMarkdown: o.ownMarkdown,
+				addedCount: 0,
+				removedCount: Math.max(1, splitSectionIntoBlocks(o.ownLines).length),
+				currentHash: delHash,
+			});
+		}
 		dirtySlideKeys.push(delSlideKey);
 		currentHashesByKey[delSlideKey] = delHash;
 	}
@@ -867,6 +912,7 @@ export function buildNoteDiffContext(
 		currentHashesByKey,
 		descendantDirtyNodeIds,
 		deletedSections,
+		inlineDeletedByParentId: new Map<string, DeletedSectionItem[]>(),
 		totalDirtySlides: dirtySlideKeys.length,
 	};
 }

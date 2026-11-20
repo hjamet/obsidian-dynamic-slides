@@ -138,7 +138,7 @@ export class ReviewDrawer {
 				title: "Add general comment (Enter)",
 			},
 		});
-		this.generalAddBtnEl.innerHTML = `Add <strong>↵</strong>`;
+		this.generalAddBtnEl.innerHTML = `<span>Add</span> <strong>↵</strong>`;
 		this.generalAddBtnEl.disabled = true;
 		this.generalAddBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
@@ -285,11 +285,11 @@ export class ReviewDrawer {
 			if (this.directCliEnabled) {
 				const hasFailed = this.comments.some((c) => Boolean(c.failedAt || c.failedReason));
 				this.primaryBtnEl.innerHTML = hasFailed
-					? `Send / Retry with ${this.cliDisplayName} <strong>Ctrl+↵</strong>`
-					: `Send to ${this.cliDisplayName} <strong>Ctrl+↵</strong>`;
+					? `<span>Send / Retry with ${this.cliDisplayName}</span> <strong>Ctrl+↵</strong>`
+					: `<span>Send to ${this.cliDisplayName}</span> <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
 			} else {
-				this.primaryBtnEl.innerHTML = `Copy /one-shot (XML) <strong>Ctrl+↵</strong>`;
+				this.primaryBtnEl.innerHTML = `<span>Copy /one-shot (XML)</span> <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
 			}
 		}
