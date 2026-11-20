@@ -558,6 +558,7 @@ export class PresentationModal extends Component {
 
 	public showSubNoteBanner(noteTitle: string, onReturn: () => void) {
 		this.hideSubNoteBanner();
+		this.overlayEl.addClass("is-subnote");
 
 		const bannerEl = document.createElement("div");
 		bannerEl.className = "dynamic-slides-subnote-banner";
@@ -579,6 +580,7 @@ export class PresentationModal extends Component {
 	}
 
 	public hideSubNoteBanner() {
+		this.overlayEl.removeClass("is-subnote");
 		if (this.subNoteBannerEl) {
 			this.subNoteBannerEl.remove();
 			this.subNoteBannerEl = null;

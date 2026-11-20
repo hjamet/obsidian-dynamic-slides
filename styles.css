@@ -59,6 +59,20 @@ body.is-dynamic-slides-active {
 	--dynamic-slides-zoom: 1;
 }
 
+/* Subtle left orange bar along the TOC / left edge when inside a sub-note */
+.dynamic-slides-overlay.is-subnote::before {
+	content: "";
+	position: fixed;
+	top: 0;
+	left: 0;
+	bottom: 0;
+	width: 4px;
+	background: #f97316;
+	box-shadow: 0 0 10px rgba(249, 115, 22, 0.35);
+	pointer-events: none;
+	z-index: 10020;
+}
+
 /* Bottom-left Hover Zone: Action Dock + TOC Toggle (slides smoothly from left only on hover) */
 .dynamic-slides-bottom-left-zone {
 	position: fixed;
