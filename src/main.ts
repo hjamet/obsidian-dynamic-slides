@@ -255,11 +255,15 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 
 			if (del.isTitleOnly) {
-				const list = ctx.inlineDeletedByParentId.get(parentNode.id) || [];
+				// Never attach an inline deleted heading to rootNode (level 0 / "0. Full document"),
+				// which is skipped at presentation start and would force backwards jumps to Slide 0.
+				const inlineHost =
+					parentNode.level === 0 && flatNodes.length > 1 ? flatNodes[1] : parentNode;
+				const list = ctx.inlineDeletedByParentId.get(inlineHost.id) || [];
 				list.push(del);
-				ctx.inlineDeletedByParentId.set(parentNode.id, list);
+				ctx.inlineDeletedByParentId.set(inlineHost.id, list);
 
-				let anc: SectionNode | null = parentNode.parent;
+				let anc: SectionNode | null = inlineHost.parent;
 				while (anc) {
 					ctx.descendantDirtyNodeIds.add(anc.id);
 					anc = anc.parent;
@@ -328,7 +332,8 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private hasNodeUnreadDiff(node: SectionNode | null): boolean {
 		if (!this.activeDiffContext || !node) return false;
-		if (this.activeDiffContext.slideDiffs.get(node.id)?.hasChanges) return true;
+		const info = this.activeDiffContext.slideDiffs.get(node.id);
+		if (info?.hasChanges && !info.validatedByComment) return true;
 		const inlineDels = this.activeDiffContext.inlineDeletedByParentId.get(node.id);
 		return Boolean(inlineDels && inlineDels.length > 0);
 	}
@@ -337,12 +342,179 @@ export default class SlideFlowPlugin extends Plugin {
 		const set = new Set<string>();
 		if (!this.activeDiffContext) return set;
 		for (const [nodeId, info] of this.activeDiffContext.slideDiffs.entries()) {
-			if (info.hasChanges) set.add(nodeId);
+			if (info.hasChanges && !info.validatedByComment) set.add(nodeId);
 		}
 		for (const [parentId, items] of this.activeDiffContext.inlineDeletedByParentId.entries()) {
 			if (items.length > 0) set.add(parentId);
 		}
 		return set;
+	}
+
+	private recomputeDescendantDirtyNodeIds(ctx: NoteDiffContext): void {
+		ctx.descendantDirtyNodeIds = new Set<string>();
+		for (const n of this.flatNodes) {
+			if (this.hasNodeUnreadDiff(n)) {
+				let p = n.parent;
+				while (p) {
+					ctx.descendantDirtyNodeIds.add(p.id);
+					p = p.parent;
+				}
+			}
+		}
+	}
+
+	/**
+	 * Removes a validated virtual deleted slide from the tree & flatNodes while reparenting
+	 * any remaining children (e.g. deleted H3s under a deleted H2) so no zombie parent exists.
+	 * Returns the forward next slide in presentation order (never jumps backwards to Slide 1).
+	 */
+	private removeVirtualDeletedNode(node: SectionNode): {
+		nextNode: SectionNode | null;
+		movedForward: boolean;
+	} {
+		const removedIdx = this.flatNodes.findIndex((n) => n.id === node.id);
+		const parent = node.parent;
+
+		if (parent) {
+			const childIdx = parent.children.findIndex((c) => c.id === node.id);
+			const promotedChildren = node.children.filter((c) => c.id !== node.id);
+			for (const ch of promotedChildren) {
+				ch.parent = parent;
+			}
+			if (childIdx !== -1) {
+				parent.children.splice(childIdx, 1, ...promotedChildren);
+			} else {
+				parent.children = parent.children.filter((c) => c.id !== node.id);
+				parent.children.push(...promotedChildren);
+			}
+			parent.childHeadingsHtml = buildChildHeadingsHtml(parent.children, false);
+			parent.contentMarkdown =
+				parent.children.length > 0
+					? `${parent.rawOwnMarkdown}\n${parent.childHeadingsHtml}`
+					: parent.rawOwnMarkdown;
+		}
+
+		this.flatNodes = this.flatNodes.filter((n) => n.id !== node.id);
+		this.flatNodes.forEach((n, idx) => {
+			n.flatIndex = idx;
+		});
+
+		const minValidIdx = this.flatNodes.length > 1 ? 1 : 0;
+		if (removedIdx >= minValidIdx && removedIdx < this.flatNodes.length) {
+			return { nextNode: this.flatNodes[removedIdx], movedForward: true };
+		}
+		if (this.flatNodes.length > minValidIdx) {
+			return { nextNode: this.flatNodes[this.flatNodes.length - 1], movedForward: false };
+		}
+		return { nextNode: this.flatNodes[0] || null, movedForward: false };
+	}
+
+	/**
+	 * When leaving a slide that was already validated by a comment (where we kept the diff
+	 * visually rendered only while still on that slide), finalize clearing its visual diff.
+	 */
+	private finalizeCommentValidatedNode(prevNode: SectionNode): void {
+		const ctx = this.activeDiffContext;
+		if (!ctx) return;
+
+		const slideDiff = ctx.slideDiffs.get(prevNode.id);
+		if (!slideDiff || !slideDiff.validatedByComment) return;
+
+		slideDiff.hasChanges = false;
+		slideDiff.validatedByComment = false;
+		slideDiff.diffMarkdown = slideDiff.rawNewMarkdown;
+		slideDiff.rawOldMarkdown = slideDiff.rawNewMarkdown;
+		slideDiff.addedCount = 0;
+		slideDiff.removedCount = 0;
+
+		if (prevNode.isVirtualDeleted) {
+			ctx.deletedSections = ctx.deletedSections.filter((d) => d.id !== prevNode.id);
+			this.removeVirtualDeletedNode(prevNode);
+		}
+
+		this.recomputeDescendantDirtyNodeIds(ctx);
+		if (ctx.totalDirtySlides === 0 && ctx.deletedSections.length === 0) {
+			this.activeDiffContext = null;
+			this.diffEnabled = false;
+		}
+	}
+
+	/**
+	 * Syncs a restored parent DocumentStack frame's diffContext against the freshly reloaded
+	 * `_agents/unread_baselines.json` so already-validated diffs are never resurrected on pop.
+	 */
+	private reconcileActiveDiffWithBaselines(): void {
+		const ctx = this.activeDiffContext;
+		if (!ctx) return;
+
+		const freshEntry = this.baselinesStore.getNoteEntry(this.activeSourcePath);
+		if (!freshEntry) {
+			const virtualNodes = this.flatNodes.filter((n) => n.isVirtualDeleted);
+			for (const vn of virtualNodes) {
+				const res = this.removeVirtualDeletedNode(vn);
+				if (this.currentNode?.id === vn.id && res.nextNode) {
+					this.currentNode = res.nextNode;
+				}
+			}
+			this.activeDiffContext = null;
+			this.diffEnabled = false;
+			return;
+		}
+
+		const seen = freshEntry.seenSlides || {};
+		const newlyClearedKeys = new Set<string>();
+		const clearedDeletedIds = new Set<string>();
+
+		for (const n of [...this.flatNodes]) {
+			const info = ctx.slideDiffs.get(n.id);
+			if (info && info.hasChanges) {
+				const rec = seen[info.slideKey];
+				if (rec && rec.hash === info.currentHash) {
+					info.hasChanges = false;
+					info.validatedByComment = false;
+					info.diffMarkdown = info.rawNewMarkdown;
+					info.rawOldMarkdown = info.rawNewMarkdown;
+					info.addedCount = 0;
+					info.removedCount = 0;
+					newlyClearedKeys.add(info.slideKey);
+					if (n.isVirtualDeleted) {
+						clearedDeletedIds.add(n.id);
+						const res = this.removeVirtualDeletedNode(n);
+						if (this.currentNode?.id === n.id && res.nextNode) {
+							this.currentNode = res.nextNode;
+						}
+					}
+				}
+			}
+		}
+
+		for (const [parentId, items] of Array.from(ctx.inlineDeletedByParentId.entries())) {
+			const remaining = items.filter((d) => {
+				const rec = seen[d.slideKey];
+				if (rec && rec.hash === d.hash) {
+					newlyClearedKeys.add(d.slideKey);
+					clearedDeletedIds.add(d.id);
+					return false;
+				}
+				return true;
+			});
+			if (remaining.length === 0) {
+				ctx.inlineDeletedByParentId.delete(parentId);
+			} else {
+				ctx.inlineDeletedByParentId.set(parentId, remaining);
+			}
+		}
+
+		if (newlyClearedKeys.size > 0 || clearedDeletedIds.size > 0) {
+			ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => !newlyClearedKeys.has(k));
+			ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
+			ctx.deletedSections = ctx.deletedSections.filter((d) => !clearedDeletedIds.has(d.id));
+			this.recomputeDescendantDirtyNodeIds(ctx);
+			if (ctx.totalDirtySlides === 0 && ctx.deletedSections.length === 0) {
+				this.activeDiffContext = null;
+				this.diffEnabled = false;
+			}
+		}
 	}
 
 	private getCommentCountByHeadingForActiveNote(): Map<string, number> {
@@ -563,7 +735,10 @@ export default class SlideFlowPlugin extends Plugin {
 		const inlineDels = ctx.inlineDeletedByParentId.get(node.id) || [];
 		const itemsToMark: Array<{ slideKey: string; text: string }> = [];
 
-		if (slideDiff && slideDiff.hasChanges) {
+		const shouldMarkSlide = Boolean(
+			slideDiff && slideDiff.hasChanges && (clearVisuallyNow || !slideDiff.validatedByComment)
+		);
+		if (shouldMarkSlide && slideDiff) {
 			itemsToMark.push({
 				slideKey: slideDiff.slideKey,
 				text: slideDiff.rawNewMarkdown,
@@ -578,9 +753,10 @@ export default class SlideFlowPlugin extends Plugin {
 
 		if (itemsToMark.length === 0) {
 			if (clearVisuallyNow && this.diffEnabled) {
-				const firstVirtualDelChild = node.children.find(
-					(c) => c.isVirtualDeleted && Boolean(ctx.slideDiffs.get(c.id)?.hasChanges)
-				);
+				const firstVirtualDelChild = node.children.find((c) => {
+					const ci = ctx.slideDiffs.get(c.id);
+					return c.isVirtualDeleted && Boolean(ci?.hasChanges && !ci.validatedByComment);
+				});
 				if (firstVirtualDelChild) {
 					await this.goToNode(firstVirtualDelChild, "zoom-in", "start");
 					return "jumped_deleted_child";
@@ -597,60 +773,39 @@ export default class SlideFlowPlugin extends Plugin {
 			null
 		);
 
-		if (clearVisuallyNow) {
-			const markedKeys = new Set(itemsToMark.map((i) => i.slideKey));
-			const markedInlineIds = new Set(inlineDels.map((d) => d.id));
+		const markedKeys = new Set(itemsToMark.map((i) => i.slideKey));
+		const markedInlineIds = new Set(inlineDels.map((d) => d.id));
 
+		// Always update logical unread tracking immediately (even on comment validation!)
+		// so TOC dots clear and `N` NEVER wraps backwards to an already-seen/commented slide.
+		if (inlineDels.length > 0) {
+			ctx.inlineDeletedByParentId.delete(node.id);
+		}
+		ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => !markedKeys.has(k));
+		ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
+		ctx.deletedSections = ctx.deletedSections.filter(
+			(d) => !markedInlineIds.has(d.id) && (!clearVisuallyNow || d.id !== node.id)
+		);
+
+		if (clearVisuallyNow) {
 			if (slideDiff && slideDiff.hasChanges) {
 				slideDiff.hasChanges = false;
+				slideDiff.validatedByComment = false;
 				slideDiff.diffMarkdown = slideDiff.rawNewMarkdown;
 				slideDiff.rawOldMarkdown = slideDiff.rawNewMarkdown;
 				slideDiff.addedCount = 0;
 				slideDiff.removedCount = 0;
 			}
 
-			if (inlineDels.length > 0) {
-				ctx.inlineDeletedByParentId.delete(node.id);
-			}
-
-			ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => !markedKeys.has(k));
-			ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
-			ctx.deletedSections = ctx.deletedSections.filter(
-				(d) => d.id !== node.id && !markedInlineIds.has(d.id)
-			);
-
 			let jumpTargetAfterDelete: SectionNode | null = null;
+			let jumpDirection: "next" | "prev" = "next";
 			if (node.isVirtualDeleted) {
-				const parent = node.parent;
-				if (parent) {
-					parent.children = parent.children.filter((c) => c.id !== node.id);
-					parent.childHeadingsHtml = buildChildHeadingsHtml(parent.children, false);
-					parent.contentMarkdown =
-						parent.children.length > 0
-							? `${parent.rawOwnMarkdown}\n${parent.childHeadingsHtml}`
-							: parent.rawOwnMarkdown;
-				}
-				this.flatNodes = this.flatNodes.filter((n) => n.id !== node.id);
-				this.flatNodes.forEach((n, idx) => {
-					n.flatIndex = idx;
-				});
-				jumpTargetAfterDelete =
-					parent ||
-					this.flatNodes.find((n) => !n.isVirtualDeleted && n.level > 0) ||
-					this.flatNodes[0] ||
-					null;
+				const removed = this.removeVirtualDeletedNode(node);
+				jumpTargetAfterDelete = removed.nextNode;
+				jumpDirection = removed.movedForward ? "next" : "prev";
 			}
 
-			ctx.descendantDirtyNodeIds = new Set<string>();
-			for (const n of this.flatNodes) {
-				if (this.hasNodeUnreadDiff(n)) {
-					let p = n.parent;
-					while (p) {
-						ctx.descendantDirtyNodeIds.add(p.id);
-						p = p.parent;
-					}
-				}
-			}
+			this.recomputeDescendantDirtyNodeIds(ctx);
 
 			if (ctx.totalDirtySlides === 0 && ctx.deletedSections.length === 0) {
 				this.activeDiffContext = null;
@@ -658,7 +813,7 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 
 			if (jumpTargetAfterDelete) {
-				await this.goToNode(jumpTargetAfterDelete, "zoom-out", "start");
+				await this.goToNode(jumpTargetAfterDelete, jumpDirection, "start");
 			} else if (this.activeModal) {
 				await this.activeModal.refreshSlideInPlace(
 					node,
@@ -669,6 +824,13 @@ export default class SlideFlowPlugin extends Plugin {
 			} else {
 				this.refreshAllActiveUI();
 			}
+		} else {
+			// Validated via comment: keep visual diff on the current slide only until leaving it,
+			// so the user can still add a second comment on the same diff without losing context.
+			if (slideDiff && slideDiff.hasChanges) {
+				slideDiff.validatedByComment = true;
+			}
+			this.recomputeDescendantDirtyNodeIds(ctx);
 		}
 
 		return "validated";
@@ -1064,23 +1226,31 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private jumpToNextDiffSlide() {
-		if (!this.activeDiffContext || this.activeDiffContext.totalDirtySlides === 0) {
-			new Notice("No modified slide in this note.");
+		const dirtyIds = this.getDirtyNodeIdSet();
+		if (!this.activeDiffContext || dirtyIds.size === 0) {
+			new Notice("All diffs in this note are already validated.");
 			return;
 		}
-		const dirtyIds = this.getDirtyNodeIdSet();
 		const currIdx = this.flatNodes.findIndex((n) => n.id === this.currentNode?.id);
+		const skipRoot = this.flatNodes.length > 1;
+
 		for (let offset = 1; offset <= this.flatNodes.length; offset++) {
 			const idx = (currIdx + offset) % this.flatNodes.length;
 			const cand = this.flatNodes[idx];
+			if (skipRoot && cand.level === 0) continue;
 			if (dirtyIds.has(cand.id)) {
 				if (cand.isVirtualDeleted && !this.diffEnabled) {
 					this.diffEnabled = true;
 				}
-				void this.goToNode(cand, 'jump', 'start');
+				const wrapped = currIdx >= 0 && idx < currIdx;
+				void this.goToNode(cand, "jump", "start");
+				if (wrapped) {
+					new Notice("Wrapped to an earlier unvalidated diff.");
+				}
 				return;
 			}
 		}
+		new Notice("All diffs in this note are already validated.");
 	}
 
 	private openCommentModal(startWithVoice: boolean, explicitRange?: Range | null) {
@@ -1206,7 +1376,7 @@ export default class SlideFlowPlugin extends Plugin {
 				images: images && images.length > 0 ? images : undefined,
 			});
 
-			void this.markCurrentSlideDiffRead(false);
+			await this.markCurrentSlideDiffRead(false);
 
 			const imgSuffix = images && images.length > 0 ? ` + ${images.length} img` : "";
 			const baseText = commentText || "(Image attached)";
@@ -1612,6 +1782,7 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 
 			if (this.currentNode && this.rootNode) {
+				this.finalizeCommentValidatedNode(this.currentNode);
 				this.documentStack.push({
 					filePath: this.activeSourcePath,
 					fileTitle: activeFileBasename,
@@ -1687,6 +1858,7 @@ export default class SlideFlowPlugin extends Plugin {
 		this.diffEnabled = parentFrame.diffEnabled;
 
 		await this.baselinesStore.reload().catch(() => undefined);
+		this.reconcileActiveDiffWithBaselines();
 
 		if (this.activeModal && this.currentNode) {
 			this.activeModal.closeMediaZoom(false);
@@ -1718,7 +1890,11 @@ export default class SlideFlowPlugin extends Plugin {
 		overrideDirection?: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump',
 		enterFrom: 'start' | 'end' = 'start'
 	): Promise<void> {
-		const direction = overrideDirection ?? computeDirection(this.currentNode, node);
+		const prevNode = this.currentNode;
+		const direction = overrideDirection ?? computeDirection(prevNode, node);
+		if (prevNode && prevNode.id !== node.id) {
+			this.finalizeCommentValidatedNode(prevNode);
+		}
 		this.currentNode = node;
 		if (this.activeModal && this.currentNode) {
 			await this.activeModal.updateSlide(

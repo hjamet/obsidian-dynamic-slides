@@ -20,6 +20,7 @@ export interface SeenSlideRecord {
 export interface SlideDiffInfo {
 	slideKey: string;
 	hasChanges: boolean;
+	validatedByComment?: boolean;
 	diffMarkdown: string;
 	rawNewMarkdown: string;
 	rawOldMarkdown: string | null;
