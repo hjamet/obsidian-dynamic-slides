@@ -515,3 +515,190 @@ export function setGreenSelectionHighlight(range: Range | null): void {
 		cssAny.highlights.delete("slideflow-selection");
 	}
 }
+
+const HOVER_EXCLUDED_SELECTOR = [
+	".dynamic-slides-child-heading",
+	".slideflow-deleted-sections-title",
+	".copy-code-button",
+	".slideflow-selection-toolbar",
+	".slideflow-comments-rail",
+	".slideflow-hover-add-btn",
+].join(", ");
+
+const HOVER_DIRECT_MEDIA_SELECTOR =
+	"img:not(.emoji):not(.svg-icon), .mermaid, svg.mermaid, .block-language-mermaid, .pdf-embed, .internal-embed, iframe";
+
+function isVisibleHoverCandidate(el: HTMLElement): boolean {
+	if (!el.isConnected) return false;
+	const style = window.getComputedStyle(el);
+	if (style.display === "none" || style.visibility === "hidden") return false;
+	const rect = el.getBoundingClientRect();
+	if (rect.width < 4 || rect.height < 4) return false;
+	const hasMedia = Boolean(el.matches(HOVER_DIRECT_MEDIA_SELECTOR) || el.querySelector(HOVER_DIRECT_MEDIA_SELECTOR));
+	const hasText = Boolean((el.textContent || "").trim().length > 0);
+	return hasMedia || hasText;
+}
+
+/**
+ * Resolves the specific Markdown block element currently hovered inside `.dynamic-slides-content`
+ * (paragraph, callout, list item, blockquote, code block, table, heading, or media/embed).
+ * Returns null if the cursor is outside the slide card or on non-commentable chrome.
+ */
+export function findHoverableMarkdownBlock(
+	target: EventTarget | null,
+	contentEl: HTMLElement
+): HTMLElement | null {
+	if (!(target instanceof Node) || !contentEl.contains(target)) {
+		return null;
+	}
+	const startEl =
+		target.nodeType === Node.ELEMENT_NODE
+			? (target as HTMLElement)
+			: target.parentElement;
+	if (!startEl || startEl === contentEl) return null;
+	if (startEl.closest(HOVER_EXCLUDED_SELECTOR)) return null;
+
+	// If inside a callout, target the entire callout block cleanly
+	const calloutEl = startEl.closest(".callout") as HTMLElement | null;
+	if (calloutEl && contentEl.contains(calloutEl) && isVisibleHoverCandidate(calloutEl)) {
+		return calloutEl;
+	}
+
+	// Walk up from the hovered node to the nearest specific Markdown block
+	let curr: HTMLElement | null = startEl;
+	while (curr && curr !== contentEl) {
+		if (curr.matches(HOVER_EXCLUDED_SELECTOR)) {
+			return null;
+		}
+		const tag = curr.tagName.toLowerCase();
+
+		if (
+			tag === "pre" ||
+			tag === "table" ||
+			tag === "blockquote" ||
+			tag === "li" ||
+			tag === "p" ||
+			/^h[1-6]$/.test(tag) ||
+			curr.matches(HOVER_DIRECT_MEDIA_SELECTOR)
+		) {
+			// Prefer enclosing <li> when hovering a loose <p> directly inside an <li>
+			if (tag === "p" && curr.parentElement?.tagName.toLowerCase() === "li") {
+				const parentLi = curr.parentElement;
+				if (contentEl.contains(parentLi) && !parentLi.querySelector(":scope > ul, :scope > ol")) {
+					if (isVisibleHoverCandidate(parentLi)) return parentLi;
+				}
+			}
+			// Prefer enclosing <pre>/<table>/<blockquote> when hovering inside them
+			const enclosingTable = curr.closest("table") as HTMLElement | null;
+			if (enclosingTable && contentEl.contains(enclosingTable) && isVisibleHoverCandidate(enclosingTable)) {
+				return enclosingTable;
+			}
+			const enclosingPre = curr.closest("pre") as HTMLElement | null;
+			if (enclosingPre && contentEl.contains(enclosingPre) && isVisibleHoverCandidate(enclosingPre)) {
+				return enclosingPre;
+			}
+			const enclosingQuote = curr.closest("blockquote") as HTMLElement | null;
+			if (enclosingQuote && contentEl.contains(enclosingQuote) && isVisibleHoverCandidate(enclosingQuote)) {
+				return enclosingQuote;
+			}
+			if (isVisibleHoverCandidate(curr)) {
+				return curr;
+			}
+		}
+
+		if (
+			(curr.classList.contains("dv-block-ins") || curr.classList.contains("dv-block-del")) &&
+			isVisibleHoverCandidate(curr)
+		) {
+			return curr;
+		}
+
+		curr = curr.parentElement;
+	}
+
+	return null;
+}
+
+export function getMarkdownBlockLabel(el: HTMLElement): string {
+	if (el.classList.contains("callout")) return "Callout";
+	const tag = el.tagName.toLowerCase();
+	if (tag === "p") return "Paragraph";
+	if (tag === "li") return "List item";
+	if (tag === "blockquote") return "Quote";
+	if (tag === "pre") return "Code";
+	if (tag === "table") return "Table";
+	if (/^h[1-6]$/.test(tag)) return "Heading";
+	if (el.matches(".mermaid, svg.mermaid, .block-language-mermaid")) return "Diagram";
+	if (el.matches(".pdf-embed, .internal-embed, iframe")) return "Embed";
+	if (tag === "img" || el.querySelector("img:not(.emoji):not(.svg-icon)")) return "Image";
+	return "Element";
+}
+
+/**
+ * 1b. Portée ÉLÉMENT SURVOLÉ : cible automatiquement le bloc Markdown précis sous le curseur
+ * (paragraphe, callout, item de liste, citation, tableau, bloc de code, titre, image…)
+ * afin que `C`/`V` surlignent et commentent cet élément sans sélection manuelle.
+ */
+export function extractBlockContext(
+	blockEl: HTMLElement,
+	notePath: string,
+	sectionHeading: string,
+	containerEl: HTMLElement
+): { context: ExtractedCommentContext; range: Range | null } | null {
+	if (!blockEl.isConnected || !containerEl.contains(blockEl)) return null;
+
+	const blockLabel = getMarkdownBlockLabel(blockEl);
+	const rect = blockEl.getBoundingClientRect();
+	const blockRect: AnchorRect = {
+		left: rect.left,
+		top: rect.top,
+		right: rect.right,
+		bottom: rect.bottom,
+	};
+
+	const range = document.createRange();
+	range.selectNodeContents(blockEl);
+	const selCtx = extractSelectionContext(range, notePath, sectionHeading, containerEl);
+
+	if (selCtx) {
+		return {
+			context: {
+				...selCtx,
+				scopeLabel: blockLabel,
+				anchorRect: blockRect,
+			},
+			range,
+		};
+	}
+
+	// Media-only block (e.g. image/embed/mermaid with no plain text nodes)
+	const enclosure = getDiffEnclosureKind(blockEl);
+	let currentText = "";
+	let oldText: string | null = null;
+	let hadDiff = false;
+	if (enclosure === "ins") {
+		currentText = cleanExtractedText(serializeNode(blockEl, "current", false));
+		oldText = "";
+		hadDiff = true;
+	} else if (enclosure === "del") {
+		oldText = cleanExtractedText(serializeNode(blockEl, "old", false));
+		currentText = "";
+		hadDiff = true;
+	} else {
+		currentText = cleanExtractedText(serializeNode(blockEl, "current", false));
+	}
+
+	const fallbackExcerpt = currentText || oldText || `[${blockLabel}]`;
+	return {
+		context: {
+			scopeType: "selection",
+			scopeLabel: blockLabel,
+			contextKey: `blk:${notePath}::${sectionHeading}::${hashText(fallbackExcerpt + "|" + (oldText ?? ""))}`,
+			excerpt: currentText || "(Texte supprimé dans le diff)",
+			hadDiff,
+			oldExcerpt: hadDiff ? oldText : undefined,
+			anchorRect: blockRect,
+		},
+		range: null,
+	};
+}

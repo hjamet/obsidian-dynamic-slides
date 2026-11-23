@@ -4,20 +4,20 @@
  * SlideFlow automatically materializes this script into its own plugin folder
  * (`.obsidian/plugins/slideflow/whisper_server.py`), bootstraps Python/venv/packages
  * when needed, auto-detects CUDA GPU vs CPU, and downloads the chosen Whisper model
- * automatically on first use — zero path settings required!
+ * automatically on first use with live byte-level progress reporting — zero path settings required!
  */
 
-export const WHISPER_SERVER_VERSION = "2.7.4";
+export const WHISPER_SERVER_VERSION = "2.8.0";
 
 export const WHISPER_SERVER_SCRIPT = `#!/usr/bin/env python3
 # SLIDEFLOW_WHISPER_VERSION=${WHISPER_SERVER_VERSION}
 """
 SlideFlow managed local Faster-Whisper HTTP dictation server (127.0.0.1 only).
 - Zero ffmpeg/pyaudio dependency (stdlib wave + numpy)
-- Windowless pythonw.exe safe on Windows (redirects null stdout/stderr to temp log)
-- Single-instance OS mutex + exclusive socket bind (prevents multi-spawn GPU VRAM exhaustion)
+- Windowless pythonw.exe safe on Windows (redirects stdout/stderr to temp log)
+- Exclusive port binding on Windows (SO_EXCLUSIVEADDRUSE) to prevent duplicate GPU loads
 - Auto-detects CUDA GPU (float16) vs CPU (int8)
-- Auto-downloads requested Whisper model from HuggingFace if missing from local cache
+- Auto-downloads requested Whisper model from HuggingFace with live byte-level progress in /health
 - Auto-shuts down after idle timeout (default 1800s) to free VRAM
 """
 
@@ -30,6 +30,7 @@ import io
 import json
 import logging
 import os
+import re
 import site
 import socket
 import sys
@@ -155,6 +156,17 @@ def decode_wav_to_16k_float32(wav_bytes: bytes) -> np.ndarray:
     return arr.astype(np.float32, copy=False)
 
 
+class ExclusiveThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """Prevents multiple Whisper instances from sharing the same localhost port on Windows."""
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class DictationEngine:
     def __init__(self, model_name: str, device: str, compute_type: str):
         self.model_name = model_name
@@ -163,22 +175,202 @@ class DictationEngine:
         self.device = device
         self.compute_type = compute_type
         self.status = "loading"
+        self.stage = "initializing"
+        self.progress: Optional[float] = 5.0
+        self.progress_detail = f"Initializing Whisper '{model_name}'…"
+        self.downloaded_mb: Optional[float] = None
+        self.total_mb: Optional[float] = None
         self.error: Optional[str] = None
         self.model = None
         self.load_seconds: Optional[float] = None
         self.ready_event = threading.Event()
         self.infer_lock = threading.Lock()
+        self.progress_lock = threading.Lock()
         self.last_activity = time.time()
+
+    def _set_progress(
+        self,
+        *,
+        status: Optional[str] = None,
+        stage: Optional[str] = None,
+        progress: Optional[float] = None,
+        detail: Optional[str] = None,
+        downloaded_mb: Optional[float] = None,
+        total_mb: Optional[float] = None,
+    ) -> None:
+        with self.progress_lock:
+            if status is not None:
+                self.status = status
+            if stage is not None:
+                self.stage = stage
+            self.progress = progress
+            if detail is not None:
+                self.progress_detail = detail
+            self.downloaded_mb = downloaded_mb
+            self.total_mb = total_mb
+
+    def _download_model_with_progress(self) -> str:
+        import huggingface_hub
+        from faster_whisper import utils as fw_utils
+
+        if re.match(r".*/.*", self.model_name):
+            repo_id = self.model_name
+        else:
+            repo_id = fw_utils._MODELS.get(self.model_name)
+            if repo_id is None:
+                raise ValueError(f"Unknown Whisper model '{self.model_name}'")
+
+        allow_patterns = [
+            "config.json",
+            "preprocessor_config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.*",
+        ]
+
+        engine = self
+        bar_lock = threading.Lock()
+        byte_bars: dict[int, list[float]] = {}
+        next_bar_id = [0]
+
+        class SilentProgressTqdm:
+            """Stream-free tqdm-compatible progress hook safe under pythonw.exe."""
+
+            def __init__(self, iterable=None, *args, **kwargs):
+                self.iterable = iterable
+                inferred_total = kwargs.get("total")
+                if inferred_total is None and iterable is not None:
+                    try:
+                        inferred_total = len(iterable)
+                    except TypeError:
+                        inferred_total = 0.0
+                self.total = float(inferred_total or 0.0)
+                self.n = float(kwargs.get("initial") or 0.0)
+                self.desc = str(kwargs.get("desc") or "")
+                self.unit = str(kwargs.get("unit") or "")
+                self.is_byte_bar = (
+                    self.unit.upper().startswith("B")
+                    or bool(kwargs.get("unit_scale"))
+                    or self.total >= 100_000
+                )
+                with bar_lock:
+                    self._bar_id = next_bar_id[0]
+                    next_bar_id[0] += 1
+                    if self.is_byte_bar and self.total > 0:
+                        byte_bars[self._bar_id] = [self.n, self.total]
+                self._publish()
+
+            def __iter__(self):
+                if self.iterable is None:
+                    return
+                for item in self.iterable:
+                    yield item
+                    self.update(1)
+
+            def _publish(self) -> None:
+                with bar_lock:
+                    if self.is_byte_bar and self.total > 0:
+                        byte_bars[self._bar_id] = [self.n, self.total]
+                    if byte_bars:
+                        dl_bytes = sum(v[0] for v in byte_bars.values())
+                        tot_bytes = sum(v[1] for v in byte_bars.values())
+                        if tot_bytes > 0:
+                            pct = round(min(99.5, max(0.0, 100.0 * dl_bytes / tot_bytes)), 1)
+                            dl_mb = round(dl_bytes / (1024.0 * 1024.0), 1)
+                            tot_mb = round(tot_bytes / (1024.0 * 1024.0), 1)
+                            engine._set_progress(
+                                status="downloading",
+                                stage="downloading_model",
+                                progress=pct,
+                                detail=f"Downloading Whisper '{engine.model_name}' ({dl_mb:.0f} / {tot_mb:.0f} MB)",
+                                downloaded_mb=dl_mb,
+                                total_mb=tot_mb,
+                            )
+                            return
+                if self.total > 0:
+                    pct = round(min(95.0, max(0.0, 100.0 * self.n / self.total)), 1)
+                    engine._set_progress(
+                        status="downloading",
+                        stage="downloading_model",
+                        progress=pct,
+                        detail=f"Downloading Whisper '{engine.model_name}' ({int(self.n)}/{int(self.total)} files)",
+                    )
+
+            def update(self, n: float = 1) -> None:
+                self.n = max(0.0, self.n + float(n or 0.0))
+                self._publish()
+
+            def set_description(self, desc: Optional[str] = None, refresh: bool = True) -> None:
+                if desc:
+                    self.desc = str(desc)
+
+            def set_postfix(self, *args, **kwargs) -> None:
+                pass
+
+            def set_postfix_str(self, *args, **kwargs) -> None:
+                pass
+
+            def refresh(self, *args, **kwargs) -> None:
+                self._publish()
+
+            def reset(self, total: Optional[float] = None) -> None:
+                self.n = 0.0
+                if total is not None:
+                    self.total = float(total)
+                self._publish()
+
+            def close(self) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self.close()
+                return False
+
+            @classmethod
+            def get_lock(cls):
+                return bar_lock
+
+            @classmethod
+            def set_lock(cls, lock) -> None:
+                pass
+
+        self._set_progress(
+            status="downloading",
+            stage="downloading_model",
+            progress=0.0,
+            detail=f"Downloading Whisper '{self.model_name}' from HuggingFace…",
+        )
+        return huggingface_hub.snapshot_download(
+            repo_id,
+            allow_patterns=allow_patterns,
+            local_files_only=False,
+            tqdm_class=SilentProgressTqdm,
+        )
 
     def load_model_blocking(self) -> None:
         t0 = time.time()
         try:
+            self._set_progress(
+                status="loading",
+                stage="detecting_device",
+                progress=10.0,
+                detail="Detecting CUDA GPU / CPU runtime…",
+            )
             setup_cuda_dlls()
             self.device, self.compute_type = detect_device_and_compute(
                 self.requested_device, self.requested_compute
             )
             from faster_whisper import WhisperModel
 
+            self._set_progress(
+                status="loading",
+                stage="loading_model",
+                progress=None,
+                detail=f"Loading Whisper '{self.model_name}' on {self.device.upper()} ({self.compute_type})…",
+            )
             logger.info(
                 "Loading Faster-Whisper '%s' on %s (%s)...",
                 self.model_name,
@@ -200,25 +392,58 @@ class DictationEngine:
                     or "local_files_only" in msg
                     or "not found" in msg
                 ):
-                    self.status = "downloading"
                     logger.info("Downloading Whisper model '%s' from HuggingFace...", self.model_name)
+                    local_snapshot_dir = self._download_model_with_progress()
+                    self._set_progress(
+                        status="loading",
+                        stage="loading_model",
+                        progress=None,
+                        detail=f"Loading downloaded Whisper '{self.model_name}' into {self.device.upper()}…",
+                    )
                     self.model = WhisperModel(
-                        self.model_name,
+                        local_snapshot_dir,
                         device=self.device,
                         compute_type=self.compute_type,
-                        local_files_only=False,
+                        local_files_only=True,
                     )
                 else:
                     raise
             self.load_seconds = round(time.time() - t0, 2)
-            self.status = "ready"
+            self._set_progress(
+                status="ready",
+                stage="ready",
+                progress=100.0,
+                detail=f"Ready ({self.device.upper()} · {self.compute_type})",
+            )
             logger.info("Faster-Whisper ready in %.2fs.", self.load_seconds)
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}\\n{traceback.format_exc()}"
-            self.status = "error"
+            self._set_progress(
+                status="error",
+                stage="error",
+                progress=None,
+                detail=f"Whisper error: {exc}",
+            )
             logger.exception("Critical error loading Faster-Whisper.")
         finally:
             self.ready_event.set()
+
+    def get_health_payload(self) -> dict:
+        with self.progress_lock:
+            return {
+                "status": self.status,
+                "stage": self.stage,
+                "version": SERVER_VERSION,
+                "model": self.model_name,
+                "device": self.device,
+                "compute_type": self.compute_type,
+                "progress": self.progress,
+                "progress_detail": self.progress_detail,
+                "downloaded_mb": self.downloaded_mb,
+                "total_mb": self.total_mb,
+                "load_seconds": self.load_seconds,
+                "error": self.error,
+            }
 
     def transcribe(self, wav_bytes: bytes, language: Optional[str], timeout_s: float = 300.0) -> dict:
         self.last_activity = time.time()
@@ -307,21 +532,11 @@ def release_single_instance_mutex(handle: Optional[int]) -> None:
     kernel32.CloseHandle(handle)
 
 
-class _ExclusiveThreadingHTTPServer(http.server.ThreadingHTTPServer):
-    """Prevents Windows SO_REUSEADDR multi-process port hijacking."""
-
-    allow_reuse_address = False
-
-    def server_bind(self) -> None:
-        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
-
-
 def ensure_windowless_streams() -> Optional[Path]:
-    """Under pythonw.exe on Windows, sys.stdout/sys.stderr are None; bind them safely."""
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    if sys.stdout is not None and sys.stderr is not None:
+    """Under pythonw.exe on Windows, redirect null/devnull streams to a temp log safely."""
+    exe_name = os.path.basename(sys.executable or "").lower()
+    is_pythonw = exe_name.startswith("pythonw")
+    if not is_pythonw and sys.stdout is not None and sys.stderr is not None:
         return None
     log_path = Path(tempfile.gettempdir()) / "slideflow_whisper.log"
     try:
@@ -329,9 +544,9 @@ def ensure_windowless_streams() -> Optional[Path]:
     except OSError:
         log_fp = open(os.devnull, "w", encoding="utf-8")
         log_path = None
-    if sys.stdout is None:
+    if sys.stdout is None or is_pythonw:
         sys.stdout = log_fp
-    if sys.stderr is None:
+    if sys.stderr is None or is_pythonw:
         sys.stderr = log_fp
     return log_path
 
@@ -395,19 +610,9 @@ def main() -> None:
             parsed = urlparse(self.path)
             if parsed.path in ("/health", "/status"):
                 engine.last_activity = time.time()
-                code = 500 if engine.status == "error" else 200
-                self._send_json(
-                    code,
-                    {
-                        "status": engine.status,
-                        "version": SERVER_VERSION,
-                        "model": engine.model_name,
-                        "device": engine.device,
-                        "compute_type": engine.compute_type,
-                        "load_seconds": engine.load_seconds,
-                        "error": engine.error,
-                    },
-                )
+                payload = engine.get_health_payload()
+                code = 500 if payload["status"] == "error" else 200
+                self._send_json(code, payload)
             else:
                 self._send_json(404, {"error": f"Unknown route: {parsed.path}"})
 
@@ -441,10 +646,10 @@ def main() -> None:
             pass
 
     try:
-        server = _ExclusiveThreadingHTTPServer((args.host, args.port), Handler)
-    except OSError as exc:
-        if exc.errno in (errno.EADDRINUSE, 10048, 10013):
-            logger.info("Port %s:%d already exclusively bound (%s); exiting.", args.host, args.port, exc)
+        server = ExclusiveThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as bind_err:
+        if bind_err.errno in (errno.EADDRINUSE, 10048, 10013):
+            logger.info("Port %d already exclusively bound (%s); exiting.", args.port, bind_err)
             release_single_instance_mutex(mutex_handle)
             return
         release_single_instance_mutex(mutex_handle)

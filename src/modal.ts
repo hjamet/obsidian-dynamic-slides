@@ -5,7 +5,7 @@ import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
 import { applyPersistentCommentHighlights } from "./commentHighlighter";
-import { AnchorRect } from "./contextExtractor";
+import { AnchorRect, findHoverableMarkdownBlock } from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
 
 export const SCROLL_PHASE = -1;
@@ -68,6 +68,7 @@ export class PresentationModal extends Component {
 	public onHighlightCommentClickCallback?: (commentId: string, anchorRect: AnchorRect) => void;
 	public onMediaZoomOpenedCallback?: () => void;
 	public onMediaZoomClosedCallback?: () => void;
+	public onHoveredBlockChangeCallback?: (blockEl: HTMLElement | null) => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -86,6 +87,13 @@ export class PresentationModal extends Component {
 	private boundMouseUpHandler: () => void;
 	private boundKeyUpSelectionHandler: (evt: KeyboardEvent) => void;
 
+	// Hovered Markdown block tracking (targets C / V to hovered paragraph/callout/element when cursor is inside slide)
+	private hoveredBlockEl: HTMLElement | null = null;
+	private hoverClearTimerId: number | null = null;
+	private activeCommentBlockEl: HTMLElement | null = null;
+	private boundContentMouseMoveHandler: (evt: MouseEvent) => void;
+	private boundContentMouseLeaveHandler: (evt: MouseEvent) => void;
+
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
 	public currentTargetTop: number = 0;
@@ -98,6 +106,8 @@ export class PresentationModal extends Component {
 	private zoomContentEl: HTMLElement | null = null;
 	private zoomSlideComponent: Component | null = null;
 	private activePdfBlobUrl: string | null = null;
+	private pdfMutationObserver: MutationObserver | null = null;
+	private pdfKickTimers: number[] = [];
 	private currentSourcePath: string = "";
 	private hasCompletedAllSteps: boolean = false;
 
@@ -353,7 +363,93 @@ export class PresentationModal extends Component {
 		};
 		window.addEventListener("mouseup", this.boundMouseUpHandler);
 		window.addEventListener("keyup", this.boundKeyUpSelectionHandler);
-		this.contentEl.addEventListener("scroll", () => this.hideSelectionToolbar());
+		this.contentEl.addEventListener("scroll", () => {
+			this.hideSelectionToolbar();
+			this.clearHoveredBlock();
+		});
+
+		this.boundContentMouseMoveHandler = (evt: MouseEvent) => {
+			if (
+				this.isMediaZoomActive() ||
+				this.overlayEl.hasClass("is-comment-modal-open") ||
+				this.overlayEl.hasClass("is-review-drawer-open")
+			) {
+				this.clearHoveredBlock();
+				return;
+			}
+			const sel = window.getSelection();
+			if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+				this.clearHoveredBlock();
+				return;
+			}
+			this.cancelHoverClear();
+			const nextBlock = findHoverableMarkdownBlock(evt.target, this.contentEl);
+			this.setHoveredBlock(nextBlock);
+		};
+		this.boundContentMouseLeaveHandler = (evt: MouseEvent) => {
+			const rect = this.contentEl.getBoundingClientRect();
+			const exitingTowardRightRail =
+				evt.clientX >= rect.right - 2 &&
+				evt.clientX <= rect.right + 64 &&
+				evt.clientY >= rect.top - 12 &&
+				evt.clientY <= rect.bottom + 12;
+			if (exitingTowardRightRail) {
+				this.scheduleHoverClear(170);
+			} else {
+				this.clearHoveredBlock();
+			}
+		};
+		this.contentEl.addEventListener("mousemove", this.boundContentMouseMoveHandler);
+		this.contentEl.addEventListener("mouseleave", this.boundContentMouseLeaveHandler);
+	}
+
+	private setHoveredBlock(nextBlock: HTMLElement | null): void {
+		if (nextBlock === this.hoveredBlockEl) return;
+		if (this.hoveredBlockEl) {
+			this.hoveredBlockEl.removeClass("slideflow-hover-target-block");
+		}
+		this.hoveredBlockEl = nextBlock;
+		if (this.hoveredBlockEl) {
+			this.hoveredBlockEl.addClass("slideflow-hover-target-block");
+		}
+		this.onHoveredBlockChangeCallback?.(this.hoveredBlockEl);
+	}
+
+	public getHoveredBlockElement(): HTMLElement | null {
+		if (this.hoveredBlockEl && this.hoveredBlockEl.isConnected && this.contentEl.contains(this.hoveredBlockEl)) {
+			return this.hoveredBlockEl;
+		}
+		return null;
+	}
+
+	public cancelHoverClear(): void {
+		if (this.hoverClearTimerId !== null) {
+			window.clearTimeout(this.hoverClearTimerId);
+			this.hoverClearTimerId = null;
+		}
+	}
+
+	public scheduleHoverClear(delayMs: number = 170): void {
+		this.cancelHoverClear();
+		this.hoverClearTimerId = window.setTimeout(() => {
+			this.hoverClearTimerId = null;
+			this.setHoveredBlock(null);
+		}, delayMs);
+	}
+
+	public clearHoveredBlock(): void {
+		this.cancelHoverClear();
+		this.setHoveredBlock(null);
+	}
+
+	public setActiveCommentBlock(blockEl: HTMLElement | null): void {
+		if (this.activeCommentBlockEl) {
+			this.activeCommentBlockEl.removeClass("slideflow-active-comment-block");
+		}
+		this.activeCommentBlockEl = blockEl && blockEl.isConnected ? blockEl : null;
+		if (this.activeCommentBlockEl) {
+			this.activeCommentBlockEl.addClass("slideflow-active-comment-block");
+		}
 	}
 
 	public getContentElement(): HTMLElement {
@@ -726,7 +822,45 @@ export class PresentationModal extends Component {
 		return this.zoomOverlayEl !== null;
 	}
 
+	public isPdfZoomActive(): boolean {
+		return Boolean(this.zoomContentEl?.querySelector(".dynamic-slides-zoom-pdf"));
+	}
+
+	private getPdfScrollContainer(): HTMLElement | null {
+		if (!this.zoomContentEl) return null;
+		return this.zoomContentEl.querySelector<HTMLElement>(
+			".slideflow-pdf-frame-body .pdf-viewer-container"
+		);
+	}
+
+	public scrollPdfZoom(direction: "down" | "up", stepFraction: number = 0.72): boolean {
+		const viewer = this.getPdfScrollContainer();
+		if (!viewer) return false;
+		const maxScroll = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+		if (maxScroll <= 4) return false;
+
+		const delta = Math.max(120, Math.round(viewer.clientHeight * stepFraction));
+		const current = viewer.scrollTop;
+		const target =
+			direction === "down"
+				? Math.min(maxScroll, current + delta)
+				: Math.max(0, current - delta);
+		if (Math.abs(target - current) < 2) {
+			return false;
+		}
+		viewer.scrollTo({ top: target, behavior: "smooth" });
+		return true;
+	}
+
 	private cleanupZoomResources(): void {
+		if (this.pdfMutationObserver) {
+			this.pdfMutationObserver.disconnect();
+			this.pdfMutationObserver = null;
+		}
+		for (const id of this.pdfKickTimers) {
+			window.clearTimeout(id);
+		}
+		this.pdfKickTimers = [];
 		if (this.zoomSlideComponent) {
 			unloadSlideContent(this.zoomSlideComponent, this);
 			this.zoomSlideComponent = null;
@@ -741,8 +875,98 @@ export class PresentationModal extends Component {
 		}
 	}
 
+	/**
+	 * Hydrates Obsidian's native PDF.js viewer once mounted inside the zoom overlay:
+	 * Obsidian initializes `.pdf-embed` asynchronously (`initDelay: 300ms`) inside a temporary
+	 * offscreen container and relies on ResizeObserver / `transitionend` on `.pdf-viewer-container`
+	 * to recompute page metrics & scrollbars. Dispatching `transitionend` + `window resize` once
+	 * mounted and once pages render unlocks scrolling immediately without requiring a modal resize.
+	 */
+	private schedulePdfViewerHydration(body: HTMLElement): void {
+		let lastKickAt = 0;
+
+		const kickViewer = (focusViewer: boolean): boolean => {
+			if (!body.isConnected) return false;
+			const embedEl = body.querySelector<HTMLElement>(".pdf-embed, .internal-embed");
+			if (embedEl && embedEl.style.height) {
+				embedEl.style.removeProperty("height");
+			}
+			const viewerEl = body.querySelector<HTMLElement>(".pdf-viewer-container");
+			if (!viewerEl) return false;
+
+			if (!viewerEl.hasAttribute("tabindex")) {
+				viewerEl.setAttribute("tabindex", "-1");
+			}
+			viewerEl.style.overflow = "auto";
+
+			const now = Date.now();
+			if (now - lastKickAt >= 80) {
+				lastKickAt = now;
+				// 1-frame 1px layout nudge forces ResizeObserver on `.pdf-viewer-container`
+				// (exactly what opening a side modal previously triggered) so PDF.js computes
+				// full scroll height & scrollbars immediately on first open!
+				body.style.paddingRight = "1px";
+				void body.offsetWidth;
+				requestAnimationFrame(() => {
+					if (body.isConnected) {
+						body.style.removeProperty("padding-right");
+					}
+				});
+				try {
+					viewerEl.dispatchEvent(new Event("transitionend"));
+				} catch {
+					// ignore
+				}
+				try {
+					this.appRef.workspace.trigger("resize");
+				} catch {
+					// ignore
+				}
+				try {
+					window.dispatchEvent(new Event("resize"));
+				} catch {
+					// ignore
+				}
+			}
+
+			if (
+				focusViewer &&
+				!this.overlayEl.hasClass("is-comment-modal-open") &&
+				!this.overlayEl.hasClass("is-review-drawer-open")
+			) {
+				try {
+					viewerEl.focus({ preventScroll: true });
+				} catch {
+					// ignore
+				}
+			}
+			return Boolean(body.querySelector(".pdfViewer .page"));
+		};
+
+		this.pdfMutationObserver = new MutationObserver(() => {
+			const hasPages = kickViewer(true);
+			if (hasPages) {
+				// Schedule one final post-page-layout kick and stop observing
+				const settleId = window.setTimeout(() => kickViewer(true), 160);
+				this.pdfKickTimers.push(settleId);
+				this.pdfMutationObserver?.disconnect();
+				this.pdfMutationObserver = null;
+			}
+		});
+		this.pdfMutationObserver.observe(body, { childList: true, subtree: true });
+
+		// Timed fallbacks covering animation end (350ms) and Obsidian PDF embed initDelay (300ms + 200ms debounce)
+		for (const delay of [220, 460, 820, 1300]) {
+			const id = window.setTimeout(() => {
+				kickViewer(delay <= 820);
+			}, delay);
+			this.pdfKickTimers.push(id);
+		}
+	}
+
 	private ensureZoomOverlay(animated: boolean): void {
 		this.hideSelectionToolbar();
+		this.clearHoveredBlock();
 		this.overlayEl.addClass("is-media-zoom-active");
 		if (this.contentEl) {
 			this.contentEl.style.opacity = "0";
@@ -751,6 +975,18 @@ export class PresentationModal extends Component {
 			this.zoomOverlayEl = this.overlayEl.createDiv({ cls: "dynamic-slides-media-zoom-overlay" });
 			if (!animated) {
 				this.zoomOverlayEl.style.animation = "none";
+				this.zoomOverlayEl.addClass("is-settled");
+			} else {
+				const overlayRef = this.zoomOverlayEl;
+				overlayRef.addEventListener(
+					"animationend",
+					(evt) => {
+						if (evt.target === overlayRef) {
+							overlayRef.addClass("is-settled");
+						}
+					},
+					{ once: true }
+				);
 			}
 			const closeBtn = this.zoomOverlayEl.createEl("button", {
 				cls: "dynamic-slides-zoom-close-btn",
@@ -876,6 +1112,8 @@ export class PresentationModal extends Component {
 			sourcePath || this.currentSourcePath,
 			comp
 		);
+		this.schedulePdfViewerHydration(body);
+		this.onMediaZoomOpenedCallback?.();
 	}
 
 	/**
@@ -923,6 +1161,7 @@ export class PresentationModal extends Component {
 			},
 		});
 		iframe.setAttribute("allowfullscreen", "true");
+		this.onMediaZoomOpenedCallback?.();
 	}
 
 	public openMediaZoom(index: number, animated: boolean = true) {
@@ -1142,6 +1381,12 @@ export class PresentationModal extends Component {
 			this.cancelScrollAnimation(true);
 		}
 
+		if (this.isPdfZoomActive()) {
+			if (this.scrollPdfZoom("down", 0.72)) {
+				return true;
+			}
+		}
+
 		if (this.isMediaZoomActive() && this.activeZoomIndex === -1) {
 			// Link-opened zoom (e.g. clicked local PDF link): close cleanly and stay on slide
 			this.closeMediaZoom(true);
@@ -1225,6 +1470,12 @@ export class PresentationModal extends Component {
 			this.cancelScrollAnimation(true);
 		}
 
+		if (this.isPdfZoomActive()) {
+			if (this.scrollPdfZoom("up", 0.72)) {
+				return true;
+			}
+		}
+
 		if (this.isMediaZoomActive() && this.activeZoomIndex === -1) {
 			// Link-opened zoom (e.g. clicked local PDF link): close cleanly and stay on slide
 			this.closeMediaZoom(true);
@@ -1302,6 +1553,8 @@ export class PresentationModal extends Component {
 	) {
 		this.currentSourcePath = sourcePath;
 		this.hideSelectionToolbar();
+		this.clearHoveredBlock();
+		this.setActiveCommentBlock(null);
 		this.cancelScrollAnimation(false);
 		this.hasCompletedAllSteps = false;
 
@@ -1412,6 +1665,10 @@ export class PresentationModal extends Component {
 
 	public close() {
 		this.hideSelectionToolbar();
+		this.clearHoveredBlock();
+		this.setActiveCommentBlock(null);
+		this.contentEl.removeEventListener("mousemove", this.boundContentMouseMoveHandler);
+		this.contentEl.removeEventListener("mouseleave", this.boundContentMouseLeaveHandler);
 		window.removeEventListener("mouseup", this.boundMouseUpHandler);
 		window.removeEventListener("keyup", this.boundKeyUpSelectionHandler);
 		this.cancelScrollAnimation(false);

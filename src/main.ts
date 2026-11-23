@@ -22,6 +22,7 @@ import { BaselinesStore, normalizeVaultPath } from "./baselinesStore";
 import {
 	AnchorRect,
 	ExtractedCommentContext,
+	extractBlockContext,
 	extractSelectionContext,
 	extractVisibleSlideContext,
 	extractZoomContext,
@@ -1063,10 +1064,14 @@ export default class SlideFlowPlugin extends Plugin {
 		};
 		this.activeModal.onMediaZoomOpenedCallback = () => {
 			this.slideCommentsRail?.hidePopoverImmediate();
+			this.slideCommentsRail?.setHoveredBlock(null);
 			this.applyCurrentSlideHighlights();
 		};
 		this.activeModal.onMediaZoomClosedCallback = () => {
 			this.slideCommentsRail?.positionRail();
+		};
+		this.activeModal.onHoveredBlockChangeCallback = (blockEl: HTMLElement | null) => {
+			this.slideCommentsRail?.setHoveredBlock(blockEl);
 		};
 
 		const overlayEl = this.activeModal.getOverlayElement();
@@ -1081,6 +1086,15 @@ export default class SlideFlowPlugin extends Plugin {
 				this.refreshAllActiveUI();
 				new Notice("Comment deleted.");
 			},
+			onAddBlockComment: (blockEl: HTMLElement) => {
+				this.openCommentModal(false, null, blockEl);
+			},
+			onHoverAddEnter: () => {
+				this.activeModal?.cancelHoverClear();
+			},
+			onHoverAddLeave: () => {
+				this.activeModal?.scheduleHoverClear();
+			},
 			getSlideContainer: () => {
 				if (!this.activeModal) return null;
 				return this.activeModal.getContentElement();
@@ -1093,6 +1107,7 @@ export default class SlideFlowPlugin extends Plugin {
 				editingId?: string,
 				images?: CommentImageAttachment[]
 			) => {
+				this.activeModal?.setActiveCommentBlock(null);
 				await this.saveSlideComment(commentText, editingId, images);
 				this.slideCommentsRail?.trackLayoutTransition(420);
 			},
@@ -1103,6 +1118,7 @@ export default class SlideFlowPlugin extends Plugin {
 			},
 			onClose: () => {
 				this.pendingCommentContext = null;
+				this.activeModal?.setActiveCommentBlock(null);
 				this.slideCommentsRail?.trackLayoutTransition(420);
 			},
 		});
@@ -1385,7 +1401,11 @@ export default class SlideFlowPlugin extends Plugin {
 		new Notice("All diffs in this note are already validated.");
 	}
 
-	private openCommentModal(startWithVoice: boolean, explicitRange?: Range | null) {
+	private openCommentModal(
+		startWithVoice: boolean,
+		explicitRange?: Range | null,
+		explicitBlockEl?: HTMLElement | null
+	) {
 		if (!this.commentModal || !this.currentNode || !this.activeModal) return;
 		this.slideCommentsRail?.hidePopoverImmediate();
 
@@ -1402,6 +1422,7 @@ export default class SlideFlowPlugin extends Plugin {
 		const activeRange = explicitRange ?? this.activeModal.getActiveSelectionRange();
 		let extracted: ExtractedCommentContext | null = null;
 		let highlightRange: Range | null = null;
+		let activeTargetBlock: HTMLElement | null = null;
 
 		if (activeRange) {
 			const activeContainer = this.activeModal.isMediaZoomActive()
@@ -1433,6 +1454,26 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 		}
 
+		// When cursor is hovering a specific Markdown element inside the slide card,
+		// C / V automatically highlight and target that element instead of the entire slide!
+		// When cursor is outside the slide card, hoveredBlockEl is null -> general slide comment.
+		if (!extracted && !this.activeModal.isMediaZoomActive()) {
+			const hoveredBlock = explicitBlockEl ?? this.activeModal.getHoveredBlockElement();
+			if (hoveredBlock) {
+				const blockRes = extractBlockContext(
+					hoveredBlock,
+					this.activeSourcePath,
+					this.currentNode.title,
+					this.activeModal.getContentElement()
+				);
+				if (blockRes) {
+					extracted = blockRes.context;
+					highlightRange = blockRes.range;
+					activeTargetBlock = hoveredBlock;
+				}
+			}
+		}
+
 		if (!extracted) {
 			extracted = extractVisibleSlideContext(
 				this.activeModal.getContentElement(),
@@ -1443,6 +1484,8 @@ export default class SlideFlowPlugin extends Plugin {
 			);
 		}
 
+		this.activeModal.clearHoveredBlock();
+		this.activeModal.setActiveCommentBlock(activeTargetBlock);
 		this.pendingCommentContext = extracted;
 
 		const existingComments = this.reviewStore.getForSlide(
@@ -1796,6 +1839,10 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private fastJumpNext() {
+		if (this.activeModal?.isPdfZoomActive()) {
+			this.activeModal.scrollPdfZoom("down", 0.45);
+			return;
+		}
 		if (this.activeModal) {
 			this.activeModal.closeMediaZoom(false);
 			this.activeModal.cancelScrollAnimation(false);
@@ -1804,6 +1851,10 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private fastJumpPrev() {
+		if (this.activeModal?.isPdfZoomActive()) {
+			this.activeModal.scrollPdfZoom("up", 0.45);
+			return;
+		}
 		if (this.activeModal) {
 			this.activeModal.closeMediaZoom(false);
 			this.activeModal.cancelScrollAnimation(false);

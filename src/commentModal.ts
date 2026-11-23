@@ -3,14 +3,15 @@
  *
  * - Sans sélection : ancrée sous la slide si la hauteur le permet, sinon à droite.
  * - Avec sélection de texte : ancrée juste sous le passage surligné en vert (façon Antigravity).
- * - Raccourcis : `C` texte, `V` dictée immédiate, `Ctrl+M` bascule micro, `Ctrl+V` coller une image,
- *   `Entrée` valider, `Shift+Entrée` saut de ligne, `Échap` fermer.
+ * - Raccourcis : `C` texte, `V` dictée immédiate (`V` ou `Ctrl+M` pour arrêter la capture, zone texte
+ *   verrouillée pendant l'enregistrement, `Entrée` arrête la capture et enregistre uniquement si
+ *   la transcription réussit), `Ctrl+V` coller une image, `Shift+Entrée` saut de ligne, `Échap` fermer.
  */
 
 import { Notice } from "obsidian";
 import { AnchorRect, setGreenSelectionHighlight } from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
-import { VoiceDictationService } from "./voiceDictation";
+import { VoiceDictationService, VoiceProgressUpdate } from "./voiceDictation";
 import {
 	CommentImageAttachment,
 	deleteTempImageSafe,
@@ -43,6 +44,12 @@ export interface CommentModalCallbacks {
 	onClose: () => void;
 }
 
+interface StopVoiceResult {
+	ok: boolean;
+	text: string;
+	hadError: boolean;
+}
+
 const IMAGE_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`;
 const MIC_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>`;
 
@@ -59,11 +66,16 @@ export class CommentOverlayModal {
 	private submitBtnEl: HTMLButtonElement | null = null;
 	private voiceFeedbackEl: HTMLElement | null = null;
 	private statusEl: HTMLElement | null = null;
+	private progressPctEl: HTMLElement | null = null;
+	private meterTrackEl: HTMLElement | null = null;
 	private levelFillEl: HTMLElement | null = null;
 	private existingListEl: HTMLElement | null = null;
 
 	private isOpenFlag: boolean = false;
+	private isStartingVoice: boolean = false;
+	private voiceStartPromise: Promise<boolean> | null = null;
 	private isBusyTranscribing: boolean = false;
+	private openedAt: number = 0;
 	private editingId: string | null = null;
 	private attachedImages: CommentImageAttachment[] = [];
 	private newlyCreatedTempPaths: Set<string> = new Set();
@@ -91,11 +103,31 @@ export class CommentOverlayModal {
 		return this.isOpenFlag;
 	}
 
+	private isVoiceCaptureActive(): boolean {
+		return this.isStartingVoice || this.voiceService.isRecording();
+	}
+
+	private setTextareaVoiceLocked(locked: boolean): void {
+		if (this.textareaEl) {
+			this.textareaEl.readOnly = locked;
+			this.textareaEl.toggleClass("is-voice-locked", locked);
+			if (locked && document.activeElement === this.textareaEl) {
+				this.textareaEl.blur();
+			}
+		}
+		if (this.cardEl) {
+			this.cardEl.toggleClass("is-voice-capturing", locked);
+		}
+	}
+
 	public open(ctx: CommentModalContext): void {
 		this.close(false);
 		this.isOpenFlag = true;
+		this.openedAt = Date.now();
 		this.submittedSuccessfully = false;
 		this.parentEl.addClass("is-comment-modal-open");
+		this.isStartingVoice = false;
+		this.voiceStartPromise = null;
 		this.isBusyTranscribing = false;
 		this.editingId = ctx.editingComment ? ctx.editingComment.id : null;
 		this.attachedImages = ctx.editingComment?.images ? [...ctx.editingComment.images] : [];
@@ -105,13 +137,17 @@ export class CommentOverlayModal {
 			setGreenSelectionHighlight(ctx.highlightRange);
 		}
 
-		const isSelectionAnchored = Boolean(ctx.anchorRect);
+		const hasAnchor = Boolean(ctx.anchorRect);
+		const anchorFitsVertically = ctx.anchorRect
+			? ctx.anchorRect.bottom + 185 < window.innerHeight || ctx.anchorRect.top - 185 > 16
+			: false;
+		const isSelectionAnchored = hasAnchor && anchorFitsVertically;
 		let placementClass: "is-selection-anchored" | "is-below-slide" | "is-right-docked" = "is-right-docked";
 		let belowSlideGeom: { left: number; top: number; width: number } | null = null;
 
 		if (isSelectionAnchored) {
 			placementClass = "is-selection-anchored";
-		} else if (!ctx.isMediaZoomActive && ctx.slideContentEl) {
+		} else if (!hasAnchor && !ctx.isMediaZoomActive && ctx.slideContentEl) {
 			const slideRect = ctx.slideContentEl.getBoundingClientRect();
 			const footerReserve = 76;
 			const neededHeight = ctx.existingComments.length > 0 ? 225 : 168;
@@ -186,13 +222,20 @@ export class CommentOverlayModal {
 			cls: "slideflow-comment-textarea",
 			attr: {
 				rows: "2",
-				placeholder: "Leave a comment (Ctrl+V to paste image)",
+				placeholder: ctx.startWithVoice
+					? "Voice capture active… Press V to stop or Enter to stop & save"
+					: "Leave a comment (Ctrl+V to paste image)",
 			},
 		});
 		if (ctx.editingComment) {
 			this.textareaEl.value = ctx.editingComment.commentText;
 		}
 		this.textareaEl.addEventListener("input", () => this.autoResizeTextarea());
+		this.textareaEl.addEventListener("focus", () => {
+			if (this.isVoiceCaptureActive() || this.isBusyTranscribing) {
+				this.textareaEl?.blur();
+			}
+		});
 
 		// Thumbnail strip for pasted/attached temporary images
 		this.imagesStripEl = this.cardEl.createDiv({ cls: "slideflow-comment-images-strip" });
@@ -219,12 +262,14 @@ export class CommentOverlayModal {
 			if (this.fileInputEl) this.fileInputEl.value = "";
 		});
 
-		// Live voice feedback bar (hidden unless recording, transcribing, or error)
+		// Live voice feedback & progress bar (hidden unless recording, downloading/loading/transcribing, or error)
 		this.voiceFeedbackEl = this.cardEl.createDiv({ cls: "slideflow-comment-voice-feedback" });
 		this.voiceFeedbackEl.style.display = "none";
-		this.statusEl = this.voiceFeedbackEl.createDiv({ cls: "slideflow-comment-status" });
-		const meterTrack = this.voiceFeedbackEl.createDiv({ cls: "slideflow-voice-meter-track" });
-		this.levelFillEl = meterTrack.createDiv({ cls: "slideflow-voice-meter-fill" });
+		const statusRow = this.voiceFeedbackEl.createDiv({ cls: "slideflow-comment-status-row" });
+		this.statusEl = statusRow.createDiv({ cls: "slideflow-comment-status" });
+		this.progressPctEl = statusRow.createDiv({ cls: "slideflow-comment-progress-pct" });
+		this.meterTrackEl = this.voiceFeedbackEl.createDiv({ cls: "slideflow-voice-meter-track" });
+		this.levelFillEl = this.meterTrackEl.createDiv({ cls: "slideflow-voice-meter-fill" });
 
 		// Minimal footer: Cancel | Attach image | Mic icon | Add Comment pill
 		const footerEl = this.cardEl.createDiv({ cls: "slideflow-comment-footer" });
@@ -259,7 +304,7 @@ export class CommentOverlayModal {
 			cls: "slideflow-comment-mic-btn",
 			attr: {
 				type: "button",
-				title: "Voice dictation (Ctrl+M)",
+				title: "Voice dictation (V while recording / Ctrl+M)",
 				"aria-label": "Toggle voice dictation (Ctrl+M)",
 			},
 		});
@@ -284,8 +329,13 @@ export class CommentOverlayModal {
 		this.renderExistingComments(ctx.existingComments);
 
 		// Position selection-anchored card cleanly without overflowing viewport
-		if (ctx.anchorRect) {
+		if (isSelectionAnchored && ctx.anchorRect) {
 			this.positionNearAnchor(ctx.anchorRect);
+		}
+
+		// Lock textarea synchronously before first frame when launched via `V` so zero stray keystrokes leak in
+		if (ctx.startWithVoice) {
+			this.setTextareaVoiceLocked(true);
 		}
 
 		window.addEventListener("keydown", this.boundKeyHandler, true);
@@ -296,13 +346,14 @@ export class CommentOverlayModal {
 
 		requestAnimationFrame(() => {
 			this.autoResizeTextarea();
-			this.textareaEl?.focus();
-			if (this.textareaEl && this.editingId) {
-				const len = this.textareaEl.value.length;
-				this.textareaEl.setSelectionRange(len, len);
-			}
 			if (ctx.startWithVoice) {
 				void this.startVoiceDictation();
+			} else {
+				this.textareaEl?.focus();
+				if (this.textareaEl && this.editingId) {
+					const len = this.textareaEl.value.length;
+					this.textareaEl.setSelectionRange(len, len);
+				}
 			}
 		});
 	}
@@ -335,6 +386,13 @@ export class CommentOverlayModal {
 			evt.preventDefault();
 			evt.stopPropagation();
 			void this.attachImageFiles(imageFiles);
+			return;
+		}
+
+		// Block plain-text paste into textarea while voice capture is active
+		if (this.isVoiceCaptureActive() || this.isBusyTranscribing) {
+			evt.preventDefault();
+			evt.stopPropagation();
 			return;
 		}
 
@@ -378,8 +436,10 @@ export class CommentOverlayModal {
 		this.attachedImages.push(attachment);
 		this.newlyCreatedTempPaths.add(attachment.path);
 		this.renderAttachedImages();
-		this.setStatus("", "hidden");
-		this.textareaEl?.focus();
+		if (!this.isVoiceCaptureActive() && !this.isBusyTranscribing) {
+			this.setStatus("", "hidden");
+			this.textareaEl?.focus();
+		}
 	}
 
 	private renderAttachedImages(): void {
@@ -461,7 +521,8 @@ export class CommentOverlayModal {
 		const hasDraft =
 			Boolean(this.textareaEl?.value.trim()) ||
 			this.attachedImages.length > 0 ||
-			this.voiceService.isRecording();
+			this.isVoiceCaptureActive() ||
+			this.isBusyTranscribing;
 		if (!hasDraft) {
 			this.close(true);
 		}
@@ -497,7 +558,9 @@ export class CommentOverlayModal {
 				if (this.textareaEl) {
 					this.textareaEl.value = c.commentText;
 					this.autoResizeTextarea();
-					this.textareaEl.focus();
+					if (!this.isVoiceCaptureActive() && !this.isBusyTranscribing) {
+						this.textareaEl.focus();
+					}
 				}
 				if (this.submitBtnEl) {
 					this.submitBtnEl.setText("Update");
@@ -523,13 +586,6 @@ export class CommentOverlayModal {
 	private handleKeyDown(evt: KeyboardEvent): void {
 		if (!this.isOpenFlag) return;
 
-		if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "m") {
-			evt.preventDefault();
-			evt.stopPropagation();
-			void this.toggleVoiceDictation();
-			return;
-		}
-
 		if (evt.key === "Escape" || evt.code === "Escape") {
 			evt.preventDefault();
 			evt.stopPropagation();
@@ -537,20 +593,77 @@ export class CommentOverlayModal {
 			return;
 		}
 
+		// While transcribing / downloading model, block all input except Escape
+		if (this.isBusyTranscribing) {
+			evt.preventDefault();
+			evt.stopPropagation();
+			return;
+		}
+
+		if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "m") {
+			evt.preventDefault();
+			evt.stopPropagation();
+			if (!evt.repeat) {
+				void this.toggleVoiceDictation();
+			}
+			return;
+		}
+
+		// During active voice capture: textarea is strictly locked (no typing allowed!).
+		// `V` stops capture & transcribes for review; `Enter` stops capture, transcribes, and saves if successful.
+		if (this.isVoiceCaptureActive()) {
+			if (evt.key === "Enter" && !evt.shiftKey) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				if (!evt.repeat) {
+					void this.handleSubmit();
+				}
+				return;
+			}
+
+			if (!evt.ctrlKey && !evt.metaKey && !evt.altKey && evt.key.toLowerCase() === "v") {
+				evt.preventDefault();
+				evt.stopPropagation();
+				// Ignore key repeat or the very same press that opened voice mode (<250ms)
+				if (!evt.repeat && Date.now() - this.openedAt >= 250) {
+					void this.stopVoiceOnly();
+				}
+				return;
+			}
+
+			// Allow Ctrl+V image paste while recording, block every other key from typing into the textarea
+			if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "v") {
+				evt.stopPropagation();
+				return;
+			}
+
+			evt.preventDefault();
+			evt.stopPropagation();
+			return;
+		}
+
 		if (evt.key === "Enter" && !evt.shiftKey) {
 			evt.preventDefault();
 			evt.stopPropagation();
-			void this.handleSubmit();
+			if (!evt.repeat) {
+				void this.handleSubmit();
+			}
 			return;
 		}
 
 		evt.stopPropagation();
 	}
 
-	private setStatus(msg: string, mode: "hidden" | "idle" | "recording" | "busy" | "error" = "idle"): void {
+	private setStatus(
+		msg: string,
+		mode: "hidden" | "idle" | "recording" | "busy" | "error" = "idle",
+		progressPercent: number | null = null
+	): void {
 		if (!this.voiceFeedbackEl || !this.statusEl) return;
 		if (mode === "hidden" || !msg) {
 			this.voiceFeedbackEl.style.display = "none";
+			this.meterTrackEl?.removeClass("is-progress", "is-indeterminate");
+			if (this.progressPctEl) this.progressPctEl.setText("");
 			return;
 		}
 		this.voiceFeedbackEl.style.display = "flex";
@@ -559,6 +672,32 @@ export class CommentOverlayModal {
 		if (mode === "recording") this.statusEl.addClass("is-recording");
 		if (mode === "busy") this.statusEl.addClass("is-busy");
 		if (mode === "error") this.statusEl.addClass("is-error");
+
+		if (this.meterTrackEl && this.levelFillEl) {
+			if (mode === "busy") {
+				this.meterTrackEl.style.display = "block";
+				this.meterTrackEl.addClass("is-progress");
+				if (progressPercent !== null && Number.isFinite(progressPercent)) {
+					const clamped = Math.max(0, Math.min(100, Math.round(progressPercent)));
+					this.meterTrackEl.removeClass("is-indeterminate");
+					this.levelFillEl.style.width = `${clamped}%`;
+					if (this.progressPctEl) this.progressPctEl.setText(`${clamped}%`);
+				} else {
+					this.meterTrackEl.addClass("is-indeterminate");
+					this.levelFillEl.style.width = "";
+					if (this.progressPctEl) this.progressPctEl.setText("");
+				}
+			} else if (mode === "recording") {
+				this.meterTrackEl.style.display = "block";
+				this.meterTrackEl.removeClass("is-progress", "is-indeterminate");
+				if (this.progressPctEl) this.progressPctEl.setText("");
+			} else {
+				this.meterTrackEl.style.display = "none";
+				this.meterTrackEl.removeClass("is-progress", "is-indeterminate");
+				this.levelFillEl.style.width = "0%";
+				if (this.progressPctEl) this.progressPctEl.setText("");
+			}
+		}
 	}
 
 	private stopRecTimer(): void {
@@ -573,79 +712,151 @@ export class CommentOverlayModal {
 
 	private async toggleVoiceDictation(): Promise<void> {
 		if (this.isBusyTranscribing) return;
-		if (this.voiceService.isRecording()) {
-			await this.stopVoiceAndAppend();
+		if (this.isVoiceCaptureActive()) {
+			await this.stopVoiceOnly();
 		} else {
 			await this.startVoiceDictation();
 		}
 	}
 
-	private async startVoiceDictation(): Promise<void> {
-		if (this.isBusyTranscribing || this.voiceService.isRecording()) return;
-		try {
-			await this.voiceService.startRecording((level) => {
-				if (this.levelFillEl) {
-					this.levelFillEl.style.width = `${Math.round(level * 100)}%`;
-				}
-			});
-			this.recStartTime = Date.now();
-			this.micBtnEl?.addClass("is-recording");
-			const updateElapsed = () => {
-				const secs = Math.floor((Date.now() - this.recStartTime) / 1000);
-				const mm = Math.floor(secs / 60);
-				const ss = String(secs % 60).padStart(2, "0");
-				this.setStatus(`Listening ${mm}:${ss} · Ctrl+M stop · Enter save`, "recording");
-			};
-			updateElapsed();
-			this.recTimerId = window.setInterval(updateElapsed, 250);
-		} catch (err: any) {
-			const msg = err?.message || String(err);
-			this.setStatus(`Mic error: ${msg}`, "error");
-			new Notice(`SlideFlow mic: ${msg}`);
+	private async stopVoiceOnly(): Promise<void> {
+		if (this.voiceStartPromise) {
+			const started = await this.voiceStartPromise;
+			if (!started || !this.isOpenFlag) return;
+		}
+		if (this.voiceService.isRecording()) {
+			await this.stopVoiceAndAppend();
 		}
 	}
 
-	private async stopVoiceAndAppend(): Promise<string> {
+	private startVoiceDictation(): Promise<boolean> {
+		if (this.isBusyTranscribing || this.voiceService.isRecording()) {
+			return Promise.resolve(this.voiceService.isRecording());
+		}
+		if (this.voiceStartPromise) {
+			return this.voiceStartPromise;
+		}
+
+		this.isStartingVoice = true;
+		this.setTextareaVoiceLocked(true);
+		this.setStatus("Starting microphone…", "busy", null);
+
+		const runStart = async (): Promise<boolean> => {
+			try {
+				await this.voiceService.startRecording((level) => {
+					if (this.levelFillEl && this.voiceService.isRecording()) {
+						this.levelFillEl.style.width = `${Math.round(level * 100)}%`;
+					}
+				});
+				if (!this.isOpenFlag) {
+					this.voiceService.cancelRecording();
+					return false;
+				}
+				this.recStartTime = Date.now();
+				this.micBtnEl?.addClass("is-recording");
+				const updateElapsed = () => {
+					const secs = Math.floor((Date.now() - this.recStartTime) / 1000);
+					const mm = Math.floor(secs / 60);
+					const ss = String(secs % 60).padStart(2, "0");
+					const bgProgress = this.voiceService.isEngineBootstrapping()
+						? this.voiceService.getCurrentProgress()
+						: null;
+					const bgHint =
+						bgProgress && bgProgress.stage !== "ready"
+							? bgProgress.percent !== null
+								? ` · Engine ${bgProgress.percent}%`
+								: " · Engine preparing…"
+							: "";
+					this.setStatus(
+						`Listening ${mm}:${ss}${bgHint} · V stop · Enter save`,
+						"recording"
+					);
+				};
+				updateElapsed();
+				this.recTimerId = window.setInterval(updateElapsed, 250);
+				return true;
+			} catch (err: any) {
+				const msg = err?.message || String(err);
+				this.setTextareaVoiceLocked(false);
+				this.setStatus(`Mic error: ${msg}`, "error");
+				new Notice(`SlideFlow mic: ${msg}`);
+				return false;
+			} finally {
+				this.isStartingVoice = false;
+				this.voiceStartPromise = null;
+			}
+		};
+
+		this.voiceStartPromise = runStart();
+		return this.voiceStartPromise;
+	}
+
+	private async stopVoiceAndAppend(): Promise<StopVoiceResult> {
 		this.stopRecTimer();
 		this.micBtnEl?.removeClass("is-recording");
 		this.isBusyTranscribing = true;
+		this.setTextareaVoiceLocked(true);
 		if (this.submitBtnEl) this.submitBtnEl.disabled = true;
 
 		try {
-			const res = await this.voiceService.stopAndTranscribe((statusMsg) => {
-				this.setStatus(statusMsg, "busy");
+			const res = await this.voiceService.stopAndTranscribe((update: VoiceProgressUpdate) => {
+				if (!this.isOpenFlag) return;
+				this.setStatus(update.message, "busy", update.percent);
 			});
+
+			if (!this.isOpenFlag) {
+				return { ok: false, text: "", hadError: false };
+			}
 
 			const text = (res.text || "").trim();
 			if (text && this.textareaEl) {
 				const existing = this.textareaEl.value;
-				const sep = existing.trim().length > 0 && !existing.endsWith(" ") && !existing.endsWith("\n") ? " " : "";
+				const sep =
+					existing.trim().length > 0 && !existing.endsWith(" ") && !existing.endsWith("\n")
+						? " "
+						: "";
 				this.textareaEl.value = `${existing}${sep}${text}`;
 				this.autoResizeTextarea();
-				this.textareaEl.focus();
-				const len = this.textareaEl.value.length;
-				this.textareaEl.setSelectionRange(len, len);
 				this.setStatus("", "hidden");
-			} else {
-				this.setStatus("No speech detected. Press Ctrl+M to retry.", "idle");
+				return { ok: true, text, hadError: false };
 			}
-			return text;
+			this.setStatus("No speech detected. Press Ctrl+M to retry.", "idle");
+			return { ok: false, text: "", hadError: false };
 		} catch (err: any) {
 			const msg = err?.message || String(err);
-			this.setStatus(`Whisper error: ${msg}`, "error");
-			new Notice(`SlideFlow Whisper: ${msg}`);
-			return "";
+			if (this.isOpenFlag) {
+				this.setStatus(`Whisper error: ${msg}`, "error");
+				new Notice(`SlideFlow Whisper: ${msg}`);
+			}
+			return { ok: false, text: "", hadError: true };
 		} finally {
 			this.isBusyTranscribing = false;
 			if (this.submitBtnEl) this.submitBtnEl.disabled = false;
+			if (this.isOpenFlag) {
+				this.setTextareaVoiceLocked(false);
+				if (this.textareaEl) {
+					this.textareaEl.focus();
+					const len = this.textareaEl.value.length;
+					this.textareaEl.setSelectionRange(len, len);
+				}
+			}
 		}
 	}
 
 	private async handleSubmit(): Promise<void> {
 		if (this.isBusyTranscribing) return;
 
+		if (this.voiceStartPromise) {
+			const started = await this.voiceStartPromise;
+			if (!started || !this.isOpenFlag) return;
+		}
+
 		if (this.voiceService.isRecording()) {
-			await this.stopVoiceAndAppend();
+			const voiceRes = await this.stopVoiceAndAppend();
+			// Enter during voice capture only auto-saves when transcription succeeded with real text!
+			if (!this.isOpenFlag || !voiceRes.ok || !voiceRes.text) {
+				return;
+			}
 		}
 
 		const text = (this.textareaEl?.value || "").trim();
@@ -667,6 +878,9 @@ export class CommentOverlayModal {
 		this.parentEl.removeClass("is-comment-modal-open");
 		if (!this.isOpenFlag && !this.cardEl) return;
 		this.isOpenFlag = false;
+		this.isStartingVoice = false;
+		this.voiceStartPromise = null;
+		this.isBusyTranscribing = false;
 		this.stopRecTimer();
 		setGreenSelectionHighlight(null);
 		if (this.voiceService.isRecording()) {
@@ -696,6 +910,8 @@ export class CommentOverlayModal {
 		this.submitBtnEl = null;
 		this.voiceFeedbackEl = null;
 		this.statusEl = null;
+		this.progressPctEl = null;
+		this.meterTrackEl = null;
 		this.levelFillEl = null;
 		this.existingListEl = null;
 		this.editingId = null;

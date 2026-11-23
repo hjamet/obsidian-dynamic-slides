@@ -3,11 +3,9 @@
  *
  * - Instant microphone capture in Electron (Web Audio PCM -> 16 kHz mono WAV).
  * - Automatically writes the bundled Python server into `.obsidian/plugins/slideflow/whisper_server.py`.
- * - Automatically discovers Python 3, reuses existing Faster-Whisper installation if available,
- *   or bootstraps an isolated plugin `.venv` and installs `faster-whisper` + `numpy` (and NVIDIA CUDA
- *   runtime wheels if an NVIDIA GPU is detected).
- * - Automatically downloads the selected Whisper model on first use and restarts seamlessly if the
- *   user changes model in Settings.
+ * - Single-flight bootstrap & launch (never spawns duplicate pythonw.exe servers) with live progress
+ *   broadcast to all active listeners (venv creation, pip wheel downloads, HuggingFace model download,
+ *   GPU/CPU loading, and transcription).
  * - Strict Fail-Fast: surfaces every real error explicitly without silent fallbacks.
  */
 
@@ -23,6 +21,12 @@ export interface VoiceDictationConfig {
 	language: string;
 }
 
+export interface VoiceProgressUpdate {
+	message: string;
+	percent: number | null;
+	stage: string;
+}
+
 export interface TranscriptionResponse {
 	text: string;
 	duration_s: number;
@@ -32,9 +36,15 @@ export interface TranscriptionResponse {
 
 interface HealthResponse {
 	status: string;
+	stage?: string;
 	version?: string;
 	model?: string;
 	device?: string;
+	compute_type?: string;
+	progress?: number | null;
+	progress_detail?: string;
+	downloaded_mb?: number | null;
+	total_mb?: number | null;
 	error?: string;
 }
 
@@ -97,12 +107,26 @@ function encodeMonoWav16k(samples: Float32Array, sampleRate: number): ArrayBuffe
 function runProcessCapture(
 	exe: string,
 	args: string[],
-	timeoutMs: number
+	timeoutMs: number,
+	onLine?: (line: string) => void
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
+		let stdoutBuf = "";
+		let stderrBuf = "";
 		let settled = false;
+
+		const flushBuffer = (buf: string): string => {
+			if (!onLine) return "";
+			const parts = buf.split(/\r\n|\n|\r/);
+			const rest = parts.pop() || "";
+			for (const p of parts) {
+				const trimmed = p.trim();
+				if (trimmed) onLine(trimmed);
+			}
+			return rest;
+		};
 
 		const child = spawn(exe, args, {
 			shell: false,
@@ -122,8 +146,16 @@ function runProcessCapture(
 			}
 		}, timeoutMs);
 
-		child.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-		child.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+		child.stdout?.on("data", (d: Buffer) => {
+			const s = d.toString("utf8");
+			stdout += s;
+			if (onLine) stdoutBuf = flushBuffer(stdoutBuf + s);
+		});
+		child.stderr?.on("data", (d: Buffer) => {
+			const s = d.toString("utf8");
+			stderr += s;
+			if (onLine) stderrBuf = flushBuffer(stderrBuf + s);
+		});
 
 		child.on("error", (err) => {
 			if (settled) return;
@@ -136,6 +168,10 @@ function runProcessCapture(
 			if (settled) return;
 			settled = true;
 			window.clearTimeout(timer);
+			if (onLine) {
+				if (stdoutBuf.trim()) onLine(stdoutBuf.trim());
+				if (stderrBuf.trim()) onLine(stderrBuf.trim());
+			}
 			resolve({ code: code ?? -1, stdout, stderr });
 		});
 	});
@@ -155,12 +191,15 @@ export class VoiceDictationService {
 	private recordingSampleRate: number = 48000;
 	private recording: boolean = false;
 
-	private spawnAttemptedAt: number = 0;
-	private spawnInFlight: Promise<void> | null = null;
 	private cachedReadyPython: string | null = null;
 	private runtimeSetupPromise: Promise<string> | null = null;
+	private spawnPromise: Promise<void> | null = null;
 	private managedChild: ChildProcess | null = null;
+	private managedChildExitCode: number | null = null;
 	private idleShutdownTimerId: number | null = null;
+
+	private progressListeners: Set<(u: VoiceProgressUpdate) => void> = new Set();
+	private lastProgress: VoiceProgressUpdate | null = null;
 
 	constructor(app: App, pluginDirRelative: string, getConfig: () => VoiceDictationConfig) {
 		this.app = app;
@@ -170,6 +209,40 @@ export class VoiceDictationService {
 
 	public isRecording(): boolean {
 		return this.recording;
+	}
+
+	public getCurrentProgress(): VoiceProgressUpdate | null {
+		return this.lastProgress;
+	}
+
+	public isEngineBootstrapping(): boolean {
+		return Boolean(this.runtimeSetupPromise || this.spawnPromise);
+	}
+
+	public subscribeProgress(listener: (u: VoiceProgressUpdate) => void): () => void {
+		this.progressListeners.add(listener);
+		if (this.lastProgress && this.lastProgress.stage !== "ready" && this.lastProgress.stage !== "idle") {
+			listener(this.lastProgress);
+		}
+		return () => {
+			this.progressListeners.delete(listener);
+		};
+	}
+
+	private emitProgress(message: string, percent: number | null, stage: string): void {
+		const update: VoiceProgressUpdate = {
+			message,
+			percent: percent === null ? null : Math.max(0, Math.min(100, Math.round(percent))),
+			stage,
+		};
+		this.lastProgress = update;
+		for (const listener of this.progressListeners) {
+			try {
+				listener(update);
+			} catch {
+				// ignore listener errors
+			}
+		}
 	}
 
 	private getPluginAbsoluteDir(): string {
@@ -283,7 +356,7 @@ export class VoiceDictationService {
 		}
 	}
 
-	private async resolveOrBootstrapPython(onStatus?: (msg: string) => void): Promise<string> {
+	private async resolveOrBootstrapPython(): Promise<string> {
 		if (this.cachedReadyPython) {
 			return this.cachedReadyPython;
 		}
@@ -292,6 +365,7 @@ export class VoiceDictationService {
 		}
 
 		const runSetup = async (): Promise<string> => {
+			this.emitProgress("Checking Python & Faster-Whisper runtime…", 5, "setup");
 			const candidates = this.discoverPythonCandidates();
 
 			// 1. Reuse any existing Python (plugin .venv or system Python) that already has faster-whisper + numpy
@@ -321,7 +395,7 @@ export class VoiceDictationService {
 			const venvPy = this.getVenvPythonPath();
 
 			if (!fs.existsSync(venvPy)) {
-				onStatus?.("Setting up local Whisper Python environment (first time only)…");
+				this.emitProgress("Creating local Whisper Python venv (first time)…", 12, "setup_venv");
 				const mk = await runProcessCapture(basePython, ["-m", "venv", venvDir], 120000);
 				if (mk.code !== 0) {
 					throw new Error(`Failed creating plugin venv: ${(mk.stderr || mk.stdout).trim()}`);
@@ -334,15 +408,45 @@ export class VoiceDictationService {
 				pkgs.push("nvidia-cublas-cu12", "nvidia-cudnn-cu12");
 			}
 
-			onStatus?.(
+			this.emitProgress(
 				hasGpu
-					? "Installing Faster-Whisper + CUDA runtime (first time only)…"
-					: "Installing Faster-Whisper runtime (first time only)…"
+					? "Installing Faster-Whisper + CUDA runtime (first time)…"
+					: "Installing Faster-Whisper runtime (first time)…",
+				18,
+				"setup_pip"
 			);
+
+			let pipPct = 20;
 			const pipRes = await runProcessCapture(
 				venvPy,
-				["-m", "pip", "install", "--upgrade", ...pkgs],
-				600000
+				["-m", "pip", "install", "--upgrade", "--progress-bar", "off", ...pkgs],
+				600000,
+				(line) => {
+					const collectMatch = line.match(/^Collecting\s+([^\s(]+)/i);
+					if (collectMatch) {
+						pipPct = Math.min(48, pipPct + 2);
+						this.emitProgress(`Collecting ${collectMatch[1]}…`, pipPct, "setup_pip");
+						return;
+					}
+					const dlMatch = line.match(/^Downloading\s+(\S+)(?:\s+\(([^)]+)\))?/i);
+					if (dlMatch) {
+						pipPct = Math.min(74, pipPct + 3);
+						const rawName = dlMatch[1].split("/").pop() || dlMatch[1];
+						const shortName = rawName.length > 28 ? `${rawName.slice(0, 25)}…` : rawName;
+						const sizeTag = dlMatch[2] ? ` (${dlMatch[2]})` : "";
+						this.emitProgress(`Downloading ${shortName}${sizeTag}…`, pipPct, "setup_pip");
+						return;
+					}
+					if (/^Installing collected packages/i.test(line)) {
+						pipPct = 80;
+						this.emitProgress("Installing Faster-Whisper packages…", pipPct, "setup_pip");
+						return;
+					}
+					if (/^Successfully installed/i.test(line)) {
+						pipPct = 88;
+						this.emitProgress("Verifying Faster-Whisper runtime…", pipPct, "setup_pip");
+					}
+				}
 			);
 			if (pipRes.code !== 0) {
 				throw new Error(
@@ -350,6 +454,7 @@ export class VoiceDictationService {
 				);
 			}
 
+			this.emitProgress("Verifying Faster-Whisper installation…", 90, "setup_verify");
 			if (!(await this.testPythonHasWhisper(venvPy))) {
 				throw new Error("Faster-Whisper installation completed but import check failed.");
 			}
@@ -427,21 +532,37 @@ export class VoiceDictationService {
 		void this.shutdownRunningServer();
 	}
 
-	private async spawnLocalServer(
-		cfg: VoiceDictationConfig,
-		onStatus?: (msg: string) => void
-	): Promise<void> {
-		if (this.spawnInFlight) {
-			return this.spawnInFlight;
+	/**
+	 * Single-flight server launcher: concurrent callers share the exact same promise and receive
+	 * live progress updates instead of spawning duplicate pythonw.exe servers.
+	 */
+	private async ensureLocalServerSpawned(cfg: VoiceDictationConfig): Promise<void> {
+		if (this.spawnPromise) {
+			return this.spawnPromise;
 		}
-		const now = Date.now();
-		if (now - this.spawnAttemptedAt < 3500) return;
-		this.spawnAttemptedAt = now;
 
 		const runSpawn = async (): Promise<void> => {
+			// Re-check health before spawning in case a server just became responsive
+			const existingHealth = await this.fetchHealth();
+			if (
+				existingHealth &&
+				(!existingHealth.model || existingHealth.model === (cfg.whisperModel || "medium")) &&
+				(!existingHealth.version || existingHealth.version === WHISPER_SERVER_VERSION) &&
+				existingHealth.status !== "error"
+			) {
+				return;
+			}
+
 			const scriptPath = this.ensureBundledServerScript();
-			const pyExe = await this.resolveOrBootstrapPython(onStatus);
+			const pyExe = await this.resolveOrBootstrapPython();
 			const launchExe = this.resolveWindowlessPython(pyExe);
+
+			// If our managed child is already alive and still starting up, don't spawn a second one
+			if (this.managedChild && this.managedChild.exitCode === null && !this.managedChild.killed) {
+				return;
+			}
+
+			this.emitProgress("Launching managed Faster-Whisper server…", 92, "launching");
 
 			const args = [
 				scriptPath,
@@ -457,6 +578,7 @@ export class VoiceDictationService {
 				cfg.language || "fr",
 			];
 
+			this.managedChildExitCode = null;
 			// detached: false + windowsHide: true + pythonw.exe guarantees zero terminal window on Windows 11
 			const child = spawn(launchExe, args, {
 				detached: false,
@@ -466,17 +588,18 @@ export class VoiceDictationService {
 			});
 			child.unref();
 			this.managedChild = child;
-			child.once("exit", () => {
+			child.once("exit", (code) => {
 				if (this.managedChild === child) {
+					this.managedChildExitCode = code ?? -1;
 					this.managedChild = null;
 				}
 			});
 		};
 
-		this.spawnInFlight = runSpawn().finally(() => {
-			this.spawnInFlight = null;
+		this.spawnPromise = runSpawn().finally(() => {
+			this.spawnPromise = null;
 		});
-		return this.spawnInFlight;
+		return this.spawnPromise;
 	}
 
 	/**
@@ -492,11 +615,12 @@ export class VoiceDictationService {
 				const sameModel = !health.model || health.model === (cfg.whisperModel || "medium");
 				const sameVer = !health.version || health.version === WHISPER_SERVER_VERSION;
 				if (sameModel && sameVer && health.status !== "error") {
+					this.lastProgress = { message: "Ready", percent: 100, stage: "ready" };
 					return;
 				}
 				await this.shutdownRunningServer();
 			}
-			await this.spawnLocalServer(cfg);
+			await this.ensureLocalServerSpawned(cfg);
 		} catch (err) {
 			console.error("[SlideFlow] Whisper prewarm failed:", err);
 		}
@@ -600,7 +724,9 @@ export class VoiceDictationService {
 		}
 	}
 
-	public async stopAndTranscribe(onStatus?: (msg: string) => void): Promise<TranscriptionResponse> {
+	public async stopAndTranscribe(
+		onProgress?: (update: VoiceProgressUpdate) => void
+	): Promise<TranscriptionResponse> {
 		if (!this.recording) {
 			throw new Error("No active voice recording.");
 		}
@@ -625,65 +751,100 @@ export class VoiceDictationService {
 		const wavBuffer = encodeMonoWav16k(merged, sampleRate);
 		const cfg = this.getConfig();
 
-		onStatus?.("Connecting to local Whisper engine…");
-		let health = await this.fetchHealth();
-
-		if (
-			health &&
-			((health.model && health.model !== (cfg.whisperModel || "medium")) ||
-				(health.version && health.version !== WHISPER_SERVER_VERSION) ||
-				health.status === "error")
-		) {
-			await this.shutdownRunningServer();
-			health = null;
-		}
-
-		if (!health) {
-			onStatus?.("Starting managed Faster-Whisper engine…");
-			await this.spawnLocalServer(cfg, onStatus);
-		}
-
-		// Wait for ready; extend deadline automatically when downloading model for the first time
-		let deadline = Date.now() + 60000;
-		let extendedForDownload = false;
-
-		while (Date.now() < deadline) {
-			health = await this.fetchHealth();
-			if (health) {
-				if (health.status === "ready") break;
-				if (health.status === "error") {
-					throw new Error(`Whisper server error: ${health.error || "unknown"}`);
-				}
-				if (health.status === "downloading") {
-					if (!extendedForDownload) {
-						deadline = Date.now() + 600000;
-						extendedForDownload = true;
-					}
-					onStatus?.(`Downloading Whisper "${health.model || cfg.whisperModel}" model (first time only)…`);
-				} else {
-					onStatus?.(`Loading Whisper "${health.model || cfg.whisperModel}"…`);
-				}
+		const unsubscribe = onProgress ? this.subscribeProgress(onProgress) : null;
+		try {
+			if (!this.isEngineBootstrapping()) {
+				this.emitProgress("Connecting to local Whisper engine…", null, "connecting");
 			}
-			await new Promise((r) => window.setTimeout(r, 350));
+			let health = await this.fetchHealth();
+
+			if (
+				health &&
+				((health.model && health.model !== (cfg.whisperModel || "medium")) ||
+					(health.version && health.version !== WHISPER_SERVER_VERSION) ||
+					health.status === "error")
+			) {
+				this.emitProgress("Restarting Whisper engine with updated settings…", null, "restarting");
+				await this.shutdownRunningServer();
+				health = null;
+			}
+
+			if (!health) {
+				if (!this.isEngineBootstrapping()) {
+					this.emitProgress("Starting managed Faster-Whisper engine…", null, "starting");
+				}
+				await this.ensureLocalServerSpawned(cfg);
+			}
+
+			// Wait for ready; extend deadline automatically when downloading model for the first time
+			let deadline = Date.now() + 90000;
+			let extendedForDownload = false;
+			let consecutiveUnreachableAfterExit = 0;
+
+			while (Date.now() < deadline) {
+				health = await this.fetchHealth();
+				if (health) {
+					consecutiveUnreachableAfterExit = 0;
+					if (health.status === "ready") {
+						this.emitProgress("Whisper ready", 100, "ready");
+						break;
+					}
+					if (health.status === "error") {
+						throw new Error(`Whisper server error: ${health.error || "unknown"}`);
+					}
+					if (health.status === "downloading") {
+						if (!extendedForDownload) {
+							deadline = Date.now() + 600000;
+							extendedForDownload = true;
+						}
+						const dlMsg =
+							health.progress_detail ||
+							`Downloading Whisper "${health.model || cfg.whisperModel}" model (first time only)…`;
+						const dlPct = typeof health.progress === "number" ? health.progress : null;
+						this.emitProgress(dlMsg, dlPct, "downloading_model");
+					} else {
+						const loadMsg =
+							health.progress_detail ||
+							`Loading Whisper "${health.model || cfg.whisperModel}"…`;
+						const loadPct = typeof health.progress === "number" ? health.progress : null;
+						this.emitProgress(loadMsg, loadPct, "loading_model");
+					}
+				} else {
+					if (this.managedChild === null && this.managedChildExitCode !== null) {
+						consecutiveUnreachableAfterExit++;
+						if (consecutiveUnreachableAfterExit >= 4) {
+							throw new Error(
+								`Whisper server exited unexpectedly (code ${this.managedChildExitCode}). Check %TEMP%\\slideflow_whisper.log.`
+							);
+						}
+					} else {
+						this.emitProgress("Waiting for local Whisper server…", null, "waiting_server");
+					}
+				}
+				await new Promise((r) => window.setTimeout(r, 350));
+			}
+
+			if (!health || health.status !== "ready") {
+				throw new Error("Timed out waiting for local Whisper engine to become ready.");
+			}
+
+			this.emitProgress("Transcribing…", null, "transcribing");
+			const lang = encodeURIComponent(cfg.language || "fr");
+			const resp = await fetch(`${WHISPER_BASE_URL}/transcribe?language=${lang}`, {
+				method: "POST",
+				headers: { "Content-Type": "audio/wav" },
+				body: wavBuffer,
+			});
+
+			const json = await resp.json();
+			if (!resp.ok) {
+				throw new Error(json?.error || `HTTP ${resp.status} on /transcribe`);
+			}
+
+			this.lastProgress = { message: "Ready", percent: 100, stage: "ready" };
+			return json as TranscriptionResponse;
+		} finally {
+			unsubscribe?.();
 		}
-
-		if (!health || health.status !== "ready") {
-			throw new Error("Timed out waiting for local Whisper engine to become ready.");
-		}
-
-		onStatus?.("Transcribing…");
-		const lang = encodeURIComponent(cfg.language || "fr");
-		const resp = await fetch(`${WHISPER_BASE_URL}/transcribe?language=${lang}`, {
-			method: "POST",
-			headers: { "Content-Type": "audio/wav" },
-			body: wavBuffer,
-		});
-
-		const json = await resp.json();
-		if (!resp.ok) {
-			throw new Error(json?.error || `HTTP ${resp.status} on /transcribe`);
-		}
-
-		return json as TranscriptionResponse;
 	}
 }

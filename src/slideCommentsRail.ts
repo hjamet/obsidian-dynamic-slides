@@ -19,10 +19,14 @@ import { readImageAsDataUrl } from "./commentImages";
 export interface SlideCommentsRailCallbacks {
 	onEditComment: (comment: ReviewComment, anchorRect?: AnchorRect | null) => void;
 	onDeleteComment: (commentId: string) => Promise<void>;
+	onAddBlockComment?: (blockEl: HTMLElement) => void;
+	onHoverAddEnter?: () => void;
+	onHoverAddLeave?: () => void;
 	getSlideContainer: () => HTMLElement | null;
 }
 
 const COMMENT_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+const COMMENT_PLUS_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="12" y1="7.5" x2="12" y2="13.5"/><line x1="9" y1="10.5" x2="15" y2="10.5"/></svg>`;
 const EDIT_ICON_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>`;
 const DELETE_ICON_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>`;
 
@@ -31,6 +35,8 @@ export class SlideCommentsRail {
 	private callbacks: SlideCommentsRailCallbacks;
 
 	private railEl: HTMLElement;
+	private hoverAddBtnEl: HTMLButtonElement;
+	private hoveredBlockEl: HTMLElement | null = null;
 	private popoverEl: HTMLElement | null = null;
 	private activeCommentId: string | null = null;
 	private hideTimerId: number | null = null;
@@ -52,7 +58,35 @@ export class SlideCommentsRail {
 		this.railEl.addEventListener("click", (evt) => evt.stopPropagation());
 		this.railEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
 
-		this.boundResizeHandler = () => this.positionRail();
+		this.hoverAddBtnEl = this.parentEl.createEl("button", {
+			cls: "slideflow-hover-add-btn",
+			attr: {
+				type: "button",
+				title: "Comment on this element (C text · V voice)",
+				"aria-label": "Comment on hovered element",
+			},
+		});
+		this.hoverAddBtnEl.innerHTML = COMMENT_PLUS_ICON_SVG;
+		this.hoverAddBtnEl.style.display = "none";
+		this.hoverAddBtnEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
+		this.hoverAddBtnEl.addEventListener("mouseenter", () => {
+			this.callbacks.onHoverAddEnter?.();
+		});
+		this.hoverAddBtnEl.addEventListener("mouseleave", () => {
+			this.callbacks.onHoverAddLeave?.();
+		});
+		this.hoverAddBtnEl.addEventListener("click", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			if (this.hoveredBlockEl && this.hoveredBlockEl.isConnected) {
+				this.callbacks.onAddBlockComment?.(this.hoveredBlockEl);
+			}
+		});
+
+		this.boundResizeHandler = () => {
+			this.positionRail();
+			this.positionHoverAddBtn();
+		};
 		this.boundTransitionEndHandler = (evt: TransitionEvent) => {
 			const target = evt.target as HTMLElement | null;
 			if (
@@ -62,6 +96,7 @@ export class SlideCommentsRail {
 					target.classList.contains("dynamic-slides-sidebar-toc"))
 			) {
 				this.positionRail();
+				this.positionHoverAddBtn();
 			}
 		};
 		window.addEventListener("resize", this.boundResizeHandler);
@@ -70,8 +105,77 @@ export class SlideCommentsRail {
 		if (typeof ResizeObserver !== "undefined") {
 			this.resizeObserver = new ResizeObserver(() => {
 				this.positionRail();
+				this.positionHoverAddBtn();
 			});
 		}
+	}
+
+	public setHoveredBlock(blockEl: HTMLElement | null): void {
+		this.hoveredBlockEl = blockEl && blockEl.isConnected ? blockEl : null;
+		if (!this.hoveredBlockEl) {
+			this.hoverAddBtnEl.style.display = "none";
+			return;
+		}
+		this.ensureObservedContainer();
+		this.positionHoverAddBtn();
+	}
+
+	public positionHoverAddBtn(): void {
+		const block = this.hoveredBlockEl;
+		if (!block || !block.isConnected) {
+			this.hoverAddBtnEl.style.display = "none";
+			return;
+		}
+		const container = this.callbacks.getSlideContainer();
+		if (!container || !container.isConnected) {
+			this.hoverAddBtnEl.style.display = "none";
+			return;
+		}
+		const slideRect = container.getBoundingClientRect();
+		const blockRect = block.getBoundingClientRect();
+		if (slideRect.width === 0 || blockRect.height === 0) {
+			this.hoverAddBtnEl.style.display = "none";
+			return;
+		}
+
+		// Exact same right-edge lane as existing comment buttons (`slideRect.right + 14` rail + `4px` rail left padding)
+		const btnSize = 34;
+		const edgeMargin = 16;
+		const idealLeft = slideRect.right + 18;
+		const maxLeft = window.innerWidth - btnSize - edgeMargin;
+		const clampedLeft = Math.max(edgeMargin, Math.min(idealLeft, maxLeft));
+
+		const visibleTop = Math.max(slideRect.top, blockRect.top);
+		const visibleBottom = Math.min(slideRect.bottom, blockRect.bottom);
+		if (visibleBottom <= visibleTop) {
+			this.hoverAddBtnEl.style.display = "none";
+			return;
+		}
+
+		let centerY = Math.min(visibleTop + 22, (visibleTop + visibleBottom) / 2);
+		centerY = Math.max(56, Math.min(window.innerHeight - 64, centerY));
+
+		// Avoid colliding vertically with existing saved comment icons in the same right lane
+		if (this.comments.length > 0 && this.railEl.style.display !== "none") {
+			const railRect = this.railEl.getBoundingClientRect();
+			const overlapsRailX = Math.abs(clampedLeft - railRect.left) < btnSize + 4;
+			const overlapsRailY = centerY + btnSize / 2 > railRect.top - 6 && centerY - btnSize / 2 < railRect.bottom + 6;
+			if (overlapsRailX && overlapsRailY) {
+				const aboveY = railRect.top - btnSize / 2 - 8;
+				const belowY = railRect.bottom + btnSize / 2 + 8;
+				if (centerY < (railRect.top + railRect.bottom) / 2 && aboveY >= 56) {
+					centerY = aboveY;
+				} else if (belowY <= window.innerHeight - 64) {
+					centerY = belowY;
+				} else if (aboveY >= 56) {
+					centerY = aboveY;
+				}
+			}
+		}
+
+		this.hoverAddBtnEl.style.left = `${Math.round(clampedLeft)}px`;
+		this.hoverAddBtnEl.style.top = `${Math.round(centerY - btnSize / 2)}px`;
+		this.hoverAddBtnEl.style.display = "inline-flex";
 	}
 
 	private ensureObservedContainer(): void {
@@ -418,6 +522,8 @@ export class SlideCommentsRail {
 		window.removeEventListener("resize", this.boundResizeHandler);
 		this.parentEl.removeEventListener("transitionend", this.boundTransitionEndHandler);
 		this.hidePopoverImmediate();
+		this.hoveredBlockEl = null;
+		this.hoverAddBtnEl.remove();
 		this.railEl.remove();
 	}
 }
