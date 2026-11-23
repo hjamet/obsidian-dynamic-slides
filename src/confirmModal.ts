@@ -5,8 +5,8 @@
  * Supports:
  * - Delete confirmation inside Review Queue (`Enter` confirms, `Escape` cancels)
  * - Presentation exit warning with unsent/uncopied comments
- *   (`Ctrl+Enter` copies/sends & exits, `Escape` returns to presentation,
- *    explicit button click discards all & exits)
+ *   (`Ctrl+Enter` copies/sends & exits, `Escape` triggers "Exit & Keep" to close
+ *    while preserving comments, clicking outside the modal returns to presentation)
  */
 
 export interface ConfirmDialogOptions {
@@ -17,7 +17,10 @@ export interface ConfirmDialogOptions {
 	confirmVariant?: "primary" | "danger";
 	confirmShortcut: "Enter" | "Ctrl+Enter";
 	cancelLabelHtml?: string;
+	hideCancelButton?: boolean;
 	discardLabel?: string;
+	discardLabelHtml?: string;
+	escapeAction?: "cancel" | "discard";
 	onConfirm: () => void | Promise<void>;
 	onCancel: () => void;
 	onDiscard?: () => void | Promise<void>;
@@ -76,12 +79,16 @@ export class ConfirmOverlayModal {
 		const actionsEl = cardEl.createDiv({ cls: "slideflow-confirm-actions" });
 
 		const leftGroup = actionsEl.createDiv({ cls: "slideflow-confirm-actions-left" });
-		if (options.discardLabel && options.onDiscard) {
+		if ((options.discardLabelHtml || options.discardLabel) && options.onDiscard) {
 			const discardBtn = leftGroup.createEl("button", {
 				cls: "slideflow-confirm-btn is-secondary",
-				text: options.discardLabel,
 				attr: { type: "button" },
 			});
+			if (options.discardLabelHtml) {
+				discardBtn.innerHTML = options.discardLabelHtml;
+			} else if (options.discardLabel) {
+				discardBtn.setText(options.discardLabel);
+			}
 			discardBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
 				this.triggerDiscard();
@@ -90,15 +97,17 @@ export class ConfirmOverlayModal {
 
 		const rightGroup = actionsEl.createDiv({ cls: "slideflow-confirm-actions-right" });
 
-		const cancelBtn = rightGroup.createEl("button", {
-			cls: "slideflow-confirm-btn is-secondary",
-			attr: { type: "button" },
-		});
-		cancelBtn.innerHTML = options.cancelLabelHtml || `Cancel <strong>Esc</strong>`;
-		cancelBtn.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.triggerCancel();
-		});
+		if (!options.hideCancelButton) {
+			const cancelBtn = rightGroup.createEl("button", {
+				cls: "slideflow-confirm-btn is-secondary",
+				attr: { type: "button" },
+			});
+			cancelBtn.innerHTML = options.cancelLabelHtml || `Cancel <strong>Esc</strong>`;
+			cancelBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.triggerCancel();
+			});
+		}
 
 		const confirmCls =
 			options.confirmVariant === "danger"
@@ -148,8 +157,14 @@ export class ConfirmOverlayModal {
 		evt.stopPropagation();
 		evt.stopImmediatePropagation();
 
+		if (evt.repeat) return;
+
 		if (evt.key === "Escape" || evt.code === "Escape") {
-			this.triggerCancel();
+			if (this.currentOptions.escapeAction === "discard" && this.currentOptions.onDiscard) {
+				this.triggerDiscard();
+			} else {
+				this.triggerCancel();
+			}
 			return;
 		}
 

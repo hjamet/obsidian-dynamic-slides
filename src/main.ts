@@ -1222,9 +1222,9 @@ export default class SlideFlowPlugin extends Plugin {
 	/**
 	 * Comments are ALWAYS persisted across sessions in both modes (never auto-deleted on exit).
 	 * - Direct CLI mode: if unsent comments exist, prompts Ctrl+Enter to send & exit (auto-clears on exit 0),
-	 *   Esc to return, or click "Exit & Keep" to close while keeping comments saved.
+	 *   Esc or click "Exit & Keep" to close while keeping comments saved, or click outside modal to return.
 	 * - Clipboard mode: if uncopied comments exist, prompts Ctrl+Enter to copy & exit,
-	 *   Esc to return, or click "Exit & Keep" to close while keeping comments saved until manual Clear queue.
+	 *   Esc or click "Exit & Keep" to close while keeping comments saved, or click outside modal to return.
 	 */
 	private requestClosePresentation(): void {
 		if (!this.exitConfirmModal) {
@@ -1246,8 +1246,9 @@ export default class SlideFlowPlugin extends Plugin {
 				confirmLabelHtml: `Send & Exit <strong>Ctrl+↵</strong>`,
 				confirmVariant: "primary",
 				confirmShortcut: "Ctrl+Enter",
-				cancelLabelHtml: `Return <strong>Esc</strong>`,
-				discardLabel: "Exit & Keep",
+				hideCancelButton: true,
+				discardLabelHtml: `Exit & Keep <strong>Esc</strong>`,
+				escapeAction: "discard",
 				onConfirm: async () => {
 					const launched = await this.sendPendingCommentsToCli();
 					if (launched) {
@@ -1255,7 +1256,7 @@ export default class SlideFlowPlugin extends Plugin {
 					}
 				},
 				onCancel: () => {
-					// Stay in presentation
+					// Backdrop click: stay in presentation
 				},
 				onDiscard: () => {
 					this.closePresentation();
@@ -1277,14 +1278,15 @@ export default class SlideFlowPlugin extends Plugin {
 			confirmLabelHtml: `Copy & Exit <strong>Ctrl+↵</strong>`,
 			confirmVariant: "primary",
 			confirmShortcut: "Ctrl+Enter",
-			cancelLabelHtml: `Return <strong>Esc</strong>`,
-			discardLabel: "Exit & Keep",
+			hideCancelButton: true,
+			discardLabelHtml: `Exit & Keep <strong>Esc</strong>`,
+			escapeAction: "discard",
 			onConfirm: async () => {
 				await this.copyPendingCommentsExport(true);
 				this.closePresentation();
 			},
 			onCancel: () => {
-				// Stay in presentation
+				// Backdrop click: stay in presentation
 			},
 			onDiscard: () => {
 				// Exit cleanly without deleting persisted comments
