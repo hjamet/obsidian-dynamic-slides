@@ -111,6 +111,8 @@ export class PresentationModal extends Component {
 	private zoomOverlayEl: HTMLElement | null = null;
 	private zoomContentEl: HTMLElement | null = null;
 	private zoomSlideComponent: Component | null = null;
+	private zoomedLiveSourceEl: HTMLElement | null = null;
+	private zoomedLivePlaceholder: Comment | null = null;
 	private activePdfBlobUrl: string | null = null;
 	private pdfMutationObserver: MutationObserver | null = null;
 	private pdfKickTimers: number[] = [];
@@ -349,6 +351,11 @@ export class PresentationModal extends Component {
 				const zoomableList = this.detectMediaElements();
 				const matchedEl = zoomableList.find(item => item === zoomableEl || item.contains(zoomableEl));
 				if (matchedEl) {
+					if (this.isLivePluginBlock(matchedEl)) {
+						// Live interactive plugins visible directly on a slide (e.g. only-zoomable slides)
+						// must receive native clicks/drags without SlideFlow hijacking the click into zoom.
+						return;
+					}
 					const index = zoomableList.indexOf(matchedEl);
 					if (index !== -1) {
 						evt.preventDefault();
@@ -912,6 +919,76 @@ export class PresentationModal extends Component {
 		this.animateScrollTo(targetTop, this.scrollDurationMs);
 	}
 
+	private isMermaidElement(el: HTMLElement): boolean {
+		return (
+			el.matches(
+				".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid'], [class*='language-mermaid']"
+			) ||
+			el.querySelector(
+				".mermaid, svg.mermaid, .block-language-mermaid, [class*='block-language-mermaid']"
+			) !== null
+		);
+	}
+
+	private isLivePluginBlock(el: HTMLElement): boolean {
+		if (el.matches(".callout")) return false;
+		if (this.isMermaidElement(el)) return false;
+		// Any Obsidian registerMarkdownCodeBlockProcessor() plugin renders inside `.block-language-<lang>`
+		if (el.matches("[class*='block-language-']")) {
+			return true;
+		}
+		// Also preserve live DOM for post-processor widgets containing interactive controls
+		const tag = el.tagName.toLowerCase();
+		if (
+			tag !== "pre" &&
+			tag !== "img" &&
+			tag !== "iframe" &&
+			el.querySelector(
+				"button:not(.copy-code-button), input, select, textarea, canvas, [draggable='true']"
+			) !== null
+		) {
+			return true;
+		}
+		return false;
+	}
+
+	private extractPluginBlockLanguage(el: HTMLElement): string {
+		const cls = Array.from(el.classList).find((c) => c.startsWith("block-language-"));
+		return cls ? cls.replace(/^block-language-/, "") : "";
+	}
+
+	private restoreZoomedLiveElement(leaveClosingGhost: boolean = false): void {
+		const liveEl = this.zoomedLiveSourceEl;
+		const placeholder = this.zoomedLivePlaceholder;
+		this.zoomedLiveSourceEl = null;
+		this.zoomedLivePlaceholder = null;
+
+		if (liveEl) {
+			const activeEl = document.activeElement;
+			if (activeEl instanceof HTMLElement && liveEl.contains(activeEl)) {
+				try {
+					activeEl.blur();
+				} catch {
+					// ignore
+				}
+			}
+			if (leaveClosingGhost && liveEl.parentElement) {
+				const ghost = liveEl.cloneNode(true) as HTMLElement;
+				ghost.style.pointerEvents = "none";
+				liveEl.parentElement.replaceChild(ghost, liveEl);
+			}
+			liveEl.removeClass("slideflow-live-plugin-el");
+			if (placeholder && placeholder.parentNode) {
+				placeholder.parentNode.insertBefore(liveEl, placeholder);
+				placeholder.parentNode.removeChild(placeholder);
+			} else if (liveEl.parentNode) {
+				liveEl.parentNode.removeChild(liveEl);
+			}
+		} else if (placeholder && placeholder.parentNode) {
+			placeholder.parentNode.removeChild(placeholder);
+		}
+	}
+
 	public detectMediaElements(): HTMLElement[] {
 		if (!this.contentEl) return [];
 		const raw = Array.from(
@@ -929,6 +1006,32 @@ export class PresentationModal extends Component {
 			}
 			return !raw.some(other => other !== el && other.contains(el));
 		});
+
+		// Preserve exact document-order media index while a live plugin element is temporarily reparented into zoom
+		if (
+			this.zoomedLiveSourceEl &&
+			this.zoomedLivePlaceholder &&
+			this.contentEl.contains(this.zoomedLivePlaceholder) &&
+			!filtered.includes(this.zoomedLiveSourceEl)
+		) {
+			const placeholderInsideMatched = filtered.some((item) =>
+				item.contains(this.zoomedLivePlaceholder!)
+			);
+			if (!placeholderInsideMatched) {
+				const insertIdx = filtered.findIndex((item) =>
+					Boolean(
+						this.zoomedLivePlaceholder!.compareDocumentPosition(item) &
+							Node.DOCUMENT_POSITION_FOLLOWING
+					)
+				);
+				if (insertIdx === -1) {
+					filtered.push(this.zoomedLiveSourceEl);
+				} else {
+					filtered.splice(insertIdx, 0, this.zoomedLiveSourceEl);
+				}
+			}
+		}
+
 		this.mediaElements = filtered;
 		return filtered;
 	}
@@ -976,7 +1079,8 @@ export class PresentationModal extends Component {
 		return true;
 	}
 
-	private cleanupZoomResources(): void {
+	private cleanupZoomResources(leaveClosingGhost: boolean = false): void {
+		this.restoreZoomedLiveElement(leaveClosingGhost);
 		if (this.pdfMutationObserver) {
 			this.pdfMutationObserver.disconnect();
 			this.pdfMutationObserver = null;
@@ -1091,6 +1195,9 @@ export class PresentationModal extends Component {
 	private ensureZoomOverlay(animated: boolean): void {
 		this.hideSelectionToolbar();
 		this.clearHoveredBlock();
+		this.overlayEl
+			.querySelectorAll(".dynamic-slides-media-zoom-overlay.is-closing")
+			.forEach((el) => el.remove());
 		this.overlayEl.addClass("is-media-zoom-active");
 		if (this.contentEl) {
 			this.contentEl.style.opacity = "0";
@@ -1289,6 +1396,7 @@ export class PresentationModal extends Component {
 	}
 
 	public openMediaZoom(index: number, animated: boolean = true) {
+		this.restoreZoomedLiveElement(false);
 		const zoomableElements = this.detectMediaElements();
 		if (index < 0 || index >= zoomableElements.length) {
 			this.closeMediaZoom(false);
@@ -1317,10 +1425,57 @@ export class PresentationModal extends Component {
 		}
 
 		this.ensureZoomOverlay(animated);
-		this.cleanupZoomResources();
+		this.cleanupZoomResources(false);
 
 		if (this.zoomContentEl) {
 			this.zoomContentEl.empty();
+
+			// Live interactive Obsidian plugins (chess-pgn, chess-study, dataview, leaflet, charts, etc.):
+			// reparent the LIVE DOM node into the zoom overlay (leaving an invisible Comment placeholder)
+			// instead of cloneNode(true), preserving 100% of JS listeners, drag-and-drop, and plugin state!
+			if (this.isLivePluginBlock(targetMedia)) {
+				const isDiffIns = Boolean(targetMedia.closest(".dv-block-ins"));
+				const isDiffDel = !isDiffIns && Boolean(targetMedia.closest(".dv-block-del"));
+				const pluginLang = this.extractPluginBlockLanguage(targetMedia);
+				const parent = targetMedia.parentNode;
+				const placeholder = document.createComment("slideflow-live-zoom-placeholder");
+				if (parent) {
+					parent.insertBefore(placeholder, targetMedia);
+				}
+				this.zoomedLiveSourceEl = targetMedia;
+				this.zoomedLivePlaceholder = placeholder;
+
+				const wrapper = this.zoomContentEl.createDiv({
+					cls: "dynamic-slides-zoom-plugin",
+					attr: pluginLang ? { "data-plugin-lang": pluginLang } : {},
+				});
+				const host = wrapper.createDiv({
+					cls: `slideflow-live-plugin-host${isDiffIns ? " is-diff-ins" : ""}${isDiffDel ? " is-diff-del" : ""}`,
+				});
+				targetMedia.addClass("slideflow-live-plugin-el");
+				host.appendChild(targetMedia);
+
+				// Trigger a resize tick so layout/canvas/container-query plugins recompute once visible
+				requestAnimationFrame(() => {
+					if (targetMedia.isConnected) {
+						try {
+							window.dispatchEvent(new Event("resize"));
+						} catch {
+							// ignore
+						}
+					}
+				});
+				this.onMediaZoomOpenedCallback?.();
+				return;
+			}
+
+			const isDiffIns =
+				targetMedia.classList.contains("dv-pre-ins") ||
+				Boolean(targetMedia.closest(".dv-block-ins"));
+			const isDiffDel =
+				!isDiffIns &&
+				(targetMedia.classList.contains("dv-pre-del") ||
+					Boolean(targetMedia.closest(".dv-block-del")));
 			const clone = targetMedia.cloneNode(true) as HTMLElement;
 
 			// Strip Obsidian's copy-code-button (which contains an <svg> icon!) BEFORE classifying media type
@@ -1380,7 +1535,9 @@ export class PresentationModal extends Component {
 				enhanceMermaidSvgElements(wrapper);
 			} else if (isCode) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-code" });
-				const frame = wrapper.createDiv({ cls: "slideflow-code-frame" });
+				const frame = wrapper.createDiv({
+					cls: `slideflow-code-frame${isDiffIns ? " is-diff-ins" : ""}${isDiffDel ? " is-diff-del" : ""}`,
+				});
 				const codeEl = clone.querySelector("code") || clone;
 				const langCls =
 					Array.from(codeEl.classList).find((c) => c.startsWith("language-")) ||
@@ -1449,7 +1606,18 @@ export class PresentationModal extends Component {
 		const wasZoomActive = this.zoomOverlayEl !== null || this.overlayEl.hasClass("is-media-zoom-active");
 		this.hideSelectionToolbar();
 		this.overlayEl.removeClass("is-media-zoom-active");
-		this.cleanupZoomResources();
+		if (
+			this.zoomOverlayEl &&
+			document.activeElement instanceof HTMLElement &&
+			this.zoomOverlayEl.contains(document.activeElement)
+		) {
+			try {
+				document.activeElement.blur();
+			} catch {
+				// ignore
+			}
+		}
+		this.cleanupZoomResources(animated);
 		if (this.zoomOverlayEl) {
 			const elToClose = this.zoomOverlayEl;
 			this.zoomOverlayEl = null;
@@ -1763,6 +1931,8 @@ export class PresentationModal extends Component {
 		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
 		const wasZoomOpen = this.isMediaZoomActive();
 		const prevZoomIndex = this.activeZoomIndex;
+
+		this.restoreZoomedLiveElement(false);
 
 		if (this.currentSlideComponent) {
 			unloadSlideContent(this.currentSlideComponent, this);

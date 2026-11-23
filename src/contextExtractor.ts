@@ -328,6 +328,7 @@ export function extractZoomContext(
 	const isImage = Boolean(zoomContentEl.querySelector(".dynamic-slides-zoom-image"));
 	const isIframe = Boolean(zoomContentEl.querySelector(".dynamic-slides-zoom-iframe"));
 	const pdfZoomEl = zoomContentEl.querySelector(".dynamic-slides-zoom-pdf") as HTMLElement | null;
+	const pluginZoomEl = zoomContentEl.querySelector(".dynamic-slides-zoom-plugin") as HTMLElement | null;
 
 	let scopeLabel = "Zoom";
 	let currentText = "";
@@ -338,6 +339,10 @@ export function extractZoomContext(
 		scopeLabel = "Zoom · PDF";
 		const pdfRef = pdfZoomEl.getAttribute("data-pdf-source") || "[PDF document]";
 		currentText = pdfRef;
+	} else if (pluginZoomEl) {
+		const pluginLang = (pluginZoomEl.getAttribute("data-plugin-lang") || "").trim();
+		scopeLabel = pluginLang ? `Zoom · ${pluginLang}` : "Zoom · Widget";
+		currentText = cleanExtractedText(serializeNode(pluginZoomEl, "current", false));
 	} else if (isTable) {
 		scopeLabel = "Zoom · Table";
 		const tableEl = zoomContentEl.querySelector("table") as HTMLTableElement | null;
@@ -564,6 +569,14 @@ export function findHoverableMarkdownBlock(
 		return calloutEl;
 	}
 
+	// If inside a live third-party plugin code block (e.g. chess-pgn, dataview), target the outer widget atomically
+	const pluginBlockEl = startEl.closest(
+		"[class*='block-language-']:not(.callout):not(.block-language-mermaid)"
+	) as HTMLElement | null;
+	if (pluginBlockEl && contentEl.contains(pluginBlockEl) && isVisibleHoverCandidate(pluginBlockEl)) {
+		return pluginBlockEl;
+	}
+
 	// Walk up from the hovered node to the nearest specific Markdown block
 	let curr: HTMLElement | null = startEl;
 	while (curr && curr !== contentEl) {
@@ -629,6 +642,10 @@ export function getMarkdownBlockLabel(el: HTMLElement): string {
 	if (tag === "table") return "Table";
 	if (/^h[1-6]$/.test(tag)) return "Heading";
 	if (el.matches(".mermaid, svg.mermaid, .block-language-mermaid")) return "Diagram";
+	if (el.matches("[class*='block-language-']:not(.callout)")) {
+		const langCls = Array.from(el.classList).find((c) => c.startsWith("block-language-"));
+		return langCls ? langCls.replace(/^block-language-/, "") : "Widget";
+	}
 	if (el.matches(".pdf-embed, .internal-embed, iframe")) return "Embed";
 	if (tag === "img" || el.querySelector("img:not(.emoji):not(.svg-icon)")) return "Image";
 	return "Element";
@@ -754,6 +771,11 @@ export function collectReadableBlocks(contentEl: HTMLElement): HTMLElement[] {
 			if (tag === "hr" || tag === "br" || tag === "style" || tag === "script") continue;
 
 			if (child.classList.contains("callout")) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (child.matches("[class*='block-language-']:not(.callout):not(.block-language-mermaid)")) {
 				pushUnique(child);
 				continue;
 			}

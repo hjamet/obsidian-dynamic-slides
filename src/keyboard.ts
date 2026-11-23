@@ -18,26 +18,42 @@ export interface KeyboardNavigatorCallbacks {
 	isInputBlocked?: () => boolean;
 }
 
+const NAVIGATION_KEYS = new Set([
+	"ArrowRight",
+	"ArrowLeft",
+	"ArrowUp",
+	"ArrowDown",
+	"Space",
+	" ",
+	"PageDown",
+	"PageUp",
+	"Escape",
+]);
+
 export class KeyboardNavigator {
 	private callbacks: KeyboardNavigatorCallbacks;
-	private boundHandler: (evt: KeyboardEvent) => void;
+	private boundCaptureHandler: (evt: KeyboardEvent) => void;
+	private boundBubbleHandler: (evt: KeyboardEvent) => void;
 	private isAttached: boolean = false;
 
 	constructor(callbacks: KeyboardNavigatorCallbacks) {
 		this.callbacks = callbacks;
-		this.boundHandler = this.handleKeyDown.bind(this);
+		this.boundCaptureHandler = this.handleKeyDownCapture.bind(this);
+		this.boundBubbleHandler = this.handleKeyDownBubble.bind(this);
 	}
 
 	public attach() {
 		if (!this.isAttached) {
-			window.addEventListener("keydown", this.boundHandler, true);
+			window.addEventListener("keydown", this.boundCaptureHandler, true);
+			window.addEventListener("keydown", this.boundBubbleHandler, false);
 			this.isAttached = true;
 		}
 	}
 
 	public detach() {
 		if (this.isAttached) {
-			window.removeEventListener("keydown", this.boundHandler, true);
+			window.removeEventListener("keydown", this.boundCaptureHandler, true);
+			window.removeEventListener("keydown", this.boundBubbleHandler, false);
 			this.isAttached = false;
 		}
 	}
@@ -48,7 +64,56 @@ export class KeyboardNavigator {
 		return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
 	}
 
-	private handleKeyDown(evt: KeyboardEvent) {
+	private isInsideLivePlugin(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		return Boolean(
+			target.closest(
+				".slideflow-live-plugin-host, .slideflow-live-plugin-el, .dynamic-slides-content [class*='block-language-']:not(.callout):not(.block-language-mermaid)"
+			)
+		);
+	}
+
+	private dispatchNavigationKey(evt: KeyboardEvent): void {
+		evt.preventDefault();
+		evt.stopPropagation();
+
+		if (evt.code === "Escape" || evt.key === "Escape") {
+			this.callbacks.onEscape();
+			return;
+		}
+
+		if (
+			evt.code === "ArrowRight" ||
+			evt.key === "ArrowRight" ||
+			evt.code === "PageDown" ||
+			((evt.code === "Space" || evt.key === " ") && !evt.shiftKey)
+		) {
+			this.callbacks.onNext();
+			return;
+		}
+
+		if (
+			evt.code === "ArrowLeft" ||
+			evt.key === "ArrowLeft" ||
+			evt.code === "PageUp" ||
+			((evt.code === "Space" || evt.key === " ") && evt.shiftKey)
+		) {
+			this.callbacks.onPrev();
+			return;
+		}
+
+		if (evt.code === "ArrowUp" || evt.key === "ArrowUp") {
+			this.callbacks.onFastPrev();
+			return;
+		}
+
+		if (evt.code === "ArrowDown" || evt.key === "ArrowDown") {
+			this.callbacks.onFastNext();
+			return;
+		}
+	}
+
+	private handleKeyDownCapture(evt: KeyboardEvent) {
 		if (this.callbacks.isInputBlocked?.() || this.isTypingTarget(evt.target)) {
 			return;
 		}
@@ -149,47 +214,40 @@ export class KeyboardNavigator {
 			}
 		}
 
-		const handledKeys = [
-			"ArrowRight",
-			"ArrowLeft",
-			"ArrowUp",
-			"ArrowDown",
-			"Space",
-			"PageDown",
-			"PageUp",
-			"Escape"
-		];
-
-		if (handledKeys.includes(evt.code) || handledKeys.includes(evt.key)) {
-			evt.preventDefault();
-			evt.stopPropagation();
-		} else {
+		if (!NAVIGATION_KEYS.has(evt.code) && !NAVIGATION_KEYS.has(evt.key)) {
 			return;
 		}
 
-		if (evt.code === "Escape" || evt.key === "Escape") {
-			this.callbacks.onEscape();
+		// If focus is inside a live interactive plugin widget (e.g. Chess Coach, Dataview, Flashcards),
+		// let the plugin handle Arrow/Space/Escape keys first; our bubble listener handles them if unconsumed.
+		if (this.isInsideLivePlugin(evt.target)) {
 			return;
 		}
 
-		if (evt.code === "ArrowRight" || evt.key === "ArrowRight" || evt.code === "PageDown" || (evt.code === "Space" && !evt.shiftKey)) {
-			this.callbacks.onNext();
-			return;
-		}
+		this.dispatchNavigationKey(evt);
+	}
 
-		if (evt.code === "ArrowLeft" || evt.key === "ArrowLeft" || evt.code === "PageUp" || (evt.code === "Space" && evt.shiftKey)) {
-			this.callbacks.onPrev();
+	private handleKeyDownBubble(evt: KeyboardEvent) {
+		if (evt.defaultPrevented) {
 			return;
 		}
-
-		if (evt.code === "ArrowUp" || evt.key === "ArrowUp") {
-			this.callbacks.onFastPrev();
+		if (this.callbacks.isInputBlocked?.() || this.isTypingTarget(evt.target)) {
 			return;
 		}
-
-		if (evt.code === "ArrowDown" || evt.key === "ArrowDown") {
-			this.callbacks.onFastNext();
+		if (!this.isInsideLivePlugin(evt.target)) {
 			return;
 		}
+		if (!NAVIGATION_KEYS.has(evt.code) && !NAVIGATION_KEYS.has(evt.key)) {
+			return;
+		}
+		// Never hijack Space on a focused native button/link/summary inside a plugin widget
+		if (
+			(evt.code === "Space" || evt.key === " ") &&
+			evt.target instanceof HTMLElement &&
+			evt.target.closest("button, a[href], [role='button'], summary")
+		) {
+			return;
+		}
+		this.dispatchNavigationKey(evt);
 	}
 }

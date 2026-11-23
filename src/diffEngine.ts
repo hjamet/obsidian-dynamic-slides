@@ -387,12 +387,12 @@ function wrapBlockSpan(block: string, isInsert: boolean): string {
 	const cls = isInsert ? "dv-ins" : "dv-del";
 	const parsedFence = parseFencedBlock(block);
 	if (parsedFence) {
-		if (parsedFence.lang === "mermaid") {
-			// Keep mermaid fenced block renderable by Obsidian inside a tinted diff container
+		if (parsedFence.lang) {
+			// Keep language-tagged fenced blocks (mermaid, chess-pgn, chess-study, dataview, code, etc.)
+			// renderable by Obsidian's MarkdownCodeBlockProcessor & syntax highlighter inside a diff container.
 			return `<div class="dv-block-${tag}">\n\n${block}\n\n</div>`;
 		}
-		const langAttr = parsedFence.lang ? ` class="language-${escapeHtml(parsedFence.lang)}"` : "";
-		return `<pre class="dv-pre-${tag}"><code${langAttr}>${escapeHtml(parsedFence.inner)}</code></pre>`;
+		return `<pre class="dv-pre-${tag}"><code>${escapeHtml(parsedFence.inner)}</code></pre>`;
 	}
 	// Preserve list / task / blockquote prefix outside inline span for single-line items
 	const prefixMatch = block.match(/^(\s*(?:>+\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+\.\s+))([\s\S]*)$/);

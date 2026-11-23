@@ -431,8 +431,9 @@ body.is-dynamic-slides-active {
 	transition: max-width 0.25s cubic-bezier(0.16, 1, 0.3, 1), font-size 0.25s cubic-bezier(0.16, 1, 0.3, 1), padding 0.25s cubic-bezier(0.16, 1, 0.3, 1), margin 0.3s ease;
 }
 
-/* Override Obsidian's global body { user-select: none } so users can highlight text freely */
-.dynamic-slides-content *,
+/* Override Obsidian's global body { user-select: none } so users can highlight text freely,
+   while preserving interactive third-party plugins' own user-select rules (drag-and-drop, buttons, boards) */
+.dynamic-slides-content :not([class*="block-language-"]):not([class*="block-language-"] *),
 .dynamic-slides-media-zoom-content,
 .dynamic-slides-zoom-table,
 .dynamic-slides-zoom-table *,
@@ -447,6 +448,9 @@ body.is-dynamic-slides-active {
 .dynamic-slides-content .callout-icon,
 .dynamic-slides-content .callout-fold,
 .dynamic-slides-content button,
+.dynamic-slides-content [draggable="true"],
+.dynamic-slides-zoom-plugin button,
+.dynamic-slides-zoom-plugin [draggable="true"],
 .slideflow-code-frame-header,
 .slideflow-code-frame-header * {
 	user-select: none !important;
@@ -618,6 +622,10 @@ body.is-dynamic-slides-active {
 .dynamic-slides-content:not(.is-only-zoomable-slide) .pdf-embed,
 .dynamic-slides-content:not(.is-only-zoomable-slide) .block-language-mermaid,
 .dynamic-slides-content:not(.is-only-zoomable-slide) [class*="block-language-"]:not(.callout),
+.dynamic-slides-content:not(.is-only-zoomable-slide) .dv-block-ins:has(> pre:only-child),
+.dynamic-slides-content:not(.is-only-zoomable-slide) .dv-block-del:has(> pre:only-child),
+.dynamic-slides-content:not(.is-only-zoomable-slide) .dv-block-ins:has(> [class*="block-language-"]:only-child),
+.dynamic-slides-content:not(.is-only-zoomable-slide) .dv-block-del:has(> [class*="block-language-"]:only-child),
 .dynamic-slides-content:not(.is-only-zoomable-slide) p:empty {
     display: none !important;
     margin: 0 !important;
@@ -787,10 +795,19 @@ body.is-dynamic-slides-active {
 .dynamic-slides-content.is-only-zoomable-slide .pdf-embed,
 .dynamic-slides-content.is-only-zoomable-slide .internal-embed[src$=".pdf" i],
 .dynamic-slides-content.is-only-zoomable-slide .internal-embed[src*=".pdf#" i],
-.dynamic-slides-content.is-only-zoomable-slide [class*="block-language-"] {
+.dynamic-slides-content.is-only-zoomable-slide [class*="block-language-"]:not(.callout) {
     display: block !important;
     max-width: 100% !important;
     box-sizing: border-box !important;
+}
+
+.dynamic-slides-content.is-only-zoomable-slide [class*="block-language-"]:not(.callout):not(.block-language-mermaid) {
+    width: 100% !important;
+    max-width: min(1240px, 100%) !important;
+    font-family: var(--font-text);
+    font-size: calc(1rem * clamp(0.85, var(--dynamic-slides-zoom, 1), 1.35));
+    line-height: 1.5;
+    cursor: default;
 }
 
 .dynamic-slides-content.is-only-zoomable-slide .pdf-embed,
@@ -831,13 +848,13 @@ body.is-dynamic-slides-active {
     align-items: center !important;
 }
 
-.dynamic-slides-content.is-only-zoomable-slide img {
+.dynamic-slides-content.is-only-zoomable-slide img:not([class*="block-language-"] img) {
     height: auto !important;
     max-height: calc(100vh - 140px) !important;
     object-fit: contain !important;
 }
 
-.dynamic-slides-content.is-only-zoomable-slide svg,
+.dynamic-slides-content.is-only-zoomable-slide > svg,
 .dynamic-slides-content.is-only-zoomable-slide .mermaid svg,
 .dynamic-slides-content.is-only-zoomable-slide svg.mermaid,
 .dynamic-slides-content.is-only-zoomable-slide [class*="mermaid"] svg,
@@ -880,8 +897,8 @@ body.is-dynamic-slides-active {
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.35) !important;
 }
 
-.dynamic-slides-media-zoom-content img,
-.dynamic-slides-media-zoom-content iframe,
+.dynamic-slides-media-zoom-content img:not(.dynamic-slides-zoom-plugin img),
+.dynamic-slides-media-zoom-content iframe:not(.dynamic-slides-zoom-plugin iframe),
 .dynamic-slides-media-zoom-content .mermaid,
 .dynamic-slides-media-zoom-content svg.mermaid,
 .dynamic-slides-media-zoom-content .mermaid svg {
@@ -891,7 +908,7 @@ body.is-dynamic-slides-active {
     object-fit: contain !important;
 }
 
-.dynamic-slides-media-zoom-content pre {
+.dynamic-slides-media-zoom-content pre:not(.dynamic-slides-zoom-plugin pre) {
     display: block !important;
     width: 100%;
     max-width: 100%;
@@ -899,10 +916,54 @@ body.is-dynamic-slides-active {
     overflow: auto;
 }
 
-.dynamic-slides-media-zoom-content table {
+.dynamic-slides-media-zoom-content table:not(.dynamic-slides-zoom-plugin table) {
     display: table !important;
     width: 100%;
     max-width: 100%;
+}
+
+/* Live Interactive Plugin Zoom Wrapper (Chess Coach, Dataview, Leaflet, Charts, Flashcards, etc.) */
+.dynamic-slides-zoom-plugin {
+	width: 100%;
+	height: 100%;
+	max-width: 100%;
+	max-height: 100%;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-start;
+	align-items: center;
+	padding: 20px 44px 24px 36px;
+	box-sizing: border-box;
+	overflow: auto;
+	cursor: default;
+}
+
+.slideflow-live-plugin-host {
+	width: 100%;
+	max-width: min(1240px, 92vw);
+	margin: auto;
+	flex-shrink: 0;
+	box-sizing: border-box;
+	font-family: var(--font-text);
+	font-size: calc(1rem * clamp(0.85, var(--dynamic-slides-zoom, 1), 1.35));
+	line-height: 1.5;
+	border-radius: 12px;
+}
+
+.slideflow-live-plugin-host.is-diff-ins {
+	box-shadow: 0 0 0 2px var(--sf-diff-ins-border, rgba(22, 163, 74, 0.45));
+	padding: 6px;
+}
+
+.slideflow-live-plugin-host.is-diff-del {
+	box-shadow: 0 0 0 2px var(--sf-diff-del-border, rgba(220, 38, 38, 0.45));
+	padding: 6px;
+}
+
+.slideflow-live-plugin-host > .slideflow-live-plugin-el {
+	display: block !important;
+	width: 100%;
+	box-sizing: border-box;
 }
 
 /* Mermaid Diagram Zoom Wrapper (safe scrolling — never clips top/left overflow) */
@@ -1026,6 +1087,16 @@ body.is-dynamic-slides-active {
 	background: #181b22 !important;
 	border: 1px solid #2d3340 !important;
 	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45), 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.slideflow-code-frame.is-diff-ins {
+	border-color: var(--sf-diff-ins-border, rgba(22, 163, 74, 0.5)) !important;
+	box-shadow: 0 0 0 2px var(--sf-diff-ins-bg, rgba(22, 163, 74, 0.18)), 0 22px 54px rgba(0, 0, 0, 0.14);
+}
+
+.slideflow-code-frame.is-diff-del {
+	border-color: var(--sf-diff-del-border, rgba(220, 38, 38, 0.5)) !important;
+	box-shadow: 0 0 0 2px var(--sf-diff-del-bg, rgba(220, 38, 38, 0.18)), 0 22px 54px rgba(0, 0, 0, 0.14);
 }
 
 .slideflow-code-frame-header {
@@ -1404,7 +1475,7 @@ body.is-dynamic-slides-active {
 }
 
 .dynamic-slides-zoom-iframe iframe,
-.dynamic-slides-media-zoom-content iframe {
+.dynamic-slides-media-zoom-content iframe:not(.dynamic-slides-zoom-plugin iframe) {
 	width: 95vw !important;
 	height: 85vh !important;
 	max-width: 95vw !important;
