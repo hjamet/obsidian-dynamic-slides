@@ -156,6 +156,7 @@ export class VoiceDictationService {
 	private recording: boolean = false;
 
 	private spawnAttemptedAt: number = 0;
+	private spawnInFlight: Promise<void> | null = null;
 	private cachedReadyPython: string | null = null;
 	private runtimeSetupPromise: Promise<string> | null = null;
 	private managedChild: ChildProcess | null = null;
@@ -430,42 +431,52 @@ export class VoiceDictationService {
 		cfg: VoiceDictationConfig,
 		onStatus?: (msg: string) => void
 	): Promise<void> {
+		if (this.spawnInFlight) {
+			return this.spawnInFlight;
+		}
 		const now = Date.now();
 		if (now - this.spawnAttemptedAt < 3500) return;
 		this.spawnAttemptedAt = now;
 
-		const scriptPath = this.ensureBundledServerScript();
-		const pyExe = await this.resolveOrBootstrapPython(onStatus);
-		const launchExe = this.resolveWindowlessPython(pyExe);
+		const runSpawn = async (): Promise<void> => {
+			const scriptPath = this.ensureBundledServerScript();
+			const pyExe = await this.resolveOrBootstrapPython(onStatus);
+			const launchExe = this.resolveWindowlessPython(pyExe);
 
-		const args = [
-			scriptPath,
-			"--port",
-			String(WHISPER_PORT),
-			"--model",
-			cfg.whisperModel || "medium",
-			"--device",
-			"auto",
-			"--compute-type",
-			"auto",
-			"--default-language",
-			cfg.language || "fr",
-		];
+			const args = [
+				scriptPath,
+				"--port",
+				String(WHISPER_PORT),
+				"--model",
+				cfg.whisperModel || "medium",
+				"--device",
+				"auto",
+				"--compute-type",
+				"auto",
+				"--default-language",
+				cfg.language || "fr",
+			];
 
-		// detached: false + windowsHide: true + pythonw.exe guarantees zero terminal window on Windows 11
-		const child = spawn(launchExe, args, {
-			detached: false,
-			shell: false,
-			stdio: "ignore",
-			windowsHide: true,
+			// detached: false + windowsHide: true + pythonw.exe guarantees zero terminal window on Windows 11
+			const child = spawn(launchExe, args, {
+				detached: false,
+				shell: false,
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			child.unref();
+			this.managedChild = child;
+			child.once("exit", () => {
+				if (this.managedChild === child) {
+					this.managedChild = null;
+				}
+			});
+		};
+
+		this.spawnInFlight = runSpawn().finally(() => {
+			this.spawnInFlight = null;
 		});
-		child.unref();
-		this.managedChild = child;
-		child.once("exit", () => {
-			if (this.managedChild === child) {
-				this.managedChild = null;
-			}
-		});
+		return this.spawnInFlight;
 	}
 
 	/**

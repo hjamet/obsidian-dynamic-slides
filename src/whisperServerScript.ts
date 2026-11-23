@@ -7,7 +7,7 @@
  * automatically on first use — zero path settings required!
  */
 
-export const WHISPER_SERVER_VERSION = "2.7.3";
+export const WHISPER_SERVER_VERSION = "2.7.4";
 
 export const WHISPER_SERVER_SCRIPT = `#!/usr/bin/env python3
 # SLIDEFLOW_WHISPER_VERSION=${WHISPER_SERVER_VERSION}
@@ -15,6 +15,7 @@ export const WHISPER_SERVER_SCRIPT = `#!/usr/bin/env python3
 SlideFlow managed local Faster-Whisper HTTP dictation server (127.0.0.1 only).
 - Zero ffmpeg/pyaudio dependency (stdlib wave + numpy)
 - Windowless pythonw.exe safe on Windows (redirects null stdout/stderr to temp log)
+- Single-instance OS mutex + exclusive socket bind (prevents multi-spawn GPU VRAM exhaustion)
 - Auto-detects CUDA GPU (float16) vs CPU (int8)
 - Auto-downloads requested Whisper model from HuggingFace if missing from local cache
 - Auto-shuts down after idle timeout (default 1800s) to free VRAM
@@ -23,12 +24,14 @@ SlideFlow managed local Faster-Whisper HTTP dictation server (127.0.0.1 only).
 from __future__ import annotations
 
 import argparse
+import errno
 import http.server
 import io
 import json
 import logging
 import os
 import site
+import socket
 import sys
 import tempfile
 import threading
@@ -264,6 +267,57 @@ def is_server_already_running(host: str, port: int) -> bool:
         return False
 
 
+def acquire_single_instance_mutex(port: int) -> Optional[int]:
+    """Acquire an OS-level named mutex on Windows so concurrent spawns never double-load VRAM.
+
+    Returns the mutex handle on Windows (caller must close on exit), 0 on non-Windows,
+    or None if another instance already holds the mutex.
+    """
+    if sys.platform != "win32":
+        return 0
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    mutex_name = f"Local\\\\SlideFlowWhisper_{port}"
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
+    if not handle:
+        err = ctypes.get_last_error()
+        raise OSError(err, f"CreateMutexW failed for {mutex_name}")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return None
+    return int(handle)
+
+
+def release_single_instance_mutex(handle: Optional[int]) -> None:
+    if sys.platform != "win32" or not handle:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(handle)
+
+
+class _ExclusiveThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """Prevents Windows SO_REUSEADDR multi-process port hijacking."""
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def ensure_windowless_streams() -> Optional[Path]:
     """Under pythonw.exe on Windows, sys.stdout/sys.stderr are None; bind them safely."""
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -305,8 +359,14 @@ def main() -> None:
         log_kwargs["encoding"] = "utf-8"
     logging.basicConfig(**log_kwargs)
 
+    mutex_handle = acquire_single_instance_mutex(args.port)
+    if mutex_handle is None:
+        logger.info("Another Whisper dictation server instance already holds mutex for port %d; exiting.", args.port)
+        return
+
     if is_server_already_running(args.host, args.port):
         logger.info("Whisper dictation server already running on http://%s:%d.", args.host, args.port)
+        release_single_instance_mutex(mutex_handle)
         return
 
     engine = DictationEngine(args.model, args.device, args.compute_type)
@@ -380,7 +440,16 @@ def main() -> None:
         def log_message(self, fmt: str, *log_args) -> None:
             pass
 
-    server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        server = _ExclusiveThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        if exc.errno in (errno.EADDRINUSE, 10048, 10013):
+            logger.info("Port %s:%d already exclusively bound (%s); exiting.", args.host, args.port, exc)
+            release_single_instance_mutex(mutex_handle)
+            return
+        release_single_instance_mutex(mutex_handle)
+        raise
+
     http_thread = threading.Thread(target=server.serve_forever, daemon=True, name="DictationHTTP")
     http_thread.start()
 
@@ -405,6 +474,7 @@ def main() -> None:
     finally:
         server.shutdown()
         server.server_close()
+        release_single_instance_mutex(mutex_handle)
 
 
 if __name__ == "__main__":
