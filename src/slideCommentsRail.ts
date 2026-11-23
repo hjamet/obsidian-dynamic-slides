@@ -36,6 +36,13 @@ export class SlideCommentsRail {
 	private hideTimerId: number | null = null;
 	private comments: ReviewComment[] = [];
 	private boundResizeHandler: () => void;
+	private boundTransitionEndHandler: (evt: TransitionEvent) => void;
+	private resizeObserver: ResizeObserver | null = null;
+	private observedTargetEl: HTMLElement | null = null;
+	private observedParentAreaEl: HTMLElement | null = null;
+	private layoutTrackRafId: number | null = null;
+	private layoutTrackUntilMs: number = 0;
+	private layoutSettleTimers: number[] = [];
 
 	constructor(parentEl: HTMLElement, callbacks: SlideCommentsRailCallbacks) {
 		this.parentEl = parentEl;
@@ -46,7 +53,90 @@ export class SlideCommentsRail {
 		this.railEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
 
 		this.boundResizeHandler = () => this.positionRail();
+		this.boundTransitionEndHandler = (evt: TransitionEvent) => {
+			const target = evt.target as HTMLElement | null;
+			if (
+				target &&
+				(target.classList.contains("dynamic-slides-main-area") ||
+					target.classList.contains("dynamic-slides-content") ||
+					target.classList.contains("dynamic-slides-sidebar-toc"))
+			) {
+				this.positionRail();
+			}
+		};
 		window.addEventListener("resize", this.boundResizeHandler);
+		this.parentEl.addEventListener("transitionend", this.boundTransitionEndHandler);
+
+		if (typeof ResizeObserver !== "undefined") {
+			this.resizeObserver = new ResizeObserver(() => {
+				this.positionRail();
+			});
+		}
+	}
+
+	private ensureObservedContainer(): void {
+		if (!this.resizeObserver) return;
+		const container = this.callbacks.getSlideContainer();
+		const mainArea = container?.parentElement ?? null;
+		if (container === this.observedTargetEl && mainArea === this.observedParentAreaEl) {
+			return;
+		}
+		this.resizeObserver.disconnect();
+		this.observedTargetEl = container;
+		this.observedParentAreaEl = mainArea;
+		if (container) this.resizeObserver.observe(container);
+		if (mainArea) this.resizeObserver.observe(mainArea);
+	}
+
+	/**
+	 * Continuously tracks the slide container's right edge across CSS layout transitions
+	 * (e.g. closing the right-docked comment modal where `.dynamic-slides-main-area`
+	 * eases padding-right from 396px back to 0 over 300ms, or toggling the TOC sidebar).
+	 */
+	public trackLayoutTransition(durationMs: number = 420): void {
+		if (this.comments.length === 0) return;
+		this.ensureObservedContainer();
+		this.clearSettleTimers();
+		// Explicit post-transition settle checks (CSS slide-back transition is 300ms)
+		for (const delay of [340, 480]) {
+			const id = window.setTimeout(() => {
+				this.positionRail();
+			}, delay);
+			this.layoutSettleTimers.push(id);
+		}
+		const deadline = performance.now() + Math.max(60, durationMs);
+		if (deadline > this.layoutTrackUntilMs) {
+			this.layoutTrackUntilMs = deadline;
+		}
+		if (this.layoutTrackRafId !== null) {
+			return;
+		}
+		const tick = () => {
+			this.positionRail();
+			if (performance.now() < this.layoutTrackUntilMs && this.comments.length > 0) {
+				this.layoutTrackRafId = requestAnimationFrame(tick);
+			} else {
+				this.layoutTrackRafId = null;
+				this.positionRail();
+			}
+		};
+		this.layoutTrackRafId = requestAnimationFrame(tick);
+	}
+
+	private clearSettleTimers(): void {
+		for (const id of this.layoutSettleTimers) {
+			window.clearTimeout(id);
+		}
+		this.layoutSettleTimers = [];
+	}
+
+	private stopLayoutTracking(): void {
+		this.clearSettleTimers();
+		if (this.layoutTrackRafId !== null) {
+			cancelAnimationFrame(this.layoutTrackRafId);
+			this.layoutTrackRafId = null;
+		}
+		this.layoutTrackUntilMs = 0;
 	}
 
 	public update(comments: ReviewComment[]): void {
@@ -97,8 +187,9 @@ export class SlideCommentsRail {
 			});
 		}
 
+		this.ensureObservedContainer();
 		this.positionRail();
-		requestAnimationFrame(() => this.positionRail());
+		this.trackLayoutTransition(420);
 	}
 
 	/**
@@ -317,7 +408,15 @@ export class SlideCommentsRail {
 	}
 
 	public destroy(): void {
+		this.stopLayoutTracking();
+		if (this.resizeObserver) {
+			this.resizeObserver.disconnect();
+			this.resizeObserver = null;
+		}
+		this.observedTargetEl = null;
+		this.observedParentAreaEl = null;
 		window.removeEventListener("resize", this.boundResizeHandler);
+		this.parentEl.removeEventListener("transitionend", this.boundTransitionEndHandler);
 		this.hidePopoverImmediate();
 		this.railEl.remove();
 	}

@@ -1547,6 +1547,15 @@ mark.slideflow-comment-mark.is-failed {
 	border: 1.5px solid #22c55e;
 }
 
+.slideflow-toc-diff-dot.is-deletion-only {
+	background-color: #ef4444;
+}
+
+.slideflow-toc-diff-dot.is-descendant.is-deletion-only {
+	background-color: transparent;
+	border: 1.5px solid #ef4444;
+}
+
 .slideflow-toc-comment-badge {
 	font-size: 0.7rem;
 	font-weight: 700;
@@ -2483,9 +2492,12 @@ mark.slideflow-comment-mark.is-failed {
 }
 
 .dynamic-slides-overlay.is-comment-modal-open .slideflow-comments-rail,
-.dynamic-slides-overlay.is-review-drawer-open .slideflow-comments-rail {
+.dynamic-slides-overlay.is-review-drawer-open .slideflow-comments-rail,
+.dynamic-slides-overlay.is-media-zoom-active .slideflow-comments-rail,
+.dynamic-slides-overlay.is-media-zoom-active .slideflow-rail-popover {
 	opacity: 0;
 	pointer-events: none;
+	visibility: hidden;
 }
 
 .slideflow-rail-icon-btn {

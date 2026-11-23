@@ -232,7 +232,17 @@ export default class SlideFlowPlugin extends Plugin {
 
 		for (const del of ctx.deletedSections) {
 			let parentNode = defaultParent;
-			if (del.parentNormTitle) {
+			let resolvedParent = false;
+			if (del.parentMatchedNodeId) {
+				const matchedParent = attachedNodes.find(
+					(n) => !n.isVirtualDeleted && n.id === del.parentMatchedNodeId && n.level < del.level
+				);
+				if (matchedParent) {
+					parentNode = matchedParent;
+					resolvedParent = true;
+				}
+			}
+			if (!resolvedParent && del.parentNormTitle) {
 				const found =
 					attachedNodes.find(
 						(n) =>
@@ -527,10 +537,67 @@ export default class SlideFlowPlugin extends Plugin {
 		return map;
 	}
 
+	private isNodeDeletionOnlyDiff(node: SectionNode): boolean {
+		if (!this.activeDiffContext) return false;
+		if (node.isVirtualDeleted) {
+			const info = this.activeDiffContext.slideDiffs.get(node.id);
+			return Boolean(info?.hasChanges && !info.validatedByComment);
+		}
+		const info = this.activeDiffContext.slideDiffs.get(node.id);
+		const hasOwnUnread = Boolean(info?.hasChanges && !info.validatedByComment);
+		const inlineDels = this.activeDiffContext.inlineDeletedByParentId.get(node.id) || [];
+
+		if (hasOwnUnread && info) {
+			return info.addedCount === 0 && info.removedCount > 0;
+		}
+		return inlineDels.length > 0;
+	}
+
+	private computeDeletionOnlyTOCSets(): {
+		deletionOnlyNodeIds: Set<string>;
+		descendantDeletionOnlyNodeIds: Set<string>;
+	} {
+		const deletionOnlyNodeIds = new Set<string>();
+		const descendantDeletionOnlyNodeIds = new Set<string>();
+		if (!this.activeDiffContext) {
+			return { deletionOnlyNodeIds, descendantDeletionOnlyNodeIds };
+		}
+
+		const ancestorHasDirtyDesc = new Set<string>();
+		const ancestorHasNonDeletionDesc = new Set<string>();
+
+		for (const n of this.flatNodes) {
+			if (!this.hasNodeUnreadDiff(n)) continue;
+			const delOnly = this.isNodeDeletionOnlyDiff(n);
+			if (delOnly) {
+				deletionOnlyNodeIds.add(n.id);
+			}
+			let p = n.parent;
+			while (p) {
+				ancestorHasDirtyDesc.add(p.id);
+				if (!delOnly) {
+					ancestorHasNonDeletionDesc.add(p.id);
+				}
+				p = p.parent;
+			}
+		}
+
+		for (const id of ancestorHasDirtyDesc) {
+			if (!ancestorHasNonDeletionDesc.has(id)) {
+				descendantDeletionOnlyNodeIds.add(id);
+			}
+		}
+
+		return { deletionOnlyNodeIds, descendantDeletionOnlyNodeIds };
+	}
+
 	private buildTOCVisualMeta(): TOCVisualMeta {
+		const { deletionOnlyNodeIds, descendantDeletionOnlyNodeIds } = this.computeDeletionOnlyTOCSets();
 		return {
 			dirtyNodeIds: this.getDirtyNodeIdSet(),
 			descendantDirtyNodeIds: this.activeDiffContext?.descendantDirtyNodeIds,
+			deletionOnlyNodeIds,
+			descendantDeletionOnlyNodeIds,
 			commentCountByHeading: this.getCommentCountByHeadingForActiveNote(),
 			showVirtualDeleted: this.diffEnabled,
 		};
@@ -724,6 +791,22 @@ export default class SlideFlowPlugin extends Plugin {
 		return totalRestored;
 	}
 
+	private collectVirtualDeletedSubtree(node: SectionNode): SectionNode[] {
+		const collected: SectionNode[] = [];
+		const visit = (children: SectionNode[]) => {
+			for (const ch of children) {
+				if (ch.isVirtualDeleted) {
+					collected.push(ch);
+					if (ch.children.length > 0) {
+						visit(ch.children);
+					}
+				}
+			}
+		};
+		visit(node.children);
+		return collected;
+	}
+
 	private async markCurrentSlideDiffRead(
 		clearVisuallyNow: boolean
 	): Promise<"validated" | "jumped_deleted_child" | "none"> {
@@ -751,17 +834,26 @@ export default class SlideFlowPlugin extends Plugin {
 			});
 		}
 
-		if (itemsToMark.length === 0) {
-			if (clearVisuallyNow && this.diffEnabled) {
-				const firstVirtualDelChild = node.children.find((c) => {
-					const ci = ctx.slideDiffs.get(c.id);
-					return c.isVirtualDeleted && Boolean(ci?.hasChanges && !ci.validatedByComment);
+		// When validating a non-deleted slide with Ctrl+Enter (`clearVisuallyNow`), ALSO atomically
+		// validate any virtual deleted child headings visibly rendered as `<del>` on this slide so
+		// pressing Ctrl+Enter on a slide with additions + deletions clears BOTH cleanly in one shot.
+		const virtualDelSubtree: SectionNode[] =
+			clearVisuallyNow && this.diffEnabled && !node.isVirtualDeleted
+				? this.collectVirtualDeletedSubtree(node)
+				: [];
+		const virtualDelToClear: SectionNode[] = [];
+		for (const vChild of virtualDelSubtree) {
+			const vInfo = ctx.slideDiffs.get(vChild.id);
+			if (vInfo && vInfo.hasChanges) {
+				itemsToMark.push({
+					slideKey: vInfo.slideKey,
+					text: "",
 				});
-				if (firstVirtualDelChild) {
-					await this.goToNode(firstVirtualDelChild, "zoom-in", "start");
-					return "jumped_deleted_child";
-				}
+				virtualDelToClear.push(vChild);
 			}
+		}
+
+		if (itemsToMark.length === 0) {
 			return "none";
 		}
 
@@ -775,6 +867,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 		const markedKeys = new Set(itemsToMark.map((i) => i.slideKey));
 		const markedInlineIds = new Set(inlineDels.map((d) => d.id));
+		const markedVirtualIds = new Set(virtualDelToClear.map((v) => v.id));
 
 		// Always update logical unread tracking immediately (even on comment validation!)
 		// so TOC dots clear and `N` NEVER wraps backwards to an already-seen/commented slide.
@@ -784,7 +877,10 @@ export default class SlideFlowPlugin extends Plugin {
 		ctx.dirtySlideKeys = ctx.dirtySlideKeys.filter((k) => !markedKeys.has(k));
 		ctx.totalDirtySlides = ctx.dirtySlideKeys.length;
 		ctx.deletedSections = ctx.deletedSections.filter(
-			(d) => !markedInlineIds.has(d.id) && (!clearVisuallyNow || d.id !== node.id)
+			(d) =>
+				!markedInlineIds.has(d.id) &&
+				!markedVirtualIds.has(d.id) &&
+				(!clearVisuallyNow || d.id !== node.id)
 		);
 
 		if (clearVisuallyNow) {
@@ -795,6 +891,30 @@ export default class SlideFlowPlugin extends Plugin {
 				slideDiff.rawOldMarkdown = slideDiff.rawNewMarkdown;
 				slideDiff.addedCount = 0;
 				slideDiff.removedCount = 0;
+			}
+
+			for (const vChild of virtualDelToClear) {
+				const vInfo = ctx.slideDiffs.get(vChild.id);
+				if (vInfo) {
+					vInfo.hasChanges = false;
+					vInfo.validatedByComment = false;
+					vInfo.diffMarkdown = "";
+					vInfo.rawOldMarkdown = "";
+					vInfo.addedCount = 0;
+					vInfo.removedCount = 0;
+				}
+			}
+			if (virtualDelToClear.length > 0) {
+				node.children = node.children.filter((c) => !markedVirtualIds.has(c.id));
+				node.childHeadingsHtml = buildChildHeadingsHtml(node.children, false);
+				node.contentMarkdown =
+					node.children.length > 0
+						? `${node.rawOwnMarkdown}\n${node.childHeadingsHtml}`
+						: node.rawOwnMarkdown;
+				this.flatNodes = this.flatNodes.filter((n) => !markedVirtualIds.has(n.id));
+				this.flatNodes.forEach((n, idx) => {
+					n.flatIndex = idx;
+				});
 			}
 
 			let jumpTargetAfterDelete: SectionNode | null = null;
@@ -820,8 +940,10 @@ export default class SlideFlowPlugin extends Plugin {
 					this.activeSourcePath,
 					this.buildSlideRenderDecoration(node)
 				);
+				this.updateSlideCounter();
 				this.refreshAllActiveUI();
 			} else {
+				this.updateSlideCounter();
 				this.refreshAllActiveUI();
 			}
 		} else {
@@ -908,7 +1030,7 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onZoomChangeCallback = (newZoom: number) => {
 			this.settings.zoomLevel = newZoom;
 			void this.saveSettings();
-			window.setTimeout(() => this.slideCommentsRail?.positionRail(), 260);
+			this.slideCommentsRail?.trackLayoutTransition(380);
 		};
 		this.activeModal.onLinkClickCallback = (href: string) => {
 			void this.handleInternalLinkClick(href);
@@ -940,7 +1062,11 @@ export default class SlideFlowPlugin extends Plugin {
 			this.openEditCommentById(commentId, anchorRect);
 		};
 		this.activeModal.onMediaZoomOpenedCallback = () => {
+			this.slideCommentsRail?.hidePopoverImmediate();
 			this.applyCurrentSlideHighlights();
+		};
+		this.activeModal.onMediaZoomClosedCallback = () => {
+			this.slideCommentsRail?.positionRail();
 		};
 
 		const overlayEl = this.activeModal.getOverlayElement();
@@ -957,9 +1083,7 @@ export default class SlideFlowPlugin extends Plugin {
 			},
 			getSlideContainer: () => {
 				if (!this.activeModal) return null;
-				return this.activeModal.isMediaZoomActive()
-					? this.activeModal.getZoomContentElement()
-					: this.activeModal.getContentElement();
+				return this.activeModal.getContentElement();
 			},
 		});
 
@@ -970,13 +1094,16 @@ export default class SlideFlowPlugin extends Plugin {
 				images?: CommentImageAttachment[]
 			) => {
 				await this.saveSlideComment(commentText, editingId, images);
+				this.slideCommentsRail?.trackLayoutTransition(420);
 			},
 			onDeleteExisting: async (commentId: string) => {
 				await this.reviewStore.deleteComment(commentId);
 				this.refreshAllActiveUI();
+				this.slideCommentsRail?.trackLayoutTransition(420);
 			},
 			onClose: () => {
 				this.pendingCommentContext = null;
+				this.slideCommentsRail?.trackLayoutTransition(420);
 			},
 		});
 
@@ -1043,6 +1170,9 @@ export default class SlideFlowPlugin extends Plugin {
 		this.tocComp = new TOCComponent(overlayEl, (selectedNode) => {
 			void this.goToNode(selectedNode);
 		});
+		this.tocComp.onToggleCallback = () => {
+			this.slideCommentsRail?.trackLayoutTransition(420);
+		};
 		this.activeModal.setTOC(this.tocComp);
 		this.tocComp.update(this.currentNode, this.flatNodes, this.buildTOCVisualMeta());
 

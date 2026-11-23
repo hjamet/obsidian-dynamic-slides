@@ -36,6 +36,7 @@ export interface DeletedSectionItem {
 	displayTitle: string;
 	level: number;
 	parentNormTitle: string | null;
+	parentMatchedNodeId?: string | null;
 	prevSiblingNormTitle: string | null;
 	isTitleOnly: boolean;
 	diffMarkdown: string;
@@ -61,6 +62,7 @@ interface FlatSectionSlice {
 	title: string;
 	normTitle: string;
 	parentNormTitle: string | null;
+	parentSliceIdx: number | null;
 	prevSiblingNormTitle: string | null;
 	ownLines: string[];
 	ownMarkdown: string;
@@ -121,19 +123,25 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 	const clean = stripFrontmatter(markdown);
 	const lines = clean.split("\n");
 	const sections: FlatSectionSlice[] = [];
-	const headingStack: Array<{ level: number; normTitle: string; lastChildNormTitle: string | null }> = [];
+	const headingStack: Array<{
+		level: number;
+		normTitle: string;
+		sliceIdx: number;
+		lastChildNormTitle: string | null;
+	}> = [];
 	let topLevelLastNormTitle: string | null = null;
 
 	let currHeading = "";
 	let currLevel = 0;
 	let currTitle = "Preamble";
 	let currParentNormTitle: string | null = null;
+	let currParentSliceIdx: number | null = null;
 	let currPrevSiblingNormTitle: string | null = null;
 	let currLines: string[] = [];
 	let inFenceChar = "";
 	let inFenceLen = 0;
 
-	const pushCurrent = () => {
+	const pushCurrent = (): number => {
 		if (currHeading || currLines.some((l) => l.trim().length > 0)) {
 			const ownMarkdown = currHeading
 				? [currHeading, ...currLines].join("\n").trim()
@@ -144,11 +152,14 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 				title: currTitle,
 				normTitle: normalizeTitle(currTitle),
 				parentNormTitle: currParentNormTitle,
+				parentSliceIdx: currParentSliceIdx,
 				prevSiblingNormTitle: currPrevSiblingNormTitle,
 				ownLines: currLines,
 				ownMarkdown,
 			});
+			return sections.length - 1;
 		}
+		return -1;
 	};
 
 	for (const line of lines) {
@@ -172,7 +183,10 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 
 		const mHead = line.match(/^(#{1,6})\s+(.+)$/);
 		if (mHead) {
-			pushCurrent();
+			const pushedIdx = pushCurrent();
+			if (pushedIdx >= 0 && headingStack.length > 0 && headingStack[headingStack.length - 1].sliceIdx === -1) {
+				headingStack[headingStack.length - 1].sliceIdx = pushedIdx;
+			}
 			currLevel = mHead[1].length;
 			currTitle = mHead[2].trim();
 			const currNormTitle = normalizeTitle(currTitle);
@@ -182,13 +196,14 @@ function splitMarkdownIntoFlatOwnSections(markdown: string): FlatSectionSlice[] 
 			}
 			const parentFrame = headingStack.length > 0 ? headingStack[headingStack.length - 1] : null;
 			currParentNormTitle = parentFrame ? parentFrame.normTitle : null;
+			currParentSliceIdx = parentFrame && parentFrame.sliceIdx >= 0 ? parentFrame.sliceIdx : null;
 			currPrevSiblingNormTitle = parentFrame ? parentFrame.lastChildNormTitle : topLevelLastNormTitle;
 			if (parentFrame) {
 				parentFrame.lastChildNormTitle = currNormTitle;
 			} else {
 				topLevelLastNormTitle = currNormTitle;
 			}
-			headingStack.push({ level: currLevel, normTitle: currNormTitle, lastChildNormTitle: null });
+			headingStack.push({ level: currLevel, normTitle: currNormTitle, sliceIdx: -1, lastChildNormTitle: null });
 			currLines = [];
 		} else {
 			currLines.push(line);
@@ -735,9 +750,11 @@ export function buildNoteDiffContext(
 	}
 
 	candidatePairs.sort((a, b) => b.score - a.score);
+	const matchedNodeIdByOldIdx = new Map<number, string>();
 	for (const pair of candidatePairs) {
 		if (matchedOldIdxByNodeIdx.has(pair.nodeIdx) || usedOld.has(pair.oldIdx)) continue;
 		matchedOldIdxByNodeIdx.set(pair.nodeIdx, pair.oldIdx);
+		matchedNodeIdByOldIdx.set(pair.oldIdx, targetNodes[pair.nodeIdx].id);
 		usedOld.add(pair.oldIdx);
 	}
 
@@ -874,6 +891,8 @@ export function buildNoteDiffContext(
 		const id = `deleted-section-${idx}`;
 		const diffMarkdown = buildDeletedSectionDiffMarkdown(o);
 		const displayTitle = stripHeadingLinksToPlainText(o.title) || o.title;
+		const parentMatchedNodeId =
+			o.parentSliceIdx !== null ? matchedNodeIdByOldIdx.get(o.parentSliceIdx) ?? null : null;
 
 		deletedSections.push({
 			id,
@@ -882,6 +901,7 @@ export function buildNoteDiffContext(
 			displayTitle,
 			level: o.level || 2,
 			parentNormTitle: o.parentNormTitle,
+			parentMatchedNodeId,
 			prevSiblingNormTitle: o.prevSiblingNormTitle,
 			isTitleOnly,
 			diffMarkdown,

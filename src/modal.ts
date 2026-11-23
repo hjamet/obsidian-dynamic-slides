@@ -67,6 +67,7 @@ export class PresentationModal extends Component {
 	public onSelectionCommentCallback?: (range: Range, startWithVoice: boolean) => void;
 	public onHighlightCommentClickCallback?: (commentId: string, anchorRect: AnchorRect) => void;
 	public onMediaZoomOpenedCallback?: () => void;
+	public onMediaZoomClosedCallback?: () => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -88,6 +89,8 @@ export class PresentationModal extends Component {
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
 	public currentTargetTop: number = 0;
+	private currentScrollStartTop: number = 0;
+	private currentScrollDirection: "down" | "up" | null = null;
 
 	private mediaElements: HTMLElement[] = [];
 	private activeZoomIndex: number = -1;
@@ -606,6 +609,7 @@ export class PresentationModal extends Component {
 			cancelAnimationFrame(this.currentScrollAnimId);
 			this.currentScrollAnimId = null;
 		}
+		this.currentScrollDirection = null;
 		if (snapToTarget && this.contentEl) {
 			this.contentEl.scrollTop = this.currentTargetTop;
 		}
@@ -627,25 +631,27 @@ export class PresentationModal extends Component {
 			const maxScrollTop = Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight);
 			const clampedTarget = Math.max(0, Math.min(targetTop, maxScrollTop));
 
-			this.currentTargetTop = clampedTarget;
-			this.currentScrollResolve = resolve;
-
 			const startTop = this.contentEl.scrollTop;
 			const distance = clampedTarget - startTop;
 
+			this.currentStartTopOrSet(startTop, clampedTarget, distance);
+			this.currentScrollResolve = resolve;
+
 			if (Math.abs(distance) < 1) {
 				this.contentEl.scrollTop = clampedTarget;
+				this.currentScrollDirection = null;
 				this.currentScrollResolve = null;
 				resolve();
 				return;
 			}
 
+			const effectiveDuration = Math.max(120, durationMs);
 			const startTime = performance.now();
 			const easeInOutSine = (t: number): number => 0.5 * (1 - Math.cos(Math.PI * t));
 
 			const step = (currentTime: number) => {
 				const elapsed = currentTime - startTime;
-				const progress = Math.min(1, Math.max(0, elapsed / durationMs));
+				const progress = Math.min(1, Math.max(0, elapsed / effectiveDuration));
 				const easedProgress = easeInOutSine(progress);
 
 				this.contentEl.scrollTop = startTop + distance * easedProgress;
@@ -655,6 +661,7 @@ export class PresentationModal extends Component {
 				} else {
 					this.contentEl.scrollTop = clampedTarget;
 					this.currentScrollAnimId = null;
+					this.currentScrollDirection = null;
 					if (this.currentScrollResolve) {
 						const res = this.currentScrollResolve;
 						this.currentScrollResolve = null;
@@ -665,6 +672,12 @@ export class PresentationModal extends Component {
 
 			this.currentScrollAnimId = requestAnimationFrame(step);
 		});
+	}
+
+	private currentStartTopOrSet(startTop: number, targetTop: number, distance: number): void {
+		this.currentScrollStartTop = startTop;
+		this.currentTargetTop = targetTop;
+		this.currentScrollDirection = distance > 0 ? "down" : distance < 0 ? "up" : null;
 	}
 
 	public scrollDown(): void {
@@ -730,6 +743,7 @@ export class PresentationModal extends Component {
 
 	private ensureZoomOverlay(animated: boolean): void {
 		this.hideSelectionToolbar();
+		this.overlayEl.addClass("is-media-zoom-active");
 		if (this.contentEl) {
 			this.contentEl.style.opacity = "0";
 		}
@@ -1069,7 +1083,9 @@ export class PresentationModal extends Component {
 	}
 
 	public closeMediaZoom(animated: boolean = true) {
+		const wasZoomActive = this.zoomOverlayEl !== null || this.overlayEl.hasClass("is-media-zoom-active");
 		this.hideSelectionToolbar();
+		this.overlayEl.removeClass("is-media-zoom-active");
 		this.cleanupZoomResources();
 		if (this.zoomOverlayEl) {
 			const elToClose = this.zoomOverlayEl;
@@ -1094,11 +1110,31 @@ export class PresentationModal extends Component {
 		if (this.contentEl) {
 			this.contentEl.style.opacity = '1';
 		}
+		if (wasZoomActive) {
+			this.onMediaZoomClosedCallback?.();
+		}
 	}
 
 	public handleNext(): boolean {
 		if (this.hasCompletedAllSteps) {
 			return false;
+		}
+
+		// Pressing → while scrolling UP smoothly reverses the scroll back to its origin
+		// instead of jumping immediately to the next slide.
+		if (
+			this.currentScrollAnimId !== null &&
+			this.currentScrollDirection === "up" &&
+			this.contentEl
+		) {
+			const reverseTarget = this.currentScrollStartTop;
+			const prevTarget = this.currentTargetTop;
+			const currentPos = this.contentEl.scrollTop;
+			const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
+			const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
+			this.cancelScrollAnimation(false);
+			void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
+			return true;
 		}
 
 		const wasAnimating = this.currentScrollAnimId !== null;
@@ -1166,6 +1202,23 @@ export class PresentationModal extends Component {
 
 	public handlePrev(): boolean {
 		this.hasCompletedAllSteps = false;
+
+		// Pressing ← while scrolling DOWN cancels the downward motion and smoothly
+		// reverse-scrolls back to where the downward scroll started (never jumps slide!).
+		if (
+			this.currentScrollAnimId !== null &&
+			this.currentScrollDirection === "down" &&
+			this.contentEl
+		) {
+			const reverseTarget = this.currentScrollStartTop;
+			const prevTarget = this.currentTargetTop;
+			const currentPos = this.contentEl.scrollTop;
+			const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
+			const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
+			this.cancelScrollAnimation(false);
+			void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
+			return true;
+		}
 
 		const wasAnimating = this.currentScrollAnimId !== null;
 		if (wasAnimating) {

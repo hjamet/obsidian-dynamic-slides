@@ -3,6 +3,8 @@ import { SectionNode } from "./parser";
 export interface TOCVisualMeta {
 	dirtyNodeIds?: Set<string>;
 	descendantDirtyNodeIds?: Set<string>;
+	deletionOnlyNodeIds?: Set<string>;
+	descendantDeletionOnlyNodeIds?: Set<string>;
 	commentCountByHeading?: Map<string, number>;
 	showVirtualDeleted?: boolean;
 }
@@ -30,6 +32,7 @@ export class TOCComponent {
 	private treeScrollEl: HTMLElement;
 	private toggleBtnEl: HTMLElement | null = null;
 	private onSelectCallback: (node: SectionNode) => void;
+	public onToggleCallback?: (isCollapsed: boolean) => void;
 
 	constructor(parentContainer: HTMLElement, onSelectNode: (node: SectionNode) => void) {
 		this.onSelectCallback = onSelectNode;
@@ -71,6 +74,7 @@ export class TOCComponent {
 			this.containerEl.toggleClass("is-collapsed", !open);
 		}
 		this.updateToggleBtnText();
+		this.onToggleCallback?.(this.isCollapsed());
 	}
 
 	public isCollapsed(): boolean {
@@ -118,6 +122,8 @@ export class TOCComponent {
 
 		const isDirty = Boolean(meta?.dirtyNodeIds?.has(node.id));
 		const hasDirtyDesc = Boolean(meta?.descendantDirtyNodeIds?.has(node.id));
+		const isDeletionOnly = Boolean(meta?.deletionOnlyNodeIds?.has(node.id));
+		const isDescDeletionOnly = Boolean(meta?.descendantDeletionOnlyNodeIds?.has(node.id));
 		const commentCount = meta?.commentCountByHeading?.get(node.title) || 0;
 
 		const itemEl = li.createDiv({
@@ -136,13 +142,13 @@ export class TOCComponent {
 
 		if (isDirty) {
 			itemEl.createEl("span", {
-				cls: "slideflow-toc-diff-dot",
-				attr: { title: "Unread diff" }
+				cls: `slideflow-toc-diff-dot${isDeletionOnly ? " is-deletion-only" : ""}`,
+				attr: { title: isDeletionOnly ? "Unread deletion" : "Unread diff" }
 			});
 		} else if (hasDirtyDesc && node.level > 0) {
 			itemEl.createEl("span", {
-				cls: "slideflow-toc-diff-dot is-descendant",
-				attr: { title: "Contains unread diff" }
+				cls: `slideflow-toc-diff-dot is-descendant${isDescDeletionOnly ? " is-deletion-only" : ""}`,
+				attr: { title: isDescDeletionOnly ? "Contains unread deletion" : "Contains unread diff" }
 			});
 		}
 
