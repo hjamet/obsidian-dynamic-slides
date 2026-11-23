@@ -3,6 +3,7 @@ export interface KeyboardNavigatorCallbacks {
 	onPrev: () => void;
 	onFastNext: () => void;
 	onFastPrev: () => void;
+	onEnter?: () => boolean | void;
 	onEscape: () => void;
 	onZoomIn?: () => void;
 	onZoomOut?: () => void;
@@ -125,6 +126,27 @@ export class KeyboardNavigator {
 				evt.stopPropagation();
 				this.callbacks.onCopyOneShot();
 				return;
+			}
+		}
+
+		// Plain Enter -> Open preferred link in the active reading-focus block (green unread dot first, else first link)
+		if (
+			!evt.ctrlKey &&
+			!evt.metaKey &&
+			!evt.altKey &&
+			!evt.shiftKey &&
+			(evt.key === "Enter" || evt.code === "Enter" || evt.code === "NumpadEnter")
+		) {
+			if (!this.isInsideLivePlugin(evt.target) && this.callbacks.onEnter) {
+				if (evt.repeat) {
+					return;
+				}
+				const handled = Boolean(this.callbacks.onEnter());
+				if (handled) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					return;
+				}
 			}
 		}
 

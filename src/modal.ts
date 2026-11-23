@@ -5,7 +5,12 @@ import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
 import { applyPersistentCommentHighlights } from "./commentHighlighter";
-import { AnchorRect, collectReadableBlocks, findHoverableMarkdownBlock } from "./contextExtractor";
+import {
+	AnchorRect,
+	collectReadableBlocks,
+	findHoverableMarkdownBlock,
+	findPreferredLinkInBlock,
+} from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
 
 export const SCROLL_PHASE = -1;
@@ -469,6 +474,10 @@ export class PresentationModal extends Component {
 		return this.readingFocusActive;
 	}
 
+	public getReadingFocusIndex(): number {
+		return this.readingFocusIndex;
+	}
+
 	public getReadingFocusBlockElement(): HTMLElement | null {
 		if (!this.readingFocusActive) return null;
 		if (
@@ -528,6 +537,18 @@ export class PresentationModal extends Component {
 
 		this.clearHoveredBlock();
 
+		// Blur any previously clicked SlideFlow UI button so Enter on a focused block without links
+		// never accidentally triggers an unrelated dock/TOC button.
+		if (
+			document.activeElement instanceof HTMLButtonElement &&
+			this.overlayEl.contains(document.activeElement) &&
+			!document.activeElement.closest(
+				".slideflow-live-plugin-host, .slideflow-live-plugin-el, [class*='block-language-']"
+			)
+		) {
+			document.activeElement.blur();
+		}
+
 		let targetIdx: number;
 		if (!this.readingFocusActive) {
 			this.readingFocusActive = true;
@@ -553,7 +574,10 @@ export class PresentationModal extends Component {
 		this.setReadingFocusBlock(blocks[targetIdx], true);
 	}
 
-	private restoreReadingFocusAfterRender(preferredIndex: number): void {
+	private restoreReadingFocusAfterRender(
+		preferredIndex: number,
+		scrollIntoView: boolean = false
+	): void {
 		if (!this.readingFocusActive || !this.contentEl) return;
 		const applyNow = () => {
 			if (!this.readingFocusActive || !this.contentEl) return;
@@ -565,7 +589,7 @@ export class PresentationModal extends Component {
 			}
 			const clamped = Math.max(0, Math.min(preferredIndex, blocks.length - 1));
 			this.readingFocusIndex = clamped;
-			this.setReadingFocusBlock(blocks[clamped], false);
+			this.setReadingFocusBlock(blocks[clamped], scrollIntoView && clamped > 0);
 		};
 		applyNow();
 		requestAnimationFrame(() => {
@@ -581,6 +605,95 @@ export class PresentationModal extends Component {
 		this.readingFocusActive = false;
 		this.readingFocusIndex = -1;
 		this.setReadingFocusBlock(null, false);
+	}
+
+	private activateLinkElement(linkEl: HTMLElement): boolean {
+		if (linkEl.classList.contains("internal-link")) {
+			const href = (linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "").trim();
+			if (!href) return false;
+			this.onLinkClickCallback?.(href);
+			return true;
+		}
+
+		if (linkEl.classList.contains("slideflow-child-heading-linked-title")) {
+			const href = (linkEl.getAttribute("data-link-href") || "").trim();
+			if (!href) return false;
+			this.onLinkClickCallback?.(href);
+			return true;
+		}
+
+		const href = (linkEl.getAttribute("href") || "").trim();
+		if (!href || href === "#" || /^javascript:/i.test(href)) {
+			return false;
+		}
+
+		const cleanBeforeHash = href.split("#")[0].split("?")[0].toLowerCase();
+		if (cleanBeforeHash.endsWith(".pdf")) {
+			if (/^file:\/\//i.test(href)) {
+				this.onExternalPdfLinkClickCallback?.(href);
+			} else {
+				this.onLinkClickCallback?.(href);
+			}
+			return true;
+		}
+
+		// External / URI link: dispatch via an anchor mounted outside contentEl so Obsidian/Electron
+		// opens it natively without contentEl's click handler (comment marks / media zoom / selection) intercepting it.
+		const tempAnchor = document.createElement("a");
+		tempAnchor.href = href;
+		tempAnchor.className = linkEl.className || "external-link";
+		const targetAttr = linkEl.getAttribute("target");
+		if (targetAttr) {
+			tempAnchor.target = targetAttr;
+		} else if (/^https?:\/\//i.test(href)) {
+			tempAnchor.target = "_blank";
+		}
+		tempAnchor.rel = linkEl.getAttribute("rel") || "noopener noreferrer";
+		tempAnchor.style.position = "fixed";
+		tempAnchor.style.left = "-9999px";
+		tempAnchor.style.top = "-9999px";
+		document.body.appendChild(tempAnchor);
+		try {
+			tempAnchor.click();
+		} finally {
+			tempAnchor.remove();
+		}
+		return true;
+	}
+
+	/**
+	 * Triggered by plain `Enter` when reading-focus mode is active:
+	 * opens the first link with an active green unread-diff dot inside the focused block,
+	 * otherwise opens the first link present inside the focused block (or navigates a focused child heading).
+	 */
+	public activateReadingFocusLink(): boolean {
+		if (this.isMediaZoomActive()) return false;
+		const blockEl = this.getReadingFocusBlockElement();
+		if (!blockEl) return false;
+
+		const targetLink = findPreferredLinkInBlock(blockEl, this.contentEl);
+		if (targetLink) {
+			return this.activateLinkElement(targetLink);
+		}
+
+		if (
+			blockEl.classList.contains("dynamic-slides-child-heading") &&
+			!blockEl.classList.contains("is-empty-heading-leaf")
+		) {
+			const nodeId = blockEl.getAttribute("data-node-id");
+			if (nodeId) {
+				if (this.onChildHeadingClickCallback) {
+					this.onChildHeadingClickCallback(nodeId);
+					return true;
+				}
+				if (this.onSectionClickCallback) {
+					this.onSectionClickCallback(nodeId);
+					return true;
+				}
+			}
+		}
+
+		return false;
 	}
 
 	public getContentElement(): HTMLElement {
@@ -1841,7 +1954,8 @@ export class PresentationModal extends Component {
 		sourcePath: string,
 		direction: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump' = 'jump',
 		enterFrom: 'start' | 'end' = 'start',
-		decoration?: SlideRenderDecoration
+		decoration?: SlideRenderDecoration,
+		restoreReadingFocus?: { active: boolean; index: number; scrollIntoView?: boolean }
 	) {
 		this.currentSourcePath = sourcePath;
 		this.hideSelectionToolbar();
@@ -1912,9 +2026,19 @@ export class PresentationModal extends Component {
 			this.activeZoomIndex = -1;
 		}
 
-		// Persist reading-focus mode across slide transitions, resetting the frame to the top block
-		if (this.readingFocusActive && !this.isMediaZoomActive()) {
-			this.restoreReadingFocusAfterRender(0);
+		if (restoreReadingFocus !== undefined) {
+			this.readingFocusActive = restoreReadingFocus.active;
+			if (this.readingFocusActive && !this.isMediaZoomActive()) {
+				this.restoreReadingFocusAfterRender(
+					Math.max(0, restoreReadingFocus.index),
+					Boolean(restoreReadingFocus.scrollIntoView)
+				);
+			} else if (!this.readingFocusActive) {
+				this.clearReadingFocus();
+			}
+		} else if (this.readingFocusActive && !this.isMediaZoomActive()) {
+			// Persist reading-focus mode across slide transitions, resetting the frame to the top block
+			this.restoreReadingFocusAfterRender(0, false);
 		}
 	}
 

@@ -865,3 +865,97 @@ export function collectReadableBlocks(contentEl: HTMLElement): HTMLElement[] {
 	visit(contentEl);
 	return results;
 }
+
+export const FOCUSED_BLOCK_LINK_SELECTOR = [
+	"a.internal-link",
+	".slideflow-child-heading-linked-title[data-link-href]",
+	"a[href]:not(.tag):not(.footnote-link):not(.footnote-backref)",
+].join(", ");
+
+/**
+ * Returns true if the given link element currently displays SlideFlow's green unread-diff dot
+ * (`.slideflow-link-has-diff` class and/or `.slideflow-link-dirty-badge` dot element).
+ */
+export function hasUnreadLinkDot(linkEl: HTMLElement): boolean {
+	return (
+		linkEl.classList.contains("slideflow-link-has-diff") ||
+		linkEl.querySelector(".slideflow-link-dirty-badge") !== null ||
+		Boolean(linkEl.nextElementSibling?.classList.contains("slideflow-link-dirty-badge"))
+	);
+}
+
+function isActionableLinkCandidate(
+	linkEl: HTMLElement,
+	blockEl: HTMLElement,
+	contentEl?: HTMLElement | null
+): boolean {
+	if (!linkEl.isConnected) return false;
+	if (linkEl.closest(".copy-code-button, .slideflow-selection-toolbar, .slideflow-comments-rail")) {
+		return false;
+	}
+
+	let curr: HTMLElement | null = linkEl;
+	while (curr) {
+		const style = window.getComputedStyle(curr);
+		if (style.display === "none" || style.visibility === "hidden") {
+			return false;
+		}
+		if (curr === blockEl || (contentEl && curr === contentEl)) break;
+		curr = curr.parentElement;
+	}
+
+	const rect = linkEl.getBoundingClientRect();
+	if (rect.width === 0 && rect.height === 0) {
+		return false;
+	}
+
+	if (linkEl.classList.contains("internal-link")) {
+		const href = (linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "").trim();
+		return href.length > 0;
+	}
+	if (linkEl.classList.contains("slideflow-child-heading-linked-title")) {
+		const href = (linkEl.getAttribute("data-link-href") || "").trim();
+		return href.length > 0;
+	}
+	const href = (linkEl.getAttribute("href") || "").trim();
+	return href.length > 0 && href !== "#" && !/^javascript:/i.test(href);
+}
+
+/**
+ * Resolves the link to open when pressing `Enter` on a reading-focus block:
+ * 1. First visible actionable link in the block that still carries a green unread-diff dot.
+ * 2. Otherwise, the first visible actionable link present inside the block.
+ * Prefers live (non-`<del>`) links when inline diff deletions coexist with active links.
+ */
+export function findPreferredLinkInBlock(
+	blockEl: HTMLElement,
+	contentEl?: HTMLElement | null
+): HTMLElement | null {
+	if (!blockEl.isConnected) return null;
+
+	const rawCandidates: HTMLElement[] = [];
+	if (blockEl.matches(FOCUSED_BLOCK_LINK_SELECTOR)) {
+		rawCandidates.push(blockEl);
+	}
+	rawCandidates.push(
+		...Array.from(blockEl.querySelectorAll<HTMLElement>(FOCUSED_BLOCK_LINK_SELECTOR))
+	);
+
+	// Support standalone linked media (e.g. `[![alt](img.png)](url)`) where the focused block is the <img>
+	if (rawCandidates.length === 0) {
+		const enclosingLink = blockEl.closest<HTMLElement>(FOCUSED_BLOCK_LINK_SELECTOR);
+		if (enclosingLink && (!contentEl || contentEl.contains(enclosingLink))) {
+			rawCandidates.push(enclosingLink);
+		}
+	}
+
+	const validLinks = rawCandidates.filter((el) =>
+		isActionableLinkCandidate(el, blockEl, contentEl)
+	);
+	if (validLinks.length === 0) return null;
+
+	const liveLinks = validLinks.filter((el) => !el.closest("del, .dv-del"));
+	const pool = liveLinks.length > 0 ? liveLinks : validLinks;
+
+	return pool.find((el) => hasUnreadLinkDot(el)) ?? pool[0] ?? null;
+}

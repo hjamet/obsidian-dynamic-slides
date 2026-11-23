@@ -73,6 +73,8 @@ export interface DocumentStackFrame {
 	rootNode: SectionNode;
 	diffContext: NoteDiffContext | null;
 	diffEnabled: boolean;
+	readingFocusActive?: boolean;
+	readingFocusIndex?: number;
 }
 
 export const DEFAULT_SETTINGS: SlideFlowSettings = {
@@ -1275,6 +1277,7 @@ export default class SlideFlowPlugin extends Plugin {
 			onPrev: () => this.handlePrevNavigation(),
 			onFastNext: () => this.fastJumpNext(),
 			onFastPrev: () => this.fastJumpPrev(),
+			onEnter: () => this.handleEnterKey(),
 			onEscape: () => this.handleEscapeKey(),
 			onZoomIn: () => this.activeModal?.zoomIn(),
 			onZoomOut: () => this.activeModal?.zoomOut(),
@@ -1295,6 +1298,11 @@ export default class SlideFlowPlugin extends Plugin {
 				),
 		});
 		this.keyboardNav.attach();
+	}
+
+	private handleEnterKey(): boolean {
+		if (!this.activeModal) return false;
+		return this.activeModal.activateReadingFocusLink();
 	}
 
 	private handleEscapeKey() {
@@ -2092,6 +2100,8 @@ export default class SlideFlowPlugin extends Plugin {
 					rootNode: this.rootNode,
 					diffContext: this.activeDiffContext,
 					diffEnabled: this.diffEnabled,
+					readingFocusActive: this.activeModal?.isReadingFocusActive() ?? false,
+					readingFocusIndex: this.activeModal?.getReadingFocusIndex() ?? -1,
 				});
 			}
 
@@ -2170,7 +2180,14 @@ export default class SlideFlowPlugin extends Plugin {
 				this.activeSourcePath,
 				'zoom-out',
 				'start',
-				this.buildSlideRenderDecoration(this.currentNode)
+				this.buildSlideRenderDecoration(this.currentNode),
+				parentFrame.readingFocusActive !== undefined
+					? {
+							active: parentFrame.readingFocusActive,
+							index: Math.max(0, parentFrame.readingFocusIndex ?? 0),
+							scrollIntoView: true,
+					  }
+					: undefined
 			);
 			if (this.documentStack.length > 0) {
 				this.activeModal.showSubNoteBanner(parentFrame.fileTitle, () => void this.popDocumentStack());
