@@ -12,9 +12,26 @@ export interface SectionNode {
 	contentMarkdown: string;
 	rawOwnMarkdown: string;
 	childHeadingsHtml: string;
+	isEmptyHeadingLeaf?: boolean;
 	isPureLinkLeaf?: boolean;
 	isVirtualDeleted?: boolean;
 	flatIndex?: number;
+}
+
+/**
+ * Returns true when a leaf section contains ONLY its heading (no body content, no child headings)
+ * and already appears inside its parent slide's child-headings list (`parent.level > 0`).
+ * Such empty heading-only slides must never be displayed as standalone empty slides.
+ */
+export function isHeadingOnlySkippedSlide(node: SectionNode | null | undefined): boolean {
+	if (!node) return false;
+	return Boolean(
+		node.isEmptyHeadingLeaf &&
+			!node.isVirtualDeleted &&
+			node.children.length === 0 &&
+			node.parent &&
+			node.parent.level > 0
+	);
 }
 
 export function buildChildHeadingsHtml(
@@ -32,7 +49,9 @@ export function buildChildHeadingsHtml(
 				return `<div class="dynamic-slides-child-heading level-${c.level} is-deleted-child-heading" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}" title="Deleted subsection — click or press → to inspect and validate"><del class="dv-del">${inner}</del></div>`;
 			}
 			const inner = renderChildHeadingInnerHtml(c.title, Boolean(c.isPureLinkLeaf));
-			return `<div class="dynamic-slides-child-heading level-${c.level}" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}">${inner}</div>`;
+			const emptyLeafCls =
+				c.isEmptyHeadingLeaf && !c.isPureLinkLeaf ? " is-empty-heading-leaf" : "";
+			return `<div class="dynamic-slides-child-heading level-${c.level}${emptyLeafCls}" data-node-id="${c.id}" data-flat-index="${c.flatIndex ?? 0}">${inner}</div>`;
 		})
 		.join("\n");
 }
@@ -156,10 +175,12 @@ export function parseMarkdownSections(
 				.replace(/^[\s\-*_]+$/gm, "")
 				.trim();
 			const trimmedTitle = node.title.trim();
+			node.isEmptyHeadingLeaf = bodyOnly.length === 0;
 			node.isPureLinkLeaf =
-				bodyOnly.length === 0 &&
+				node.isEmptyHeadingLeaf &&
 				(/^\[\[[^\]]+\]\]$/.test(trimmedTitle) || /^\[[^\]\n]+\]\([^)\n]+\)$/.test(trimmedTitle));
 		} else {
+			node.isEmptyHeadingLeaf = false;
 			node.isPureLinkLeaf = false;
 		}
 	}

@@ -5,7 +5,7 @@ import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
 import { TOCComponent } from "./toc";
 import { applyPersistentCommentHighlights } from "./commentHighlighter";
-import { AnchorRect, findHoverableMarkdownBlock } from "./contextExtractor";
+import { AnchorRect, collectReadableBlocks, findHoverableMarkdownBlock } from "./contextExtractor";
 import { ReviewComment } from "./reviewStore";
 
 export const SCROLL_PHASE = -1;
@@ -69,6 +69,7 @@ export class PresentationModal extends Component {
 	public onMediaZoomOpenedCallback?: () => void;
 	public onMediaZoomClosedCallback?: () => void;
 	public onHoveredBlockChangeCallback?: (blockEl: HTMLElement | null) => void;
+	public onReadingFocusChangeCallback?: (blockEl: HTMLElement | null) => void;
 	private transitionDuration: number;
 	private scrollDurationMs: number = 1000;
 	private tocComp: TOCComponent | null = null;
@@ -93,6 +94,11 @@ export class PresentationModal extends Component {
 	private activeCommentBlockEl: HTMLElement | null = null;
 	private boundContentMouseMoveHandler: (evt: MouseEvent) => void;
 	private boundContentMouseLeaveHandler: (evt: MouseEvent) => void;
+
+	// Keyboard reading-focus frame (ArrowDown / ArrowUp steps across paragraphs, list items, images, callouts…)
+	private readingFocusActive: boolean = false;
+	private readingFocusIndex: number = -1;
+	private readingFocusBlockEl: HTMLElement | null = null;
 
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
@@ -452,6 +458,124 @@ export class PresentationModal extends Component {
 		}
 	}
 
+	public isReadingFocusActive(): boolean {
+		return this.readingFocusActive;
+	}
+
+	public getReadingFocusBlockElement(): HTMLElement | null {
+		if (!this.readingFocusActive) return null;
+		if (
+			this.readingFocusBlockEl &&
+			this.readingFocusBlockEl.isConnected &&
+			this.contentEl.contains(this.readingFocusBlockEl)
+		) {
+			return this.readingFocusBlockEl;
+		}
+		return null;
+	}
+
+	private setReadingFocusBlock(blockEl: HTMLElement | null, scrollIntoView: boolean): void {
+		if (this.readingFocusBlockEl && this.readingFocusBlockEl !== blockEl) {
+			this.readingFocusBlockEl.removeClass("slideflow-reading-focus-block");
+		}
+		this.readingFocusBlockEl = blockEl && blockEl.isConnected ? blockEl : null;
+		if (this.readingFocusBlockEl) {
+			this.readingFocusBlockEl.addClass("slideflow-reading-focus-block");
+			if (scrollIntoView) {
+				this.scrollReadingBlockIntoView(this.readingFocusBlockEl);
+			}
+		}
+		this.onReadingFocusChangeCallback?.(this.readingFocusBlockEl);
+	}
+
+	private scrollReadingBlockIntoView(blockEl: HTMLElement): void {
+		if (!this.contentEl || !blockEl.isConnected) return;
+		const containerRect = this.contentEl.getBoundingClientRect();
+		const blockRect = blockEl.getBoundingClientRect();
+		const padTop = 56;
+		const padBottom = 64;
+
+		const isAbove = blockRect.top < containerRect.top + padTop;
+		const isBelow = blockRect.bottom > containerRect.bottom - padBottom;
+		if (!isAbove && !isBelow) return;
+
+		const relTop = blockRect.top - containerRect.top + this.contentEl.scrollTop;
+		let targetTop: number;
+		if (blockRect.height >= containerRect.height - padTop - padBottom) {
+			// Tall block (e.g. long code block / table): align its top comfortably near top of viewport
+			targetTop = Math.max(0, relTop - 28);
+		} else if (isBelow) {
+			// Place focused block cleanly in the middle/lower-middle of viewport
+			targetTop = relTop - Math.round((containerRect.height - blockRect.height) * 0.42);
+		} else {
+			// Scrolling upwards: bring focused block comfortably into upper-middle of viewport
+			targetTop = relTop - Math.round((containerRect.height - blockRect.height) * 0.35);
+		}
+		void this.animateScrollTo(targetTop, Math.min(320, Math.round(this.scrollDurationMs * 0.4)));
+	}
+
+	public stepReadingFocus(direction: "down" | "up"): void {
+		if (!this.contentEl) return;
+		const blocks = collectReadableBlocks(this.contentEl);
+		if (blocks.length === 0) return;
+
+		this.clearHoveredBlock();
+
+		let targetIdx: number;
+		if (!this.readingFocusActive) {
+			this.readingFocusActive = true;
+			if (this.contentEl.scrollTop <= 12) {
+				targetIdx = 0;
+			} else {
+				const containerTop = this.contentEl.getBoundingClientRect().top;
+				const firstVisible = blocks.findIndex(
+					(b) => b.getBoundingClientRect().bottom > containerTop + 16
+				);
+				targetIdx = firstVisible >= 0 ? firstVisible : 0;
+			}
+		} else {
+			const liveIdx = this.readingFocusBlockEl ? blocks.indexOf(this.readingFocusBlockEl) : -1;
+			const baseIdx = liveIdx >= 0 ? liveIdx : Math.max(0, Math.min(this.readingFocusIndex, blocks.length - 1));
+			targetIdx =
+				direction === "down"
+					? Math.min(blocks.length - 1, baseIdx + 1)
+					: Math.max(0, baseIdx - 1);
+		}
+
+		this.readingFocusIndex = targetIdx;
+		this.setReadingFocusBlock(blocks[targetIdx], true);
+	}
+
+	private restoreReadingFocusAfterRender(preferredIndex: number): void {
+		if (!this.readingFocusActive || !this.contentEl) return;
+		const applyNow = () => {
+			if (!this.readingFocusActive || !this.contentEl) return;
+			const blocks = collectReadableBlocks(this.contentEl);
+			if (blocks.length === 0) {
+				this.readingFocusIndex = -1;
+				this.setReadingFocusBlock(null, false);
+				return;
+			}
+			const clamped = Math.max(0, Math.min(preferredIndex, blocks.length - 1));
+			this.readingFocusIndex = clamped;
+			this.setReadingFocusBlock(blocks[clamped], false);
+		};
+		applyNow();
+		requestAnimationFrame(() => {
+			if (this.readingFocusActive && (!this.readingFocusBlockEl || !this.readingFocusBlockEl.isConnected)) {
+				applyNow();
+			} else if (this.readingFocusActive && this.readingFocusBlockEl) {
+				this.onReadingFocusChangeCallback?.(this.readingFocusBlockEl);
+			}
+		});
+	}
+
+	public clearReadingFocus(): void {
+		this.readingFocusActive = false;
+		this.readingFocusIndex = -1;
+		this.setReadingFocusBlock(null, false);
+	}
+
 	public getContentElement(): HTMLElement {
 		return this.contentEl;
 	}
@@ -778,13 +902,13 @@ export class PresentationModal extends Component {
 
 	public scrollDown(): void {
 		if (!this.contentEl) return;
-		const targetTop = this.contentEl.scrollTop + this.contentEl.clientHeight * 0.75;
+		const targetTop = this.contentEl.scrollTop + this.contentEl.clientHeight * 0.5;
 		this.animateScrollTo(targetTop, this.scrollDurationMs);
 	}
 
 	public scrollUp(): void {
 		if (!this.contentEl) return;
-		const targetTop = this.contentEl.scrollTop - this.contentEl.clientHeight * 0.75;
+		const targetTop = this.contentEl.scrollTop - this.contentEl.clientHeight * 0.5;
 		this.animateScrollTo(targetTop, this.scrollDurationMs);
 	}
 
@@ -1555,6 +1679,10 @@ export class PresentationModal extends Component {
 		this.hideSelectionToolbar();
 		this.clearHoveredBlock();
 		this.setActiveCommentBlock(null);
+		if (this.readingFocusBlockEl) {
+			this.readingFocusBlockEl.removeClass("slideflow-reading-focus-block");
+			this.readingFocusBlockEl = null;
+		}
 		this.cancelScrollAnimation(false);
 		this.hasCompletedAllSteps = false;
 
@@ -1615,6 +1743,11 @@ export class PresentationModal extends Component {
 		} else {
 			this.activeZoomIndex = -1;
 		}
+
+		// Persist reading-focus mode across slide transitions, resetting the frame to the top block
+		if (this.readingFocusActive && !this.isMediaZoomActive()) {
+			this.restoreReadingFocusAfterRender(0);
+		}
 	}
 
 	/**
@@ -1661,11 +1794,16 @@ export class PresentationModal extends Component {
 		} else if (wasZoomOpen) {
 			this.closeMediaZoom(false);
 		}
+
+		if (this.readingFocusActive && !this.isMediaZoomActive()) {
+			this.restoreReadingFocusAfterRender(Math.max(0, this.readingFocusIndex));
+		}
 	}
 
 	public close() {
 		this.hideSelectionToolbar();
 		this.clearHoveredBlock();
+		this.clearReadingFocus();
 		this.setActiveCommentBlock(null);
 		this.contentEl.removeEventListener("mousemove", this.boundContentMouseMoveHandler);
 		this.contentEl.removeEventListener("mouseleave", this.boundContentMouseLeaveHandler);

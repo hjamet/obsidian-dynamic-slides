@@ -702,3 +702,144 @@ export function extractBlockContext(
 		range: null,
 	};
 }
+
+const READING_FOCUS_SKIP_SELECTOR = [
+	".copy-code-button",
+	".slideflow-selection-toolbar",
+	".slideflow-comments-rail",
+	".slideflow-hover-add-btn",
+	".slideflow-deleted-sections-title",
+].join(", ");
+
+function isVisibleReadableBlock(el: HTMLElement): boolean {
+	if (!el.isConnected) return false;
+	const style = window.getComputedStyle(el);
+	if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") === 0) {
+		return false;
+	}
+	const rect = el.getBoundingClientRect();
+	if (rect.width < 4 || rect.height < 4) return false;
+	const hasMedia = Boolean(
+		el.matches(HOVER_DIRECT_MEDIA_SELECTOR) || el.querySelector(HOVER_DIRECT_MEDIA_SELECTOR)
+	);
+	const hasText = Boolean((el.textContent || "").trim().length > 0);
+	return hasMedia || hasText;
+}
+
+/**
+ * Collects all visible semantic reading blocks inside `.dynamic-slides-content` in top-to-bottom
+ * reading order for keyboard reading-focus navigation (`ArrowDown` / `ArrowUp`):
+ * - Headings (`h1..h6`), paragraphs (`p`), individual list items (`li`), callouts (`.callout`),
+ *   blockquotes (`blockquote`), code blocks (`pre`), tables (`table`), child heading cards,
+ *   and standalone media/images/embeds/diagrams (unwrapping image-only `<p>` so the image itself is framed).
+ */
+export function collectReadableBlocks(contentEl: HTMLElement): HTMLElement[] {
+	const results: HTMLElement[] = [];
+	const seen = new Set<HTMLElement>();
+
+	const pushUnique = (el: HTMLElement) => {
+		if (!seen.has(el) && isVisibleReadableBlock(el)) {
+			seen.add(el);
+			results.push(el);
+		}
+	};
+
+	const visit = (parent: HTMLElement) => {
+		for (const child of Array.from(parent.children) as HTMLElement[]) {
+			if (child.matches(READING_FOCUS_SKIP_SELECTOR)) continue;
+			const style = window.getComputedStyle(child);
+			if (style.display === "none" || style.visibility === "hidden") continue;
+
+			const tag = child.tagName.toLowerCase();
+			if (tag === "hr" || tag === "br" || tag === "style" || tag === "script") continue;
+
+			if (child.classList.contains("callout")) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (child.classList.contains("dynamic-slides-child-heading")) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (tag === "table" || tag === "pre" || tag === "blockquote") {
+				pushUnique(child);
+				continue;
+			}
+
+			if (child.matches(HOVER_DIRECT_MEDIA_SELECTOR)) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (/^h[1-6]$/.test(tag)) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (tag === "p") {
+				const directMedia = child.querySelector<HTMLElement>(HOVER_DIRECT_MEDIA_SELECTOR);
+				if (directMedia) {
+					const clone = child.cloneNode(true) as HTMLElement;
+					clone.querySelectorAll(HOVER_DIRECT_MEDIA_SELECTOR).forEach((m) => m.remove());
+					const remainingText = (clone.textContent || "").trim();
+					if (remainingText.length === 0 && isVisibleReadableBlock(directMedia)) {
+						pushUnique(directMedia);
+						continue;
+					}
+				}
+				pushUnique(child);
+				continue;
+			}
+
+			if (tag === "li") {
+				const nestedLists = Array.from(child.children).filter((c) => {
+					const t = c.tagName.toLowerCase();
+					return t === "ul" || t === "ol";
+				}) as HTMLElement[];
+
+				if (nestedLists.length === 0) {
+					pushUnique(child);
+				} else {
+					// Keep the parent list item itself focusable if it has own text/media before sublists,
+					// then also allow stepping down into its nested list items cleanly.
+					const directP = Array.from(child.children).find(
+						(c) => c.tagName.toLowerCase() === "p"
+					) as HTMLElement | undefined;
+					if (directP && isVisibleReadableBlock(directP)) {
+						pushUnique(directP);
+					} else {
+						pushUnique(child);
+					}
+					for (const nl of nestedLists) {
+						visit(nl);
+					}
+				}
+				continue;
+			}
+
+			if (
+				tag === "ul" ||
+				tag === "ol" ||
+				tag === "div" ||
+				tag === "section" ||
+				tag === "article"
+			) {
+				const before = results.length;
+				visit(child);
+				if (results.length === before && isVisibleReadableBlock(child)) {
+					pushUnique(child);
+				}
+				continue;
+			}
+
+			if (isVisibleReadableBlock(child)) {
+				pushUnique(child);
+			}
+		}
+	};
+
+	visit(contentEl);
+	return results;
+}

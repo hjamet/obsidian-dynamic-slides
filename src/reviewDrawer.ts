@@ -13,7 +13,12 @@
  */
 
 import { ConfirmOverlayModal } from "./confirmModal";
-import { GENERAL_NOTE_PATH, isGeneralComment, ReviewComment } from "./reviewStore";
+import {
+	GENERAL_NOTE_PATH,
+	isGeneralComment,
+	partitionCommentsForCliSessions,
+	ReviewComment,
+} from "./reviewStore";
 import { stripHeadingLinksToPlainText } from "./headingUtils";
 import { readImageAsDataUrl } from "./commentImages";
 
@@ -283,10 +288,17 @@ export class ReviewDrawer {
 		}
 		if (this.primaryBtnEl) {
 			if (this.directCliEnabled) {
-				const hasFailed = this.comments.some((c) => Boolean(c.failedAt || c.failedReason));
-				this.primaryBtnEl.innerHTML = hasFailed
-					? `<span>Send / Retry with ${this.cliDisplayName}</span> <strong>Ctrl+↵</strong>`
-					: `<span>Send to ${this.cliDisplayName}</span> <strong>Ctrl+↵</strong>`;
+				const sessions = partitionCommentsForCliSessions(this.comments);
+				const retryCount = sessions.filter((s) => s.kind === "retry").length;
+				const newCount = sessions.filter((s) => s.kind === "new").length;
+				const sessionSuffix = sessions.length > 1 ? ` (${sessions.length} sessions)` : "";
+				let label = `Send to ${this.cliDisplayName}${sessionSuffix}`;
+				if (retryCount > 0 && newCount > 0) {
+					label = `Retry & Send to ${this.cliDisplayName} (${sessions.length} sessions)`;
+				} else if (retryCount > 0) {
+					label = `Retry with ${this.cliDisplayName}${sessionSuffix}`;
+				}
+				this.primaryBtnEl.innerHTML = `<span>${label}</span> <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
 			} else {
 				this.primaryBtnEl.innerHTML = `<span>Copy /one-shot (XML)</span> <strong>Ctrl+↵</strong>`;

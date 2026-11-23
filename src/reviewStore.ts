@@ -52,8 +52,56 @@ export interface ReviewComment {
 	createdAt: string;
 	updatedAt?: string;
 	copiedAt?: string;
+	failedBatchId?: string | null;
 	failedReason?: string | null;
 	failedAt?: string | null;
+}
+
+export interface CliSessionBatch {
+	kind: "retry" | "new";
+	groupKey: string;
+	comments: ReviewComment[];
+}
+
+/**
+ * Splits pending queue comments into independent CLI (`agy`) sessions so that:
+ * - Each previously failed WIP batch (identified by `failedBatchId`, falling back to
+ *   `projectRootPath` / `notePath` for legacy failed items) is retried in its OWN isolated session
+ *   and launched FIRST.
+ * - New (non-failed) comments are NEVER mixed into a failed retry session; they run in their own
+ *   separate session(s) (also separated if they belong to distinct non-empty `projectRootPath`s).
+ */
+export function partitionCommentsForCliSessions(comments: ReviewComment[]): CliSessionBatch[] {
+	if (!comments || comments.length === 0) return [];
+
+	const failedGroups = new Map<string, ReviewComment[]>();
+	const newGroups = new Map<string, ReviewComment[]>();
+
+	for (const c of comments) {
+		const isFailed = Boolean(c.failedAt || c.failedReason || c.failedBatchId);
+		if (isFailed) {
+			const key = c.failedBatchId
+				? `retry:batch:${c.failedBatchId}`
+				: `retry:proj:${(c.projectRootPath || c.notePath || "__failed__").toLowerCase()}`;
+			const bucket = failedGroups.get(key) || [];
+			bucket.push(c);
+			failedGroups.set(key, bucket);
+		} else {
+			const key = `new:proj:${(c.projectRootPath || "__current__").toLowerCase()}`;
+			const bucket = newGroups.get(key) || [];
+			bucket.push(c);
+			newGroups.set(key, bucket);
+		}
+	}
+
+	const sessions: CliSessionBatch[] = [];
+	for (const [groupKey, list] of failedGroups.entries()) {
+		sessions.push({ kind: "retry", groupKey, comments: list });
+	}
+	for (const [groupKey, list] of newGroups.entries()) {
+		sessions.push({ kind: "new", groupKey, comments: list });
+	}
+	return sessions;
 }
 
 export interface WipCommentBatch {
@@ -317,6 +365,7 @@ export class ReviewStore {
 				if (idSet.has(c.id)) {
 					// Clear any stale failed state when re-submitting
 					const clean: ReviewComment = { ...c };
+					delete clean.failedBatchId;
 					delete clean.failedReason;
 					delete clean.failedAt;
 					moved.push(clean);
@@ -386,6 +435,7 @@ export class ReviewStore {
 				if (existingIds.has(c.id)) continue;
 				restored.push({
 					...c,
+					failedBatchId: jobId,
 					failedReason: reason || "Command failed",
 					failedAt: nowIso,
 				});

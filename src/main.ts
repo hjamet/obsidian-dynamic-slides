@@ -3,6 +3,7 @@ import * as path from "path";
 import {
 	buildChildHeadingsHtml,
 	buildInlineDeletedHeadingHtml,
+	isHeadingOnlySkippedSlide,
 	parseMarkdownSections,
 	findCurrentSectionNode,
 	SectionNode,
@@ -27,7 +28,13 @@ import {
 	extractVisibleSlideContext,
 	extractZoomContext,
 } from "./contextExtractor";
-import { GENERAL_NOTE_PATH, isGeneralComment, ReviewComment, ReviewStore } from "./reviewStore";
+import {
+	GENERAL_NOTE_PATH,
+	isGeneralComment,
+	partitionCommentsForCliSessions,
+	ReviewComment,
+	ReviewStore,
+} from "./reviewStore";
 import { CommentImageAttachment, pruneStaleTempImages } from "./commentImages";
 import { VoiceDictationService } from "./voiceDictation";
 import { CommentOverlayModal } from "./commentModal";
@@ -592,8 +599,35 @@ export default class SlideFlowPlugin extends Plugin {
 		return { deletionOnlyNodeIds, descendantDeletionOnlyNodeIds };
 	}
 
+	private isSkippedEmptySlide(node: SectionNode | null | undefined): boolean {
+		if (!isHeadingOnlySkippedSlide(node) || !node) return false;
+		if (this.diffEnabled && this.activeDiffContext) {
+			const info = this.activeDiffContext.slideDiffs.get(node.id);
+			// Only keep an empty heading-only leaf navigable while diff mode has unread deleted body content
+			// (e.g., a section whose body was just archived to a sub-note and hasn't been validated yet).
+			if (info && info.hasChanges && !info.validatedByComment && info.removedCount > 0) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private resolveNavigableTarget(node: SectionNode | null): SectionNode | null {
+		let curr = node;
+		while (curr && this.isSkippedEmptySlide(curr) && curr.parent) {
+			curr = curr.parent;
+		}
+		return curr;
+	}
+
 	private buildTOCVisualMeta(): TOCVisualMeta {
 		const { deletionOnlyNodeIds, descendantDeletionOnlyNodeIds } = this.computeDeletionOnlyTOCSets();
+		const skippedNodeIds = new Set<string>();
+		for (const n of this.flatNodes) {
+			if (this.isSkippedEmptySlide(n)) {
+				skippedNodeIds.add(n.id);
+			}
+		}
 		return {
 			dirtyNodeIds: this.getDirtyNodeIdSet(),
 			descendantDirtyNodeIds: this.activeDiffContext?.descendantDirtyNodeIds,
@@ -601,6 +635,7 @@ export default class SlideFlowPlugin extends Plugin {
 			descendantDeletionOnlyNodeIds,
 			commentCountByHeading: this.getCommentCountByHeadingForActiveNote(),
 			showVirtualDeleted: this.diffEnabled,
+			skippedNodeIds,
 		};
 	}
 
@@ -854,6 +889,22 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 		}
 
+		// Also atomically validate any skipped heading-only leaf children rendered inside this parent slide
+		const skippedChildrenToClear: SectionNode[] = [];
+		if (clearVisuallyNow && !node.isVirtualDeleted && node.children.length > 0) {
+			for (const ch of node.children) {
+				if (!this.isSkippedEmptySlide(ch)) continue;
+				const chInfo = ctx.slideDiffs.get(ch.id);
+				if (chInfo && chInfo.hasChanges && !chInfo.validatedByComment) {
+					itemsToMark.push({
+						slideKey: chInfo.slideKey,
+						text: chInfo.rawNewMarkdown,
+					});
+					skippedChildrenToClear.push(ch);
+				}
+			}
+		}
+
 		if (itemsToMark.length === 0) {
 			return "none";
 		}
@@ -903,6 +954,17 @@ export default class SlideFlowPlugin extends Plugin {
 					vInfo.rawOldMarkdown = "";
 					vInfo.addedCount = 0;
 					vInfo.removedCount = 0;
+				}
+			}
+			for (const sChild of skippedChildrenToClear) {
+				const sInfo = ctx.slideDiffs.get(sChild.id);
+				if (sInfo) {
+					sInfo.hasChanges = false;
+					sInfo.validatedByComment = false;
+					sInfo.diffMarkdown = sInfo.rawNewMarkdown;
+					sInfo.rawOldMarkdown = sInfo.rawNewMarkdown;
+					sInfo.addedCount = 0;
+					sInfo.removedCount = 0;
 				}
 			}
 			if (virtualDelToClear.length > 0) {
@@ -1015,6 +1077,7 @@ export default class SlideFlowPlugin extends Plugin {
 		const diffInit = await this.computeDiffForLoadedNote(file.path, markdownText, this.flatNodes);
 		this.activeDiffContext = diffInit.ctx;
 		this.diffEnabled = diffInit.autoEnable;
+		this.currentNode = this.resolveNavigableTarget(this.currentNode) || this.currentNode || this.rootNode;
 
 		this.activeModal = new PresentationModal(
 			this.app,
@@ -1041,13 +1104,13 @@ export default class SlideFlowPlugin extends Plugin {
 		};
 		this.activeModal.onChildHeadingClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
-			if (targetNode) {
+			if (targetNode && !this.isSkippedEmptySlide(targetNode)) {
 				void this.goToNode(targetNode, 'zoom-in', 'start');
 			}
 		};
 		this.activeModal.onSectionClickCallback = (nodeId: string) => {
 			const targetNode = this.flatNodes.find(n => n.id === nodeId);
-			if (targetNode) {
+			if (targetNode && !this.isSkippedEmptySlide(targetNode)) {
 				void this.goToNode(targetNode, 'zoom-in', 'start');
 			}
 		};
@@ -1071,7 +1134,18 @@ export default class SlideFlowPlugin extends Plugin {
 			this.slideCommentsRail?.positionRail();
 		};
 		this.activeModal.onHoveredBlockChangeCallback = (blockEl: HTMLElement | null) => {
-			this.slideCommentsRail?.setHoveredBlock(blockEl);
+			if (blockEl) {
+				this.slideCommentsRail?.setHoveredBlock(blockEl);
+			} else {
+				this.slideCommentsRail?.setHoveredBlock(
+					this.activeModal?.getReadingFocusBlockElement() || null
+				);
+			}
+		};
+		this.activeModal.onReadingFocusChangeCallback = (blockEl: HTMLElement | null) => {
+			if (!this.activeModal?.getHoveredBlockElement()) {
+				this.slideCommentsRail?.setHoveredBlock(blockEl);
+			}
 		};
 
 		const overlayEl = this.activeModal.getOverlayElement();
@@ -1228,6 +1302,10 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeModal.closeMediaZoom(true);
 			return;
 		}
+		if (this.activeModal?.isReadingFocusActive()) {
+			this.activeModal.clearReadingFocus();
+			return;
+		}
 		if (this.documentStack.length > 0) {
 			void this.popDocumentStack();
 			return;
@@ -1255,10 +1333,15 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 			const unsentCount = this.reviewStore.getCount();
 			const cliName = getCliDisplayName(this.settings.directCliCommand);
+			const sessions = partitionCommentsForCliSessions(this.reviewStore.getAll());
+			const sessionNote =
+				sessions.length > 1
+					? ` across ${sessions.length} separate ${cliName} sessions`
+					: ` to ${cliName}`;
 
 			this.exitConfirmModal.open({
 				title: `Unsent comments (${unsentCount})`,
-				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""} to ${cliName} before closing? Comments move to background WIP and purge automatically on success (or reappear as failed on error).`,
+				message: `Send ${unsentCount} review comment${unsentCount > 1 ? "s" : ""}${sessionNote} before closing? Comments move to background WIP and purge automatically on success (or reappear as failed on error).`,
 				confirmLabelHtml: `Send & Exit <strong>Ctrl+↵</strong>`,
 				confirmVariant: "primary",
 				confirmShortcut: "Ctrl+Enter",
@@ -1387,11 +1470,12 @@ export default class SlideFlowPlugin extends Plugin {
 			const cand = this.flatNodes[idx];
 			if (skipRoot && cand.level === 0) continue;
 			if (dirtyIds.has(cand.id)) {
-				if (cand.isVirtualDeleted && !this.diffEnabled) {
+				const target = this.resolveNavigableTarget(cand) || cand;
+				if (target.isVirtualDeleted && !this.diffEnabled) {
 					this.diffEnabled = true;
 				}
 				const wrapped = currIdx >= 0 && idx < currIdx;
-				void this.goToNode(cand, "jump", "start");
+				void this.goToNode(target, "jump", "start");
 				if (wrapped) {
 					new Notice("Wrapped to an earlier unvalidated diff.");
 				}
@@ -1454,14 +1538,17 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 		}
 
-		// When cursor is hovering a specific Markdown element inside the slide card,
+		// When reading-focus mode (ArrowDown/ArrowUp) is active OR cursor hovers a specific Markdown element,
 		// C / V automatically highlight and target that element instead of the entire slide!
-		// When cursor is outside the slide card, hoveredBlockEl is null -> general slide comment.
+		// Reading-focus takes priority over stray hover; outside slide card with no reading-focus -> general slide comment.
 		if (!extracted && !this.activeModal.isMediaZoomActive()) {
-			const hoveredBlock = explicitBlockEl ?? this.activeModal.getHoveredBlockElement();
-			if (hoveredBlock) {
+			const targetBlock =
+				explicitBlockEl ??
+				this.activeModal.getReadingFocusBlockElement() ??
+				this.activeModal.getHoveredBlockElement();
+			if (targetBlock) {
 				const blockRes = extractBlockContext(
-					hoveredBlock,
+					targetBlock,
 					this.activeSourcePath,
 					this.currentNode.title,
 					this.activeModal.getContentElement()
@@ -1469,7 +1556,7 @@ export default class SlideFlowPlugin extends Plugin {
 				if (blockRes) {
 					extracted = blockRes.context;
 					highlightRange = blockRes.range;
-					activeTargetBlock = hoveredBlock;
+					activeTargetBlock = targetBlock;
 				}
 			}
 		}
@@ -1623,11 +1710,10 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	/**
-	 * Moves all visible comments immediately into an isolated WIP batch tied to `{ jobId, pid }`
-	 * so the visible queue becomes empty immediately for the next project!
-	 * - On `exitCode === 0`: purges ONLY this `jobId`'s WIP batch permanently.
-	 * - On non-zero exit / spawn error / dead orphan PID: restores ONLY this `jobId`'s comments
-	 *   back into the visible queue with a red `failed` badge ready to be re-sent!
+	 * Partitions pending comments into isolated CLI sessions (`failed` retry batches first, each
+	 * failed project/batch in its own session, and fresh new comments in their own separate session(s)),
+	 * moving each batch immediately into WIP tied to `{ jobId, pid }` so the visible queue clears
+	 * immediately for the next project!
 	 */
 	private async sendPendingCommentsToCli(): Promise<boolean> {
 		const toSend = this.reviewStore.getAll();
@@ -1636,103 +1722,137 @@ export default class SlideFlowPlugin extends Plugin {
 			return false;
 		}
 
+		const sessions = partitionCommentsForCliSessions(toSend);
+		if (sessions.length === 0) {
+			return false;
+		}
+
 		const includeOneShotPrefix = !templateIncludesOneShot(this.settings.directCliCommand);
-		const formatted = this.reviewStore.formatExport(includeOneShotPrefix, toSend);
 		let cliDisplayName = "CLI";
 
+		// Validate command template up front (Fail-Fast before moving any comments to WIP)
 		try {
-			const parsed = parseCommandTemplate(this.settings.directCliCommand, formatted);
+			const sampleFormatted = this.reviewStore.formatExport(
+				includeOneShotPrefix,
+				sessions[0].comments
+			);
+			const parsed = parseCommandTemplate(this.settings.directCliCommand, sampleFormatted);
 			cliDisplayName = parsed.displayName;
 		} catch (err: any) {
 			new Notice(`SlideFlow CLI config error: ${err?.message || String(err)}`, 9000);
 			return false;
 		}
 
-		const sentIds = toSend.map((c) => c.id);
-		const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-		const startedAt = new Date().toISOString();
 		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
-		const noteTitles = await this.activeJobsTracker.orderNotesForJob(toSend);
 		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
+		const cwd = this.reviewStore.getVaultBasePath();
+		const baseTs = Date.now();
+		let totalSentComments = 0;
+		let launchedSessions = 0;
+		let retrySessions = 0;
 
-		// Immediately move this batch into WIP so the visible queue is clean for the next project!
-		const moved = await this.reviewStore.moveCommentsToWip(sentIds, {
-			jobId,
-			cli: cliDisplayName,
-			model: modelLabel,
-			startedAt,
-		});
-		if (moved.length === 0) {
+		for (let idx = 0; idx < sessions.length; idx++) {
+			const session = sessions[idx];
+			const formatted = this.reviewStore.formatExport(includeOneShotPrefix, session.comments);
+			const sentIds = session.comments.map((c) => c.id);
+			const jobId = `job_${baseTs + idx}_${Math.random().toString(36).slice(2, 6)}`;
+			const startedAt = new Date().toISOString();
+			const noteTitles = await this.activeJobsTracker.orderNotesForJob(session.comments);
+
+			// Immediately move this session's comments into its own isolated WIP batch
+			const moved = await this.reviewStore.moveCommentsToWip(sentIds, {
+				jobId,
+				cli: cliDisplayName,
+				model: modelLabel,
+				startedAt,
+			});
+			if (moved.length === 0) {
+				continue;
+			}
+
+			totalSentComments += moved.length;
+			launchedSessions += 1;
+			if (session.kind === "retry") retrySessions += 1;
+			this.liveOwnedJobIds.add(jobId);
+
+			void this.activeJobsTracker.registerJob({
+				id: jobId,
+				pid: null,
+				cli: cliDisplayName,
+				model: modelLabel,
+				status: "running",
+				startedAt,
+				commentCount: moved.length,
+				notes: noteTitles,
+				logPath: path.join(jobsDir, `${jobId}.log`),
+			});
+
+			void runCliCommand(this.settings.directCliCommand, formatted, {
+				cwd,
+				jobsDir,
+				jobId,
+				onSpawn: (pid) => {
+					void this.reviewStore.setWipBatchPid(jobId, pid);
+					void this.activeJobsTracker.updateJobPid(jobId, pid);
+				},
+			})
+				.then(async (res) => {
+					this.liveOwnedJobIds.delete(jobId);
+
+					if (res.exitCode === 0) {
+						const purged = await this.reviewStore.purgeWipBatch(jobId);
+						await this.activeJobsTracker.completeJob(jobId, 0, null);
+						this.refreshAllActiveUI();
+						new Notice(
+							`${res.displayName} finished — ${purged} comment(s) completed & purged.`,
+							6000
+						);
+					} else {
+						const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
+						const detail = rawErr ? rawErr.slice(0, 140) : "";
+						const reason = `exit ${res.exitCode}${detail ? `: ${detail}` : ""}`;
+						const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, reason);
+						await this.activeJobsTracker.completeJob(jobId, res.exitCode, detail || null);
+						this.refreshAllActiveUI();
+						console.error("[SlideFlow CLI] Non-zero exit:", res);
+						new Notice(
+							`SlideFlow: ${res.displayName} failed (${reason}). ${restored} comment(s) restored as failed in queue.`,
+							10000
+						);
+					}
+				})
+				.catch(async (err: any) => {
+					this.liveOwnedJobIds.delete(jobId);
+					const errMsg = err?.message || String(err);
+					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
+					await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
+					this.refreshAllActiveUI();
+					console.error("[SlideFlow CLI] Execution failed:", err);
+					new Notice(
+						`SlideFlow CLI error: ${errMsg}. ${restored} comment(s) restored as failed in queue.`,
+						10000
+					);
+				});
+		}
+
+		this.refreshAllActiveUI();
+
+		if (launchedSessions === 0) {
 			return false;
 		}
 
-		this.liveOwnedJobIds.add(jobId);
-		this.refreshAllActiveUI();
-
-		void this.activeJobsTracker.registerJob({
-			id: jobId,
-			pid: null,
-			cli: cliDisplayName,
-			model: modelLabel,
-			status: "running",
-			startedAt,
-			commentCount: moved.length,
-			notes: noteTitles,
-			logPath: path.join(jobsDir, `${jobId}.log`),
-		});
-
-		new Notice(
-			`Sent ${moved.length} comment(s) to ${cliDisplayName} (WIP) — queue is now clear for your next project.`,
-			5000
-		);
-
-		const cwd = this.reviewStore.getVaultBasePath();
-		void runCliCommand(this.settings.directCliCommand, formatted, {
-			cwd,
-			jobsDir,
-			jobId,
-			onSpawn: (pid) => {
-				void this.reviewStore.setWipBatchPid(jobId, pid);
-				void this.activeJobsTracker.updateJobPid(jobId, pid);
-			},
-		})
-			.then(async (res) => {
-				this.liveOwnedJobIds.delete(jobId);
-
-				if (res.exitCode === 0) {
-					const purged = await this.reviewStore.purgeWipBatch(jobId);
-					await this.activeJobsTracker.completeJob(jobId, 0, null);
-					this.refreshAllActiveUI();
-					new Notice(
-						`${res.displayName} finished — ${purged} comment(s) completed & purged.`,
-						6000
-					);
-				} else {
-					const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
-					const detail = rawErr ? rawErr.slice(0, 140) : "";
-					const reason = `exit ${res.exitCode}${detail ? `: ${detail}` : ""}`;
-					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, reason);
-					await this.activeJobsTracker.completeJob(jobId, res.exitCode, detail || null);
-					this.refreshAllActiveUI();
-					console.error("[SlideFlow CLI] Non-zero exit:", res);
-					new Notice(
-						`SlideFlow: ${res.displayName} failed (${reason}). ${restored} comment(s) restored as failed in queue.`,
-						10000
-					);
-				}
-			})
-			.catch(async (err: any) => {
-				this.liveOwnedJobIds.delete(jobId);
-				const errMsg = err?.message || String(err);
-				const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
-				await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
-				this.refreshAllActiveUI();
-				console.error("[SlideFlow CLI] Execution failed:", err);
-				new Notice(
-					`SlideFlow CLI error: ${errMsg}. ${restored} comment(s) restored as failed in queue.`,
-					10000
-				);
-			});
+		if (launchedSessions === 1) {
+			new Notice(
+				`Sent ${totalSentComments} comment(s) to ${cliDisplayName} (WIP) — queue is now clear for your next project.`,
+				5000
+			);
+		} else {
+			const retryInfo = retrySessions > 0 ? ` (${retrySessions} retry + ${launchedSessions - retrySessions} new)` : "";
+			new Notice(
+				`Launched ${launchedSessions} separate ${cliDisplayName} sessions${retryInfo} for ${totalSentComments} comment(s) — queue is now clear.`,
+				6500
+			);
+		}
 
 		return true;
 	}
@@ -1802,9 +1922,9 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private getNavigableNodes(): SectionNode[] {
-		return this.diffEnabled
-			? this.flatNodes
-			: this.flatNodes.filter((n) => !n.isVirtualDeleted);
+		return this.flatNodes.filter(
+			(n) => (this.diffEnabled || !n.isVirtualDeleted) && !this.isSkippedEmptySlide(n)
+		);
 	}
 
 	private updateSlideCounter() {
@@ -1843,11 +1963,10 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeModal.scrollPdfZoom("down", 0.45);
 			return;
 		}
-		if (this.activeModal) {
-			this.activeModal.closeMediaZoom(false);
-			this.activeModal.cancelScrollAnimation(false);
+		if (this.activeModal?.isMediaZoomActive()) {
+			return;
 		}
-		this.nextSlide();
+		this.activeModal?.stepReadingFocus("down");
 	}
 
 	private fastJumpPrev() {
@@ -1855,11 +1974,10 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeModal.scrollPdfZoom("up", 0.45);
 			return;
 		}
-		if (this.activeModal) {
-			this.activeModal.closeMediaZoom(false);
-			this.activeModal.cancelScrollAnimation(false);
+		if (this.activeModal?.isMediaZoomActive()) {
+			return;
 		}
-		this.prevSlide('start');
+		this.activeModal?.stepReadingFocus("up");
 	}
 
 	private async handleExternalPdfLinkClick(fileUrl: string): Promise<void> {
@@ -2004,6 +2122,7 @@ export default class SlideFlowPlugin extends Plugin {
 			const diffInit = await this.computeDiffForLoadedNote(targetFile.path, markdownText, this.flatNodes);
 			this.activeDiffContext = diffInit.ctx;
 			this.diffEnabled = diffInit.autoEnable;
+			this.currentNode = this.resolveNavigableTarget(this.currentNode);
 
 			if (this.activeModal && this.currentNode) {
 				this.activeModal.closeMediaZoom(false);

@@ -7,6 +7,7 @@ export interface TOCVisualMeta {
 	descendantDeletionOnlyNodeIds?: Set<string>;
 	commentCountByHeading?: Map<string, number>;
 	showVirtualDeleted?: boolean;
+	skippedNodeIds?: Set<string>;
 }
 
 function isAncestorOf(ancestor: SectionNode, target: SectionNode): boolean {
@@ -115,9 +116,17 @@ export class TOCComponent {
 		if (node.isVirtualDeleted && !meta?.showVirtualDeleted) {
 			return;
 		}
+		if (meta?.skippedNodeIds?.has(node.id)) {
+			return;
+		}
 		const li = containerUl.createEl("li", { cls: "dynamic-slides-toc-node" });
 		const isCurrent = node.id === activeNode.id;
-		const hasChildren = node.children && node.children.length > 0;
+		const visibleChildren = (node.children || []).filter(
+			(ch) =>
+				(!ch.isVirtualDeleted || Boolean(meta?.showVirtualDeleted)) &&
+				!meta?.skippedNodeIds?.has(ch.id)
+		);
+		const hasChildren = visibleChildren.length > 0;
 		const isExpanded = hasChildren && shouldExpandChildren(node, activeNode);
 
 		const isDirty = Boolean(meta?.dirtyNodeIds?.has(node.id));
