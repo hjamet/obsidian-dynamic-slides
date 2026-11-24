@@ -7,7 +7,10 @@
  * - Automatically injects `--project <projectName>`, `--output-format stream-json`, and
  *   `--log-file <jobId>.agy.log` for `agy` binaries (when not already present in the template)
  *   so every run lands in the configured Antigravity project (`Obsidian`) and reports real-time
- *   `conversationId`, `projectId`, `liveInstanceId`, and step progress.
+ *   `conversationId`, `projectId`, and step progress.
+ * - Strips per-task `-remote-control` / `--remote-control` flags when SlideFlow's persistent
+ *   `agy remote-control serve` server is active so every task shares ONE single Remote Control
+ *   instance (`obsidian-<hostname>`) instead of spawning ephemeral random instances per task.
  * - Automatically spills huge payloads (> 24,000 chars on Windows) to a job XML file on disk so
  *   Windows' 32,767-char `CreateProcessW` limit can never reject large review batches.
  */
@@ -19,7 +22,7 @@ import * as path from "path";
 
 export const COMMENTS_PLACEHOLDER = "{{COMMENTS}}";
 export const DEFAULT_CLI_COMMAND =
-	'agy --remote-control --model "Gemini 4 Neon (XHigh)" -p "/one-shot {{COMMENTS}}"';
+	'agy --model "Gemini 4 Neon (XHigh)" -p "/one-shot {{COMMENTS}}"';
 
 export interface ParsedCliCommand {
 	executable: string;
@@ -32,6 +35,7 @@ export interface CliRunOptions {
 	jobsDir?: string;
 	jobId?: string;
 	projectName?: string;
+	disablePerTaskRemoteControl?: boolean;
 	onSpawn?: (pid: number | null) => void;
 	onConversationId?: (conversationId: string) => void;
 	onProjectId?: (projectId: string) => void;
@@ -194,6 +198,73 @@ export function resolveExecutablePath(executable: string): string {
 	return executable;
 }
 
+const REMOTE_CONTROL_FLAG_RE = /^--?remote-control(?:=(?:true|false|1|0))?$/i;
+
+/**
+ * Quote-aware removal of standalone `-remote-control` / `--remote-control` tokens from an `agy`
+ * command template so legacy settings never keep spawning ephemeral per-task Remote Control
+ * instances alongside SlideFlow's persistent `agy remote-control serve` daemon.
+ */
+export function stripAgyRemoteControlFlagFromTemplate(template: string): string {
+	const raw = (template || "").trim();
+	if (!raw) return raw;
+	if (getCliDisplayName(raw).toLowerCase() !== "agy") {
+		return raw;
+	}
+
+	const parts: Array<{ text: string; isToken: boolean }> = [];
+	let i = 0;
+	while (i < raw.length) {
+		if (/\s/.test(raw[i])) {
+			const start = i;
+			while (i < raw.length && /\s/.test(raw[i])) i++;
+			parts.push({ text: raw.slice(start, i), isToken: false });
+			continue;
+		}
+		const start = i;
+		let quote: '"' | "'" | null = null;
+		while (i < raw.length) {
+			const ch = raw[i];
+			if (quote) {
+				if (ch === "\\" && quote === '"' && i + 1 < raw.length && raw[i + 1] === '"') {
+					i += 2;
+					continue;
+				}
+				if (ch === quote) {
+					quote = null;
+				}
+				i++;
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				quote = ch;
+				i++;
+				continue;
+			}
+			if (/\s/.test(ch)) break;
+			i++;
+		}
+		parts.push({ text: raw.slice(start, i), isToken: true });
+	}
+
+	const kept: string[] = [];
+	let skippedPrevToken = false;
+	for (const part of parts) {
+		if (part.isToken && REMOTE_CONTROL_FLAG_RE.test(part.text)) {
+			skippedPrevToken = true;
+			continue;
+		}
+		if (!part.isToken && skippedPrevToken) {
+			skippedPrevToken = false;
+			continue;
+		}
+		skippedPrevToken = false;
+		kept.push(part.text);
+	}
+
+	return kept.join("").trim();
+}
+
 function hasCliFlag(args: string[], names: string[]): boolean {
 	const lowered = names.map((n) => n.toLowerCase());
 	for (const tok of args) {
@@ -275,7 +346,14 @@ export function runCliCommand(
 	}
 
 	const isAgy = parsed.displayName.toLowerCase() === "agy";
-	const finalArgs = [...parsed.args];
+	const finalArgs =
+		isAgy && options.disablePerTaskRemoteControl !== false
+			? parsed.args.filter((tok) => !REMOTE_CONTROL_FLAG_RE.test(tok))
+			: [...parsed.args];
+	const expectLiveRemoteId =
+		isAgy &&
+		options.disablePerTaskRemoteControl === false &&
+		hasCliFlag(finalArgs, ["-remote-control", "--remote-control"]);
 	let agyLogPath: string | null = null;
 	let usingStreamJson = false;
 
@@ -406,7 +484,7 @@ export function runCliCommand(
 				if (m && m[1]) notifyConvId(m[1]);
 			}
 
-			if (liveInstanceId && projectId && conversationId) {
+			if (projectId && conversationId && (!expectLiveRemoteId || liveInstanceId)) {
 				stopAgyLogPoll();
 			}
 		};

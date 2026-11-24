@@ -368,13 +368,15 @@ export class ReviewStore {
 		});
 	}
 
-	public clearAll(): Promise<number> {
+	public clearAll(options?: { keepTempImages?: boolean }): Promise<number> {
 		return this.enqueue(async () => {
 			const count = this.comments.length;
 			const removedPaths = this.comments.flatMap((c) => (c.images || []).map((img) => img.path));
 			this.comments = [];
 			await this.saveToDiskUnlocked();
-			this.cleanupUnreferencedImages(removedPaths);
+			if (!options?.keepTempImages) {
+				this.cleanupUnreferencedImages(removedPaths);
+			}
 			return count;
 		});
 	}

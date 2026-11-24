@@ -2478,6 +2478,32 @@ mark.slideflow-comment-mark.is-partial-in-link.is-failed {
 	background: #166534 !important;
 }
 
+.slideflow-drawer-secondary-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	flex: 1 1 100%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 8px 14px;
+	height: auto;
+	border-radius: 10px;
+	border: 1px solid var(--background-modifier-border) !important;
+	box-shadow: none !important;
+	background: var(--background-secondary) !important;
+	color: var(--text-normal) !important;
+	font-size: 0.82rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.slideflow-drawer-secondary-btn:hover:not(:disabled) {
+	background: var(--background-modifier-hover) !important;
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border)) !important;
+}
+
 .slideflow-drawer-danger-btn {
 	appearance: none;
 	-webkit-appearance: none;
@@ -2501,6 +2527,7 @@ mark.slideflow-comment-mark.is-partial-in-link.is-failed {
 }
 
 .slideflow-drawer-primary-btn:disabled,
+.slideflow-drawer-secondary-btn:disabled,
 .slideflow-drawer-danger-btn:disabled {
 	opacity: 0.45;
 	cursor: not-allowed;
@@ -2538,6 +2565,10 @@ mark.slideflow-comment-mark.is-partial-in-link.is-failed {
 	gap: 12px;
 	box-sizing: border-box;
 	user-select: none;
+}
+
+.slideflow-confirm-card.has-extra-action {
+	max-width: 540px;
 }
 
 .slideflow-confirm-title {

@@ -47,6 +47,7 @@ import {
 	getCliDisplayName,
 	parseCommandTemplate,
 	runCliCommand,
+	stripAgyRemoteControlFlagFromTemplate,
 	templateIncludesOneShot,
 } from "./cliRunner";
 import {
@@ -365,6 +366,13 @@ export default class SlideFlowPlugin extends Plugin {
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		if (this.settings.agyServerAutoStart && this.settings.directCliCommand) {
+			const cleaned = stripAgyRemoteControlFlagFromTemplate(this.settings.directCliCommand);
+			if (cleaned && cleaned !== this.settings.directCliCommand) {
+				this.settings.directCliCommand = cleaned;
+				await this.saveSettings();
+			}
+		}
 	}
 
 	async saveSettings() {
@@ -1542,6 +1550,12 @@ export default class SlideFlowPlugin extends Plugin {
 					);
 				}
 			},
+			onCopyAndDiscard: async () => {
+				const copied = await this.copyAndDiscardPendingComments();
+				if (copied) {
+					this.reviewDrawer?.close(false);
+				}
+			},
 			onClose: () => {
 				// no-op
 			},
@@ -1664,6 +1678,10 @@ export default class SlideFlowPlugin extends Plugin {
 				hideCancelButton: true,
 				discardLabelHtml: `Exit & Keep <strong>Esc</strong>`,
 				escapeAction: "discard",
+				extraActionLabel: "Copy & Discard",
+				extraActionTitle:
+					"Copy all comments as XML (/one-shot) to clipboard, clear the queue, and exit (click only)",
+				extraActionVariant: "secondary",
 				onConfirm: async () => {
 					const launched = await this.sendPendingCommentsToCli();
 					if (launched) {
@@ -1675,6 +1693,12 @@ export default class SlideFlowPlugin extends Plugin {
 				},
 				onDiscard: () => {
 					this.closePresentation();
+				},
+				onExtraAction: async () => {
+					const copied = await this.copyAndDiscardPendingComments();
+					if (copied) {
+						this.closePresentation();
+					}
 				},
 			});
 			return;
@@ -2025,6 +2049,28 @@ export default class SlideFlowPlugin extends Plugin {
 		new Notice(`Copied ${count} comment(s) (XML /one-shot).`);
 	}
 
+	private async copyAndDiscardPendingComments(): Promise<boolean> {
+		if (!this.activeModal) {
+			await this.reviewStore.loadFromDisk();
+		}
+		const count = this.reviewStore.getCount();
+		if (count === 0) {
+			new Notice("No pending comments to copy.");
+			return false;
+		}
+
+		const formatted = this.reviewStore.formatExport(true);
+		// Fail-Fast ordering: only purge the queue after clipboard write succeeds.
+		await navigator.clipboard.writeText(formatted);
+		const cleared = await this.reviewStore.clearAll({ keepTempImages: true });
+		this.refreshAllActiveUI();
+
+		new Notice(
+			`Copied ${count} comment${count > 1 ? "s" : ""} (XML /one-shot) & discarded ${cleared} from queue.`
+		);
+		return true;
+	}
+
 	/**
 	 * Partitions pending comments into isolated CLI sessions (`failed` retry batches first, each
 	 * failed project/batch in its own session, and fresh new comments in their own separate session(s)),
@@ -2158,6 +2204,8 @@ export default class SlideFlowPlugin extends Plugin {
 				jobsDir,
 				jobId,
 				projectName: configuredProject,
+				disablePerTaskRemoteControl:
+					this.settings.agyServerAutoStart || this.agyServer.getSnapshot().status !== "stopped",
 				onSpawn: (pid) => {
 					void this.reviewStore.setWipBatchPid(jobId, pid);
 					void this.activeJobsTracker.updateJobPid(jobId, pid);
@@ -2859,7 +2907,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("CLI command template")
 			.setDesc(
-				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). For `agy`, `--project`, `--output-format stream-json`, and `--log-file` are injected automatically."
+				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). For `agy`, `--project`, `--output-format stream-json`, and `--log-file` are injected automatically, while per-task `--remote-control` flags are omitted when SlideFlow's persistent AGY server is enabled so every conversation shares one instance."
 			)
 			.addTextArea(text => {
 				text

@@ -3,8 +3,9 @@
  *
  * - Persistent Obsidian-lifecycle AGY Remote Control server card (live status, project badge,
  *   one-click "Ouvrir AGY Web", restart / start / stop).
- * - Running `agy` jobs with live step progress (`stream-json`), direct "Ouvrir Live" button
- *   (ephemeral live tunnel while running), and copyable CLI resume command.
+ * - Running `agy` jobs with live step progress (`stream-json`), direct "Ouvrir" button pointing
+ *   to the single persistent Obsidian server (zero per-task ephemeral instances), and copyable CLI
+ *   resume command.
  * - Interrupted / failed comment batches with individual per-batch "Retry" button, direct link
  *   to inspect the partial conversation on the persistent server, copyable CLI command, and
  *   two-click safe discard.
@@ -422,33 +423,36 @@ export class AgySidebarView extends ItemView {
 
 			const actions = card.createDiv({ cls: "sf-agy-actions-row" });
 
-			// Adaptive 3A: while running, prefer live ephemeral tunnel if available, else persistent server (only when connected)
-			const liveInstance =
-				job.liveInstanceId || (serverSnap.status === "connected" ? serverSnap.instanceId : null);
-			const liveUrl = this.callbacks.getConversationUrl(
-				job.conversationId,
-				job.projectId,
-				liveInstance
-			);
+			// Always open running conversations inside the single persistent Obsidian AGY server
+			// so all SlideFlow conversations live in one place (never ephemeral per-task instances).
+			const isServerReady = serverSnap.status === "connected";
+			const serverUrl = isServerReady
+				? this.callbacks.getConversationUrl(
+						job.conversationId,
+						job.projectId,
+						serverSnap.instanceId
+					)
+				: null;
 			const openBtn = actions.createEl("button", {
 				cls: "sf-agy-btn is-accent",
-				text: job.liveInstanceId ? "Ouvrir Live" : "Ouvrir Web",
+				text: "Ouvrir",
 			});
 			const webIcon = openBtn.createSpan({ cls: "sf-agy-btn-icon" });
 			openBtn.prepend(webIcon);
 			setIcon(webIcon, "external-link");
 
-			if (!liveUrl) {
+			if (!job.conversationId) {
+				openBtn.disabled = true;
+				openBtn.setAttr("title", "ID de conversation en cours d'attribution (~2s)…");
+			} else if (!isServerReady || !serverUrl) {
 				openBtn.disabled = true;
 				openBtn.setAttr(
 					"title",
-					!job.conversationId
-						? "ID de conversation en cours d'attribution (~2s)…"
-						: "En attente de la connexion du serveur AGY…"
+					"Démarrez le serveur AGY pour ouvrir cette conversation dans le navigateur."
 				);
 			} else {
-				openBtn.setAttr("title", liveUrl);
-				openBtn.addEventListener("click", () => openExternalUrl(liveUrl));
+				openBtn.setAttr("title", serverUrl);
+				openBtn.addEventListener("click", () => openExternalUrl(serverUrl));
 			}
 
 			this.appendCopyCliButton(actions, job.conversationId, vaultPath);

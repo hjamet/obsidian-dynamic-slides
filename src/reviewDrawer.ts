@@ -37,6 +37,7 @@ export interface ReviewDrawerCallbacks {
 	onDeleteComment: (commentId: string) => Promise<void>;
 	onClearAll: () => Promise<void>;
 	onPrimaryAction: () => Promise<void>;
+	onCopyAndDiscard?: () => Promise<void>;
 	onClose: () => void;
 }
 
@@ -52,6 +53,7 @@ export class ReviewDrawer {
 	private generalInputEl: HTMLTextAreaElement | null = null;
 	private generalAddBtnEl: HTMLButtonElement | null = null;
 	private primaryBtnEl: HTMLButtonElement | null = null;
+	private copyDiscardBtnEl: HTMLButtonElement | null = null;
 	private clearBtnEl: HTMLButtonElement | null = null;
 
 	private isOpenFlag: boolean = false;
@@ -163,6 +165,7 @@ export class ReviewDrawer {
 		});
 
 		if (!this.directCliEnabled) {
+			this.copyDiscardBtnEl = null;
 			this.clearBtnEl = footerEl.createEl("button", {
 				cls: "slideflow-drawer-danger-btn",
 				text: "Clear queue",
@@ -174,6 +177,23 @@ export class ReviewDrawer {
 			});
 		} else {
 			this.clearBtnEl = null;
+			if (this.callbacks.onCopyAndDiscard) {
+				this.copyDiscardBtnEl = footerEl.createEl("button", {
+					cls: "slideflow-drawer-secondary-btn",
+					text: "Copy & Discard",
+					attr: {
+						type: "button",
+						title: "Copy all comments as XML (/one-shot) to clipboard and clear the queue (click only)",
+					},
+				});
+				this.copyDiscardBtnEl.addEventListener("click", async (evt) => {
+					evt.stopPropagation();
+					if (this.comments.length === 0) return;
+					await this.callbacks.onCopyAndDiscard?.();
+				});
+			} else {
+				this.copyDiscardBtnEl = null;
+			}
 		}
 
 		this.updateHeaderAndFooter();
@@ -304,6 +324,9 @@ export class ReviewDrawer {
 				this.primaryBtnEl.innerHTML = `<span>Copy /one-shot (XML)</span> <strong>Ctrl+↵</strong>`;
 				this.primaryBtnEl.disabled = this.comments.length === 0;
 			}
+		}
+		if (this.copyDiscardBtnEl) {
+			this.copyDiscardBtnEl.disabled = this.comments.length === 0;
 		}
 		if (this.clearBtnEl) {
 			this.clearBtnEl.disabled = this.comments.length === 0;
@@ -672,6 +695,7 @@ export class ReviewDrawer {
 		this.generalInputEl = null;
 		this.generalAddBtnEl = null;
 		this.primaryBtnEl = null;
+		this.copyDiscardBtnEl = null;
 		this.clearBtnEl = null;
 		this.isSubmittingGeneral = false;
 		this.flatRows = [];

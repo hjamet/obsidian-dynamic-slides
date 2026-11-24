@@ -21,9 +21,13 @@ export interface ConfirmDialogOptions {
 	discardLabel?: string;
 	discardLabelHtml?: string;
 	escapeAction?: "cancel" | "discard";
+	extraActionLabel?: string;
+	extraActionTitle?: string;
+	extraActionVariant?: "secondary" | "danger-ghost";
 	onConfirm: () => void | Promise<void>;
 	onCancel: () => void;
 	onDiscard?: () => void | Promise<void>;
+	onExtraAction?: () => void | Promise<void>;
 }
 
 export class ConfirmOverlayModal {
@@ -55,7 +59,10 @@ export class ConfirmOverlayModal {
 			}
 		});
 
-		const cardEl = this.backdropEl.createDiv({ cls: "slideflow-confirm-card" });
+		const hasExtraAction = Boolean(options.extraActionLabel && options.onExtraAction);
+		const cardEl = this.backdropEl.createDiv({
+			cls: `slideflow-confirm-card${hasExtraAction ? " has-extra-action" : ""}`,
+		});
 		cardEl.addEventListener("click", (evt) => evt.stopPropagation());
 		cardEl.addEventListener("mousedown", (evt) => evt.stopPropagation());
 
@@ -109,6 +116,25 @@ export class ConfirmOverlayModal {
 			});
 		}
 
+		if (options.extraActionLabel && options.onExtraAction) {
+			const extraCls =
+				options.extraActionVariant === "danger-ghost"
+					? "slideflow-confirm-btn is-danger-ghost"
+					: "slideflow-confirm-btn is-secondary";
+			const extraBtn = rightGroup.createEl("button", {
+				cls: extraCls,
+				text: options.extraActionLabel,
+				attr: {
+					type: "button",
+					...(options.extraActionTitle ? { title: options.extraActionTitle } : {}),
+				},
+			});
+			extraBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.triggerExtraAction();
+			});
+		}
+
 		const confirmCls =
 			options.confirmVariant === "danger"
 				? "slideflow-confirm-btn is-danger"
@@ -144,6 +170,14 @@ export class ConfirmOverlayModal {
 
 	private triggerDiscard(): void {
 		const cb = this.currentOptions?.onDiscard;
+		this.close();
+		if (cb) {
+			void cb();
+		}
+	}
+
+	private triggerExtraAction(): void {
+		const cb = this.currentOptions?.onExtraAction;
 		this.close();
 		if (cb) {
 			void cb();
