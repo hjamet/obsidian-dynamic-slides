@@ -259,9 +259,15 @@ export class ActiveJobsTracker {
 			`\\n?${JOBS_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${JOBS_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
 			"g"
 		);
-		if (!markerRe.test(original)) return;
+		const legacyQuotaRe = /^> ⚡ \*\*Indicateurs de Quotas.*\n?/gm;
+		if (!markerRe.test(original) && !legacyQuotaRe.test(original)) return;
 
-		const cleaned = original.replace(markerRe, "\n\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+		const cleaned =
+			original
+				.replace(markerRe, "\n\n")
+				.replace(legacyQuotaRe, "")
+				.replace(/\n{3,}/g, "\n\n")
+				.trimEnd() + "\n";
 		if (cleaned !== original) {
 			await this.app.vault.modify(targetFile, cleaned);
 		}

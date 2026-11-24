@@ -4,6 +4,7 @@ export interface KeyboardNavigatorCallbacks {
 	onFastNext: () => void;
 	onFastPrev: () => void;
 	onEnter?: () => boolean | void;
+	onTab?: (shiftKey: boolean) => boolean | void;
 	onEscape: () => void;
 	onZoomIn?: () => void;
 	onZoomOut?: () => void;
@@ -129,7 +130,24 @@ export class KeyboardNavigator {
 			}
 		}
 
-		// Plain Enter -> Open preferred link in the active reading-focus block (green unread dot first, else first link)
+		// Tab / Shift+Tab -> Cycle through links inside the active reading-focus block
+		if (
+			!evt.ctrlKey &&
+			!evt.metaKey &&
+			!evt.altKey &&
+			(evt.key === "Tab" || evt.code === "Tab")
+		) {
+			if (!this.isInsideLivePlugin(evt.target) && this.callbacks.onTab) {
+				const handled = Boolean(this.callbacks.onTab(evt.shiftKey));
+				if (handled) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					return;
+				}
+			}
+		}
+
+		// Plain Enter -> Open focused link (Tab) or preferred link in the active reading-focus block
 		if (
 			!evt.ctrlKey &&
 			!evt.metaKey &&

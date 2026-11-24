@@ -7,6 +7,7 @@ import { TOCComponent, TOCVisualMeta } from "./toc";
 import { applyPersistentCommentHighlights } from "./commentHighlighter";
 import {
 	AnchorRect,
+	collectActionableLinksInBlock,
 	collectReadableBlocks,
 	findHoverableMarkdownBlock,
 	findPreferredLinkInBlock,
@@ -101,9 +102,12 @@ export class PresentationModal extends Component {
 	private boundContentMouseLeaveHandler: (evt: MouseEvent) => void;
 
 	// Keyboard reading-focus frame (ArrowDown / ArrowUp steps across paragraphs, list items, images, callouts…)
+	// and Tab / Shift+Tab link cycling within the currently focused block
 	private readingFocusActive: boolean = false;
 	private readingFocusIndex: number = -1;
 	private readingFocusBlockEl: HTMLElement | null = null;
+	private focusedLinkIndex: number = -1;
+	private focusedLinkEl: HTMLElement | null = null;
 
 	public currentScrollAnimId: number | null = null;
 	public currentScrollResolve: (() => void) | null = null;
@@ -490,7 +494,88 @@ export class PresentationModal extends Component {
 		return null;
 	}
 
+	public hasFocusedLink(): boolean {
+		return Boolean(
+			this.readingFocusActive &&
+				this.focusedLinkEl &&
+				this.focusedLinkEl.isConnected &&
+				this.contentEl.contains(this.focusedLinkEl)
+		);
+	}
+
+	public getFocusedLinkIndex(): number {
+		return this.hasFocusedLink() ? this.focusedLinkIndex : -1;
+	}
+
+	public clearFocusedLink(): void {
+		if (this.focusedLinkEl) {
+			this.focusedLinkEl.removeClass("slideflow-focused-link");
+			this.focusedLinkEl = null;
+		}
+		this.focusedLinkIndex = -1;
+	}
+
+	private setFocusedLinkElement(linkEl: HTMLElement | null, idx: number): void {
+		if (this.focusedLinkEl && this.focusedLinkEl !== linkEl) {
+			this.focusedLinkEl.removeClass("slideflow-focused-link");
+		}
+		this.focusedLinkEl = linkEl && linkEl.isConnected ? linkEl : null;
+		this.focusedLinkIndex = this.focusedLinkEl ? idx : -1;
+		if (this.focusedLinkEl) {
+			this.focusedLinkEl.addClass("slideflow-focused-link");
+			try {
+				this.focusedLinkEl.scrollIntoView({
+					block: "nearest",
+					inline: "nearest",
+					behavior: "smooth",
+				});
+			} catch {
+				// ignore if not supported
+			}
+		}
+	}
+
+	public stepFocusedLink(direction: "next" | "prev"): boolean {
+		if (this.isMediaZoomActive() || !this.readingFocusActive) return false;
+		const blockEl = this.getReadingFocusBlockElement();
+		if (!blockEl) return false;
+
+		const links = collectActionableLinksInBlock(blockEl, this.contentEl);
+		if (links.length === 0) {
+			this.clearFocusedLink();
+			return false;
+		}
+
+		// Blur any previously clicked SlideFlow UI button so Enter never triggers an unrelated control
+		if (
+			document.activeElement instanceof HTMLButtonElement &&
+			this.overlayEl.contains(document.activeElement) &&
+			!document.activeElement.closest(
+				".slideflow-live-plugin-host, .slideflow-live-plugin-el, [class*='block-language-']"
+			)
+		) {
+			document.activeElement.blur();
+		}
+
+		const liveIdx = this.focusedLinkEl ? links.indexOf(this.focusedLinkEl) : -1;
+		let nextIdx: number;
+		if (liveIdx === -1) {
+			nextIdx = direction === "next" ? 0 : links.length - 1;
+		} else {
+			nextIdx =
+				direction === "next"
+					? (liveIdx + 1) % links.length
+					: (liveIdx - 1 + links.length) % links.length;
+		}
+
+		this.setFocusedLinkElement(links[nextIdx], nextIdx);
+		return true;
+	}
+
 	private setReadingFocusBlock(blockEl: HTMLElement | null, scrollIntoView: boolean): void {
+		if (this.readingFocusBlockEl !== blockEl) {
+			this.clearFocusedLink();
+		}
 		if (this.readingFocusBlockEl && this.readingFocusBlockEl !== blockEl) {
 			this.readingFocusBlockEl.removeClass("slideflow-reading-focus-block");
 		}
@@ -576,7 +661,8 @@ export class PresentationModal extends Component {
 
 	private restoreReadingFocusAfterRender(
 		preferredIndex: number,
-		scrollIntoView: boolean = false
+		scrollIntoView: boolean = false,
+		preferredLinkIndex?: number
 	): void {
 		if (!this.readingFocusActive || !this.contentEl) return;
 		const applyNow = () => {
@@ -589,7 +675,15 @@ export class PresentationModal extends Component {
 			}
 			const clamped = Math.max(0, Math.min(preferredIndex, blocks.length - 1));
 			this.readingFocusIndex = clamped;
-			this.setReadingFocusBlock(blocks[clamped], scrollIntoView && clamped > 0);
+			const targetBlock = blocks[clamped];
+			this.setReadingFocusBlock(targetBlock, scrollIntoView && clamped > 0);
+			if (typeof preferredLinkIndex === "number" && preferredLinkIndex >= 0) {
+				const links = collectActionableLinksInBlock(targetBlock, this.contentEl);
+				if (links.length > 0) {
+					const linkIdx = Math.min(preferredLinkIndex, links.length - 1);
+					this.setFocusedLinkElement(links[linkIdx], linkIdx);
+				}
+			}
 		};
 		applyNow();
 		requestAnimationFrame(() => {
@@ -602,6 +696,7 @@ export class PresentationModal extends Component {
 	}
 
 	public clearReadingFocus(): void {
+		this.clearFocusedLink();
 		this.readingFocusActive = false;
 		this.readingFocusIndex = -1;
 		this.setReadingFocusBlock(null, false);
@@ -663,13 +758,22 @@ export class PresentationModal extends Component {
 
 	/**
 	 * Triggered by plain `Enter` when reading-focus mode is active:
-	 * opens the first link with an active green unread-diff dot inside the focused block,
-	 * otherwise opens the first link present inside the focused block (or navigates a focused child heading).
+	 * opens the explicitly Tab-selected link if one is highlighted, otherwise opens the first link
+	 * with an active green unread-diff dot inside the focused block, else the first link inside
+	 * the focused block (or navigates a focused child heading).
 	 */
 	public activateReadingFocusLink(): boolean {
 		if (this.isMediaZoomActive()) return false;
 		const blockEl = this.getReadingFocusBlockElement();
 		if (!blockEl) return false;
+
+		if (
+			this.focusedLinkEl &&
+			this.focusedLinkEl.isConnected &&
+			blockEl.contains(this.focusedLinkEl)
+		) {
+			return this.activateLinkElement(this.focusedLinkEl);
+		}
 
 		const targetLink = findPreferredLinkInBlock(blockEl, this.contentEl);
 		if (targetLink) {
@@ -2062,11 +2166,17 @@ export class PresentationModal extends Component {
 		direction: 'next' | 'prev' | 'zoom-in' | 'zoom-out' | 'jump' = 'jump',
 		enterFrom: 'start' | 'end' = 'start',
 		decoration?: SlideRenderDecoration,
-		restoreReadingFocus?: { active: boolean; index: number; scrollIntoView?: boolean }
+		restoreReadingFocus?: {
+			active: boolean;
+			index: number;
+			scrollIntoView?: boolean;
+			focusedLinkIndex?: number;
+		}
 	) {
 		this.currentSourcePath = sourcePath;
 		this.hideSelectionToolbar();
 		this.clearHoveredBlock();
+		this.clearFocusedLink();
 		this.setActiveCommentBlock(null);
 		if (this.readingFocusBlockEl) {
 			this.readingFocusBlockEl.removeClass("slideflow-reading-focus-block");
@@ -2138,14 +2248,15 @@ export class PresentationModal extends Component {
 			if (this.readingFocusActive && !this.isMediaZoomActive()) {
 				this.restoreReadingFocusAfterRender(
 					Math.max(0, restoreReadingFocus.index),
-					Boolean(restoreReadingFocus.scrollIntoView)
+					Boolean(restoreReadingFocus.scrollIntoView),
+					restoreReadingFocus.focusedLinkIndex
 				);
 			} else if (!this.readingFocusActive) {
 				this.clearReadingFocus();
 			}
-		} else if (this.readingFocusActive && !this.isMediaZoomActive()) {
-			// Persist reading-focus mode across slide transitions, resetting the frame to the top block
-			this.restoreReadingFocusAfterRender(0, false);
+		} else {
+			// Navigating to another slide cancels reading-focus block/link selection and returns to general slide view.
+			this.clearReadingFocus();
 		}
 	}
 
@@ -2162,6 +2273,7 @@ export class PresentationModal extends Component {
 		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
 		const wasZoomOpen = this.isMediaZoomActive();
 		const prevZoomIndex = this.activeZoomIndex;
+		const prevFocusedLinkIdx = this.getFocusedLinkIndex();
 
 		this.restoreZoomedLiveElement(false);
 
@@ -2197,7 +2309,11 @@ export class PresentationModal extends Component {
 		}
 
 		if (this.readingFocusActive && !this.isMediaZoomActive()) {
-			this.restoreReadingFocusAfterRender(Math.max(0, this.readingFocusIndex));
+			this.restoreReadingFocusAfterRender(
+				Math.max(0, this.readingFocusIndex),
+				false,
+				prevFocusedLinkIdx >= 0 ? prevFocusedLinkIdx : undefined
+			);
 		}
 	}
 

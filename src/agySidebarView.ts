@@ -16,6 +16,7 @@
 import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import { AgyServerSnapshot } from "./agyServerManager";
 import { formatJobNotesLabel, SlideFlowCliJob } from "./activeJobsTracker";
+import { QuotaEntry, QuotaSnapshot } from "./quotaTracker";
 import { CliSessionBatch, ReviewComment } from "./reviewStore";
 
 export const SLIDEFLOW_AGY_VIEW_TYPE = "slideflow-agy-sidebar";
@@ -28,6 +29,7 @@ export interface AgySidebarCallbacks {
 		projectId?: string | null,
 		overrideInstanceId?: string | null
 	) => string | null;
+	getQuotaSnapshot: () => QuotaSnapshot;
 	getJobs: () => SlideFlowCliJob[];
 	getFailedBatches: () => CliSessionBatch[];
 	getNewPendingComments: () => ReviewComment[];
@@ -36,12 +38,14 @@ export interface AgySidebarCallbacks {
 	onStopServer: () => void;
 	onRestartServer: () => Promise<void>;
 	onRefreshAll: () => Promise<void>;
+	onRefreshQuotas: () => Promise<void>;
 	onRetryFailedBatch: (groupKey: string) => Promise<void>;
 	onDiscardFailedBatch: (groupKey: string) => Promise<void>;
 	onSendNewPending: () => Promise<void>;
 	onRemoveHistoryJob: (jobId: string) => Promise<void>;
 	subscribeServer: (listener: () => void) => () => void;
 	subscribeJobs: (listener: () => void) => () => void;
+	subscribeQuotas: (listener: () => void) => () => void;
 }
 
 function formatHHMM(iso: string | null | undefined): string {
@@ -87,6 +91,7 @@ export class AgySidebarView extends ItemView {
 	private callbacks: AgySidebarCallbacks;
 	private unsubServer: (() => void) | null = null;
 	private unsubJobs: (() => void) | null = null;
+	private unsubQuotas: (() => void) | null = null;
 	private pendingDiscardConfirmKey: string | null = null;
 	private discardConfirmTimer: number | null = null;
 	private busyRetryKeys: Set<string> = new Set();
@@ -111,6 +116,7 @@ export class AgySidebarView extends ItemView {
 	public async onOpen(): Promise<void> {
 		this.unsubServer = this.callbacks.subscribeServer(() => this.render());
 		this.unsubJobs = this.callbacks.subscribeJobs(() => this.render());
+		this.unsubQuotas = this.callbacks.subscribeQuotas(() => this.render());
 		this.render();
 	}
 
@@ -122,6 +128,10 @@ export class AgySidebarView extends ItemView {
 		if (this.unsubJobs) {
 			this.unsubJobs();
 			this.unsubJobs = null;
+		}
+		if (this.unsubQuotas) {
+			this.unsubQuotas();
+			this.unsubQuotas = null;
 		}
 		if (this.discardConfirmTimer !== null) {
 			window.clearTimeout(this.discardConfirmTimer);
@@ -136,6 +146,7 @@ export class AgySidebarView extends ItemView {
 		container.addClass("slideflow-agy-sidebar");
 
 		const serverSnap = this.callbacks.getServerSnapshot();
+		const quotaSnap = this.callbacks.getQuotaSnapshot();
 		const jobs = this.callbacks.getJobs();
 		const failedBatches = this.callbacks.getFailedBatches();
 		const newPending = this.callbacks.getNewPendingComments();
@@ -156,6 +167,7 @@ export class AgySidebarView extends ItemView {
 		);
 
 		this.renderServerCard(container, serverSnap);
+		this.renderQuotasCard(container, quotaSnap);
 
 		if (runningJobs.length > 0) {
 			this.renderRunningSection(container, runningJobs, serverSnap, vaultPath);
@@ -170,6 +182,113 @@ export class AgySidebarView extends ItemView {
 		}
 
 		this.renderHistorySection(container, historyJobs, serverSnap, vaultPath);
+	}
+
+	private formatResetShort(iso: string | null): string {
+		if (!iso) return "";
+		const d = new Date(iso);
+		if (isNaN(d.getTime())) return "";
+		const day = String(d.getDate()).padStart(2, "0");
+		const mon = String(d.getMonth() + 1).padStart(2, "0");
+		const hh = String(d.getHours()).padStart(2, "0");
+		const mm = String(d.getMinutes()).padStart(2, "0");
+		return `${day}/${mon} ${hh}:${mm}`;
+	}
+
+	private renderQuotasCard(container: HTMLElement, snap: QuotaSnapshot): void {
+		const card = container.createDiv({ cls: "sf-agy-card sf-agy-quota-card" });
+
+		const topRow = card.createDiv({ cls: "sf-agy-quota-header" });
+		const titleWrap = topRow.createDiv({ cls: "sf-agy-quota-title-wrap" });
+		titleWrap.createSpan({ cls: "sf-agy-quota-title", text: "Quotas IA" });
+		if (snap.updatedAt) {
+			titleWrap.createSpan({
+				cls: "sf-agy-meta-muted",
+				text: formatHHMM(snap.updatedAt),
+			});
+		}
+
+		const refreshBtn = topRow.createEl("button", {
+			cls: `sf-agy-icon-btn${snap.loading ? " is-spinning" : ""}`,
+			attr: {
+				title: "Actualiser les quotas IA (Gemini, Antigravity Claude, Claude Code)",
+				"aria-label": "Actualiser les quotas IA",
+			},
+		});
+		setIcon(refreshBtn, "refresh-cw");
+		refreshBtn.disabled = snap.loading;
+		refreshBtn.addEventListener("click", () => {
+			void this.callbacks.onRefreshQuotas();
+		});
+
+		if (snap.entries.length === 0) {
+			card.createDiv({
+				cls: "sf-agy-empty",
+				text: snap.loading ? "Chargement des quotas en temps réel…" : "Aucun quota chargé.",
+			});
+			return;
+		}
+
+		const list = card.createDiv({ cls: "sf-agy-quota-list" });
+		for (const entry of snap.entries) {
+			this.renderQuotaRow(list, entry);
+		}
+	}
+
+	private renderQuotaRow(listEl: HTMLElement, entry: QuotaEntry): void {
+		const row = listEl.createDiv({ cls: `sf-agy-quota-row is-${entry.verdict}` });
+
+		const tooltipParts: string[] = [entry.label];
+		if (entry.remaining7dPct !== null && entry.targetRemaining7dPct !== null) {
+			tooltipParts.push(
+				`7j : ${Math.round(entry.remaining7dPct)}% restant (cible linéaire ${Math.round(entry.targetRemaining7dPct)}%)`
+			);
+		}
+		if (entry.remaining5hPct !== null) {
+			tooltipParts.push(`Fenêtre 5h : ${Math.round(entry.remaining5hPct)}% restant`);
+		}
+		const r7 = this.formatResetShort(entry.reset7dIso);
+		if (r7) {
+			tooltipParts.push(`Reset 7j : ${r7}`);
+		}
+		if (entry.error) {
+			tooltipParts.push(`Erreur : ${entry.error}`);
+		}
+		row.setAttr("title", tooltipParts.join("\n"));
+
+		const top = row.createDiv({ cls: "sf-agy-quota-row-top" });
+		top.createSpan({ cls: "sf-agy-quota-label", text: entry.label });
+		top.createSpan({
+			cls: `sf-agy-quota-badge is-${entry.verdict}`,
+			text: entry.verdictBadge,
+		});
+
+		if (entry.remaining7dPct !== null && entry.targetRemaining7dPct !== null) {
+			const rem = Math.max(0, Math.min(100, entry.remaining7dPct));
+			const target = Math.max(0, Math.min(100, entry.targetRemaining7dPct));
+
+			const nums = row.createDiv({ cls: "sf-agy-quota-nums" });
+			nums.createSpan({
+				cls: "sf-agy-quota-rem",
+				text: `${Math.round(rem)}% rest.`,
+			});
+			nums.createSpan({
+				cls: "sf-agy-meta-muted",
+				text: `cible ${Math.round(target)}%${entry.remaining5hPct !== null ? ` · 5h ${Math.round(entry.remaining5hPct)}%` : ""}`,
+			});
+
+			const bar = row.createDiv({ cls: "sf-agy-quota-bar" });
+			const fill = bar.createDiv({ cls: `sf-agy-quota-bar-fill is-${entry.verdict}` });
+			fill.style.width = `${rem.toFixed(1)}%`;
+
+			const marker = bar.createDiv({ cls: "sf-agy-quota-bar-target" });
+			marker.style.left = `${target.toFixed(1)}%`;
+		} else if (entry.error) {
+			row.createDiv({
+				cls: "sf-agy-quota-err",
+				text: entry.error.length > 72 ? `${entry.error.slice(0, 72)}…` : entry.error,
+			});
+		}
 	}
 
 	private renderServerCard(container: HTMLElement, snap: AgyServerSnapshot): void {

@@ -60,6 +60,7 @@ import {
 	resolveAgyProjectInfo,
 } from "./agyServerManager";
 import { AgySidebarView, SLIDEFLOW_AGY_VIEW_TYPE } from "./agySidebarView";
+import { QuotaTracker } from "./quotaTracker";
 
 export interface SlideFlowSettings {
 	transitionDuration: number; // in seconds
@@ -85,6 +86,7 @@ export interface DocumentStackFrame {
 	diffEnabled: boolean;
 	readingFocusActive?: boolean;
 	readingFocusIndex?: number;
+	focusedLinkIndex?: number;
 }
 
 export const DEFAULT_SETTINGS: SlideFlowSettings = {
@@ -135,6 +137,9 @@ export default class SlideFlowPlugin extends Plugin {
 	private voiceService!: VoiceDictationService;
 	private activeJobsTracker!: ActiveJobsTracker;
 	private agyServer!: AgyServerManager;
+	private quotaTracker!: QuotaTracker;
+	private knownRunningJobIds: Set<string> = new Set();
+	private unsubJobsForQuotas: (() => void) | null = null;
 
 	private rootNode: SectionNode | null = null;
 	private flatNodes: SectionNode[] = [];
@@ -173,6 +178,27 @@ export default class SlideFlowPlugin extends Plugin {
 			})
 		);
 
+		this.quotaTracker = new QuotaTracker(() => this.settings.directCliCommand);
+		this.unsubJobsForQuotas = this.activeJobsTracker.subscribe((jobs) => {
+			const currentRunning = new Set<string>();
+			for (const j of jobs) {
+				if (j.status === "running") {
+					currentRunning.add(j.id);
+				}
+			}
+			let finishedDetected = false;
+			for (const prevId of this.knownRunningJobIds) {
+				if (!currentRunning.has(prevId)) {
+					finishedDetected = true;
+					break;
+				}
+			}
+			this.knownRunningJobIds = currentRunning;
+			if (finishedDetected) {
+				void this.quotaTracker.refresh();
+			}
+		});
+
 		this.registerView(
 			SLIDEFLOW_AGY_VIEW_TYPE,
 			(leaf: WorkspaceLeaf) =>
@@ -181,6 +207,7 @@ export default class SlideFlowPlugin extends Plugin {
 					getServerHomeUrl: () => this.agyServer.getServerHomeUrl(),
 					getConversationUrl: (convId, projId, overrideInst) =>
 						this.agyServer.getConversationUrl(convId, projId, overrideInst),
+					getQuotaSnapshot: () => this.quotaTracker.getSnapshot(),
 					getJobs: () => this.activeJobsTracker.getCachedJobs(),
 					getFailedBatches: () => this.reviewStore.getFailedBatches(),
 					getNewPendingComments: () => this.reviewStore.getNewPendingComments(),
@@ -192,7 +219,11 @@ export default class SlideFlowPlugin extends Plugin {
 						await this.reviewStore.loadFromDisk();
 						await this.reconcileOrphanWipBatches();
 						await this.activeJobsTracker.refreshAndSync();
+						void this.quotaTracker.refresh();
 						this.refreshAgySidebarViews();
+					},
+					onRefreshQuotas: async () => {
+						await this.quotaTracker.refresh();
 					},
 					onRetryFailedBatch: (groupKey) => this.retryFailedBatch(groupKey),
 					onDiscardFailedBatch: (groupKey) => this.discardFailedBatch(groupKey),
@@ -202,6 +233,7 @@ export default class SlideFlowPlugin extends Plugin {
 					onRemoveHistoryJob: (jobId) => this.activeJobsTracker.removeJob(jobId),
 					subscribeServer: (fn) => this.agyServer.subscribe(() => fn()),
 					subscribeJobs: (fn) => this.activeJobsTracker.subscribe(() => fn()),
+					subscribeQuotas: (fn) => this.quotaTracker.subscribe(() => fn()),
 				})
 		);
 
@@ -210,6 +242,7 @@ export default class SlideFlowPlugin extends Plugin {
 			if (this.settings.agyServerAutoStart) {
 				this.agyServer.start();
 			}
+			void this.quotaTracker.refresh();
 			void this.reviewStore
 				.loadFromDisk()
 				.then(() => this.reconcileOrphanWipBatches())
@@ -283,6 +316,10 @@ export default class SlideFlowPlugin extends Plugin {
 		this.closePresentation();
 		this.voiceService?.shutdownNow();
 		this.agyServer?.stop();
+		if (this.unsubJobsForQuotas) {
+			this.unsubJobsForQuotas();
+			this.unsubJobsForQuotas = null;
+		}
 		console.log("Unloading SlideFlow plugin");
 	}
 
@@ -1534,6 +1571,7 @@ export default class SlideFlowPlugin extends Plugin {
 			onPrev: () => this.handlePrevNavigation(),
 			onFastNext: () => this.fastJumpNext(),
 			onFastPrev: () => this.fastJumpPrev(),
+			onTab: (shiftKey: boolean) => this.handleTabKey(shiftKey),
 			onEnter: () => this.handleEnterKey(),
 			onEscape: () => this.handleEscapeKey(),
 			onZoomIn: () => this.activeModal?.zoomIn(),
@@ -1558,6 +1596,14 @@ export default class SlideFlowPlugin extends Plugin {
 		this.attachLiveVaultWatcher();
 	}
 
+	private handleTabKey(shiftKey: boolean): boolean {
+		if (!this.activeModal || !this.activeModal.isReadingFocusActive()) {
+			return false;
+		}
+		this.activeModal.stepFocusedLink(shiftKey ? "prev" : "next");
+		return true;
+	}
+
 	private handleEnterKey(): boolean {
 		if (!this.activeModal) return false;
 		return this.activeModal.activateReadingFocusLink();
@@ -1566,6 +1612,10 @@ export default class SlideFlowPlugin extends Plugin {
 	private handleEscapeKey() {
 		if (this.activeModal?.isMediaZoomActive()) {
 			this.activeModal.closeMediaZoom(true);
+			return;
+		}
+		if (this.activeModal?.hasFocusedLink()) {
+			this.activeModal.clearFocusedLink();
 			return;
 		}
 		if (this.activeModal?.isReadingFocusActive()) {
@@ -2138,6 +2188,7 @@ export default class SlideFlowPlugin extends Plugin {
 					if (res.exitCode === 0) {
 						const purged = await this.reviewStore.purgeWipBatch(jobId);
 						await this.activeJobsTracker.completeJob(jobId, 0, null, finalMeta);
+						void this.quotaTracker.refresh();
 						this.refreshAllActiveUI();
 						new Notice(
 							`${res.displayName} finished — ${purged} comment(s) completed & purged.`,
@@ -2156,6 +2207,7 @@ export default class SlideFlowPlugin extends Plugin {
 							detail || null,
 							finalMeta
 						);
+						void this.quotaTracker.refresh();
 						this.refreshAllActiveUI();
 						console.error("[SlideFlow CLI] Non-zero exit:", res);
 						new Notice(
@@ -2169,6 +2221,7 @@ export default class SlideFlowPlugin extends Plugin {
 					const errMsg = err?.message || String(err);
 					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
 					await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
+					void this.quotaTracker.refresh();
 					this.refreshAllActiveUI();
 					console.error("[SlideFlow CLI] Execution failed:", err);
 					new Notice(
@@ -2437,6 +2490,7 @@ export default class SlideFlowPlugin extends Plugin {
 					diffEnabled: this.diffEnabled,
 					readingFocusActive: this.activeModal?.isReadingFocusActive() ?? false,
 					readingFocusIndex: this.activeModal?.getReadingFocusIndex() ?? -1,
+					focusedLinkIndex: this.activeModal?.getFocusedLinkIndex() ?? -1,
 				});
 			}
 
@@ -2546,6 +2600,10 @@ export default class SlideFlowPlugin extends Plugin {
 							active: parentFrame.readingFocusActive,
 							index: Math.max(0, parentFrame.readingFocusIndex ?? 0),
 							scrollIntoView: true,
+							focusedLinkIndex:
+								typeof parentFrame.focusedLinkIndex === "number" && parentFrame.focusedLinkIndex >= 0
+									? parentFrame.focusedLinkIndex
+									: undefined,
 					  }
 					: undefined
 			);

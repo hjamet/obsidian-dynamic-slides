@@ -922,16 +922,15 @@ function isActionableLinkCandidate(
 }
 
 /**
- * Resolves the link to open when pressing `Enter` on a reading-focus block:
- * 1. First visible actionable link in the block that still carries a green unread-diff dot.
- * 2. Otherwise, the first visible actionable link present inside the block.
- * Prefers live (non-`<del>`) links when inline diff deletions coexist with active links.
+ * Collects all visible actionable links inside a reading-focus block in DOM order,
+ * preferring live (non-`<del>`) links when inline diff deletions coexist with active links.
+ * Reused by both `Enter` preferred-link opening and `Tab` / `Shift+Tab` link cycling.
  */
-export function findPreferredLinkInBlock(
+export function collectActionableLinksInBlock(
 	blockEl: HTMLElement,
 	contentEl?: HTMLElement | null
-): HTMLElement | null {
-	if (!blockEl.isConnected) return null;
+): HTMLElement[] {
+	if (!blockEl.isConnected) return [];
 
 	const rawCandidates: HTMLElement[] = [];
 	if (blockEl.matches(FOCUSED_BLOCK_LINK_SELECTOR)) {
@@ -952,10 +951,22 @@ export function findPreferredLinkInBlock(
 	const validLinks = rawCandidates.filter((el) =>
 		isActionableLinkCandidate(el, blockEl, contentEl)
 	);
-	if (validLinks.length === 0) return null;
+	if (validLinks.length === 0) return [];
 
 	const liveLinks = validLinks.filter((el) => !el.closest("del, .dv-del"));
-	const pool = liveLinks.length > 0 ? liveLinks : validLinks;
+	return liveLinks.length > 0 ? liveLinks : validLinks;
+}
 
+/**
+ * Resolves the link to open when pressing `Enter` on a reading-focus block (without explicit Tab selection):
+ * 1. First visible actionable link in the block that still carries a green unread-diff dot.
+ * 2. Otherwise, the first visible actionable link present inside the block.
+ */
+export function findPreferredLinkInBlock(
+	blockEl: HTMLElement,
+	contentEl?: HTMLElement | null
+): HTMLElement | null {
+	const pool = collectActionableLinksInBlock(blockEl, contentEl);
+	if (pool.length === 0) return null;
 	return pool.find((el) => hasUnreadLinkDot(el)) ?? pool[0] ?? null;
 }
