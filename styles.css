@@ -2871,6 +2871,43 @@ mark.slideflow-comment-mark.is-failed {
 	pointer-events: none;
 }
 
+/* Section & child-heading unread diff dots inside slides (mirrors TOC dot semantics) */
+.slideflow-heading-diff-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background-color: #22c55e;
+	margin-left: 8px;
+	vertical-align: middle;
+	box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+	pointer-events: none;
+	user-select: none;
+}
+
+.dynamic-slides-child-heading .slideflow-heading-diff-dot {
+	width: 7px;
+	height: 7px;
+	margin-left: 7px;
+}
+
+.slideflow-heading-diff-dot.is-descendant {
+	background-color: transparent;
+	border: 1.5px solid #22c55e;
+	box-shadow: none;
+}
+
+.slideflow-heading-diff-dot.is-deletion-only {
+	background-color: #ef4444;
+	box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22);
+}
+
+.slideflow-heading-diff-dot.is-descendant.is-deletion-only {
+	background-color: transparent;
+	border: 1.5px solid #ef4444;
+	box-shadow: none;
+}
+
 
 /* ==========================================================================
    SlideFlow v2.7.0 — Child Heading Links, Deleted Subsection Titles & Comment Images

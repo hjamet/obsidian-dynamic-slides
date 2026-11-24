@@ -69,14 +69,88 @@ export function stripFrontmatterWithOffset(markdown: string): { text: string; st
 	return { text: normalized.slice(m[0].length), strippedLines };
 }
 
+export interface ParsedHeadingEntry {
+	heading: string;
+	level: number;
+	position: {
+		start: { line: number };
+	};
+}
+
+/**
+ * Synchronously extracts ATX headings directly from raw Markdown text, skipping YAML frontmatter
+ * and fenced code blocks (``` or ~~~). Guarantees line offsets always match the exact file bytes
+ * even when Obsidian's metadataCache lags behind external disk writes or Reading Mode buffers.
+ */
+export function extractHeadingsFromMarkdown(markdown: string): ParsedHeadingEntry[] {
+	const normalized = markdown.replace(/\r\n/g, "\n");
+	const lines = normalized.split("\n");
+	const headings: ParsedHeadingEntry[] = [];
+
+	let i = 0;
+	// Skip leading YAML frontmatter block
+	if (lines.length > 0 && /^---\s*$/.test(lines[0])) {
+		let endFm = -1;
+		for (let j = 1; j < lines.length; j++) {
+			if (/^(?:---|\.\.\.)\s*$/.test(lines[j])) {
+				endFm = j;
+				break;
+			}
+		}
+		if (endFm !== -1) {
+			i = endFm + 1;
+		}
+	}
+
+	let openFenceChar: string | null = null;
+	let openFenceLen = 0;
+
+	for (; i < lines.length; i++) {
+		const line = lines[i];
+		const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1];
+			const ch = marker[0];
+			if (!openFenceChar) {
+				openFenceChar = ch;
+				openFenceLen = marker.length;
+				continue;
+			} else if (ch === openFenceChar && marker.length >= openFenceLen && /^\s{0,3}(?:`{3,}|~{3,})\s*$/.test(line)) {
+				openFenceChar = null;
+				openFenceLen = 0;
+				continue;
+			}
+		}
+		if (openFenceChar) continue;
+
+		const hMatch = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+		if (hMatch) {
+			const level = hMatch[1].length;
+			// Strip optional CommonMark closing hashes (e.g. `## Title ##`)
+			const headingText = hMatch[2].replace(/\s+#+\s*$/, "").trim();
+			if (headingText.length > 0) {
+				headings.push({
+					heading: headingText,
+					level,
+					position: { start: { line: i } },
+				});
+			}
+		}
+	}
+
+	return headings;
+}
+
 export function parseMarkdownSections(
 	markdown: string,
-	headings: any[] | undefined
+	headings?: any[]
 ): { root: SectionNode; flatNodes: SectionNode[]; error?: string } {
 	const normalizedMd = markdown.replace(/\r\n/g, "\n");
 	const lines = normalizedMd.split("\n");
+	const resolvedHeadings =
+		headings && headings.length > 0 ? headings : extractHeadingsFromMarkdown(normalizedMd);
 
-	if (!headings || headings.length === 0) {
+	if (!resolvedHeadings || resolvedHeadings.length === 0) {
 		const { text: cleanBody } = stripFrontmatterWithOffset(normalizedMd);
 		const rootNode: SectionNode = {
 			id: "node-root",
@@ -117,16 +191,16 @@ export function parseMarkdownSections(
 	const headingNodes: SectionNode[] = [];
 	const stack: SectionNode[] = [rootNode];
 
-	for (let i = 0; i < headings.length; i++) {
-		const h = headings[i];
-		const nextH = i < headings.length - 1 ? headings[i + 1] : null;
+	for (let i = 0; i < resolvedHeadings.length; i++) {
+		const h = resolvedHeadings[i];
+		const nextH = i < resolvedHeadings.length - 1 ? resolvedHeadings[i + 1] : null;
 
 		let lineEnd = lines.length - 1;
 		if (nextH) {
 			let endIdx = nextH.position.start.line - 1;
-			for (let j = i + 1; j < headings.length; j++) {
-				if (headings[j].level <= h.level) {
-					endIdx = headings[j].position.start.line - 1;
+			for (let j = i + 1; j < resolvedHeadings.length; j++) {
+				if (resolvedHeadings[j].level <= h.level) {
+					endIdx = resolvedHeadings[j].position.start.line - 1;
 					break;
 				}
 			}

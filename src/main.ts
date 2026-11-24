@@ -1,4 +1,4 @@
-import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile } from "obsidian";
+import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile, EventRef } from "obsidian";
 import * as path from "path";
 import {
 	buildChildHeadingsHtml,
@@ -133,6 +133,9 @@ export default class SlideFlowPlugin extends Plugin {
 	private diffEnabled: boolean = false;
 	private pendingCommentContext: ExtractedCommentContext | null = null;
 	private liveOwnedJobIds: Set<string> = new Set();
+	private activeLoadedMarkdown: string = "";
+	private activeVaultModifyRef: EventRef | null = null;
+	private liveReloadTimerId: number | null = null;
 
 	async onload() {
 		console.log("Loading SlideFlow plugin");
@@ -762,6 +765,131 @@ export default class SlideFlowPlugin extends Plugin {
 			if (!targetFile || targetFile.extension.toLowerCase() !== "md") return false;
 			return this.baselinesStore.hasUnreadBaseline(targetFile.path);
 		});
+		this.activeModal.decorateSlideHeadingDiffDots(this.currentNode, this.buildTOCVisualMeta());
+	}
+
+	/**
+	 * Reads the authoritative, up-to-date Markdown bytes directly from disk unless the user
+	 * currently has unsaved typing in an active Edit/Live Preview view of that exact file.
+	 * Fixes Obsidian's stale hidden `view.editor.getValue()` buffer in Reading Mode when a note
+	 * (such as `🎯 Projets.md`) is updated externally by scripts, agents, or Obsidian Sync.
+	 */
+	private async readFreshMarkdownForFile(
+		file: TFile,
+		activeView?: MarkdownView | null
+	): Promise<string> {
+		if (
+			activeView &&
+			activeView.file?.path === file.path &&
+			activeView.getMode() === "source" &&
+			Boolean((activeView as any).dirty)
+		) {
+			return activeView.editor.getValue();
+		}
+		try {
+			return await this.app.vault.adapter.read(file.path);
+		} catch {
+			return await this.app.vault.read(file);
+		}
+	}
+
+	private findMatchingNodeAfterReload(
+		newFlatNodes: SectionNode[],
+		prevNode: SectionNode | null
+	): SectionNode | null {
+		if (newFlatNodes.length === 0) return null;
+		if (!prevNode) {
+			return newFlatNodes.length > 1 ? newFlatNodes[1] : newFlatNodes[0];
+		}
+		if (prevNode.level === 0) {
+			return newFlatNodes.length > 1 ? newFlatNodes[1] : newFlatNodes[0];
+		}
+		const prevNorm = normalizeTitle(prevNode.title);
+		const exactMatch = newFlatNodes.find(
+			(n) =>
+				!n.isVirtualDeleted &&
+				n.level === prevNode.level &&
+				normalizeTitle(n.title) === prevNorm
+		);
+		if (exactMatch) return exactMatch;
+
+		const titleOnlyMatch = newFlatNodes.find(
+			(n) => !n.isVirtualDeleted && normalizeTitle(n.title) === prevNorm
+		);
+		if (titleOnlyMatch) return titleOnlyMatch;
+
+		const fallbackIdx = Math.max(
+			newFlatNodes.length > 1 ? 1 : 0,
+			Math.min(prevNode.flatIndex ?? 1, newFlatNodes.length - 1)
+		);
+		return newFlatNodes[fallbackIdx] || newFlatNodes[0];
+	}
+
+	private attachLiveVaultWatcher(): void {
+		this.detachLiveVaultWatcher();
+		this.activeVaultModifyRef = this.app.vault.on("modify", (abstractFile) => {
+			if (!this.activeModal || !(abstractFile instanceof TFile)) return;
+			if (abstractFile.path !== this.activeSourcePath) return;
+			if (this.liveReloadTimerId !== null) {
+				window.clearTimeout(this.liveReloadTimerId);
+			}
+			this.liveReloadTimerId = window.setTimeout(() => {
+				this.liveReloadTimerId = null;
+				void this.reloadActiveNoteFromDiskIfChanged();
+			}, 220);
+		});
+	}
+
+	private detachLiveVaultWatcher(): void {
+		if (this.liveReloadTimerId !== null) {
+			window.clearTimeout(this.liveReloadTimerId);
+			this.liveReloadTimerId = null;
+		}
+		if (this.activeVaultModifyRef) {
+			this.app.vault.offref(this.activeVaultModifyRef);
+			this.activeVaultModifyRef = null;
+		}
+	}
+
+	private async reloadActiveNoteFromDiskIfChanged(): Promise<void> {
+		if (!this.activeModal || !this.activeSourcePath) return;
+		const abstractFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
+		if (!(abstractFile instanceof TFile)) return;
+
+		const freshMarkdown = await this.readFreshMarkdownForFile(abstractFile);
+		if (!this.activeModal || abstractFile.path !== this.activeSourcePath) return;
+		if (freshMarkdown === this.activeLoadedMarkdown) return;
+
+		this.activeLoadedMarkdown = freshMarkdown;
+		await this.baselinesStore.reload().catch(() => undefined);
+
+		const parsed = parseMarkdownSections(freshMarkdown);
+		const prevNode = this.currentNode;
+		const prevDiffEnabled = this.diffEnabled;
+
+		this.rootNode = parsed.root;
+		this.flatNodes = parsed.flatNodes;
+
+		const diffInit = await this.computeDiffForLoadedNote(
+			abstractFile.path,
+			freshMarkdown,
+			this.flatNodes
+		);
+		this.activeDiffContext = diffInit.ctx;
+		this.diffEnabled = diffInit.ctx ? prevDiffEnabled || diffInit.autoEnable : false;
+
+		const matched = this.findMatchingNodeAfterReload(this.flatNodes, prevNode);
+		this.currentNode = this.resolveNavigableTarget(matched) || matched || this.rootNode;
+
+		if (this.activeModal && this.currentNode) {
+			await this.activeModal.refreshSlideInPlace(
+				this.currentNode,
+				this.activeSourcePath,
+				this.buildSlideRenderDecoration(this.currentNode)
+			);
+			this.updateSlideCounter();
+			this.refreshAllActiveUI();
+		}
 	}
 
 	private refreshAllActiveUI(): void {
@@ -1036,11 +1164,12 @@ export default class SlideFlowPlugin extends Plugin {
 			return;
 		}
 
-		const markdownText = view.editor.getValue();
+		const markdownText = await this.readFreshMarkdownForFile(file, view);
 		if (!markdownText.trim()) {
 			new Notice("Empty note: cannot start SlideFlow.");
 			return;
 		}
+		this.activeLoadedMarkdown = markdownText;
 
 		await Promise.all([
 			this.baselinesStore.reload().catch((err) => {
@@ -1061,8 +1190,8 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeSourcePath = file.path;
 		this.sessionRootProjectPath = file.path;
 
-		const cache = this.app.metadataCache.getFileCache(file);
-		const parsed = parseMarkdownSections(markdownText, cache?.headings);
+		// Parse headings directly from the freshly read file bytes (never stale metadataCache)
+		const parsed = parseMarkdownSections(markdownText);
 
 		if (parsed.error === "no_headings") {
 			new Notice("Note without headings: presenting as a single slide.");
@@ -1070,7 +1199,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 		this.rootNode = parsed.root;
 		this.flatNodes = parsed.flatNodes;
-		const cursorLine = view.editor.getCursor().line;
+		const cursorLine = view.getMode() === "source" ? view.editor.getCursor().line : 0;
 		this.currentNode = findCurrentSectionNode(this.flatNodes, cursorLine);
 		if (this.currentNode && this.currentNode.level === 0 && this.flatNodes.length > 1) {
 			this.currentNode = this.flatNodes[1];
@@ -1298,6 +1427,7 @@ export default class SlideFlowPlugin extends Plugin {
 				),
 		});
 		this.keyboardNav.attach();
+		this.attachLiveVaultWatcher();
 	}
 
 	private handleEnterKey(): boolean {
@@ -2107,9 +2237,9 @@ export default class SlideFlowPlugin extends Plugin {
 
 			await this.baselinesStore.reload().catch(() => undefined);
 
-			const markdownText = await this.app.vault.read(targetFile);
-			const cache = this.app.metadataCache.getFileCache(targetFile);
-			const parsed = parseMarkdownSections(markdownText, cache?.headings);
+			const markdownText = await this.readFreshMarkdownForFile(targetFile);
+			this.activeLoadedMarkdown = markdownText;
+			const parsed = parseMarkdownSections(markdownText);
 
 			this.activeSourcePath = targetFile.path;
 			this.rootNode = parsed.root;
@@ -2163,14 +2293,39 @@ export default class SlideFlowPlugin extends Plugin {
 
 		const parentFrame = this.documentStack.pop()!;
 		this.activeSourcePath = parentFrame.filePath;
-		this.flatNodes = parentFrame.flatNodes;
-		this.rootNode = parentFrame.rootNode;
-		this.currentNode = parentFrame.currentNode;
-		this.activeDiffContext = parentFrame.diffContext;
-		this.diffEnabled = parentFrame.diffEnabled;
-
 		await this.baselinesStore.reload().catch(() => undefined);
-		this.reconcileActiveDiffWithBaselines();
+
+		const parentFile = this.app.vault.getAbstractFileByPath(parentFrame.filePath);
+		if (parentFile instanceof TFile) {
+			// Always re-read parent note fresh from disk on pop (e.g. `🎯 Projets.md` updated while reviewing a project!)
+			const freshMarkdown = await this.readFreshMarkdownForFile(parentFile);
+			this.activeLoadedMarkdown = freshMarkdown;
+			const parsed = parseMarkdownSections(freshMarkdown);
+			this.rootNode = parsed.root;
+			this.flatNodes = parsed.flatNodes;
+
+			const diffInit = await this.computeDiffForLoadedNote(
+				parentFile.path,
+				freshMarkdown,
+				this.flatNodes
+			);
+			this.activeDiffContext = diffInit.ctx;
+			this.diffEnabled = diffInit.ctx
+				? parentFrame.diffEnabled || diffInit.autoEnable
+				: false;
+			const matched = this.findMatchingNodeAfterReload(
+				this.flatNodes,
+				parentFrame.currentNode
+			);
+			this.currentNode = this.resolveNavigableTarget(matched) || matched || this.rootNode;
+		} else {
+			this.flatNodes = parentFrame.flatNodes;
+			this.rootNode = parentFrame.rootNode;
+			this.currentNode = parentFrame.currentNode;
+			this.activeDiffContext = parentFrame.diffContext;
+			this.diffEnabled = parentFrame.diffEnabled;
+			this.reconcileActiveDiffWithBaselines();
+		}
 
 		if (this.activeModal && this.currentNode) {
 			this.activeModal.closeMediaZoom(false);
@@ -2331,6 +2486,7 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private cleanupNavigation() {
+		this.detachLiveVaultWatcher();
 		if (this.keyboardNav) {
 			this.keyboardNav.detach();
 			this.keyboardNav = null;

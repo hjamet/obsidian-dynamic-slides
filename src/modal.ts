@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { SectionNode } from "./parser";
 import { renderSlideContent, unloadSlideContent, enhanceMermaidSvgElements } from "./renderer";
-import { TOCComponent } from "./toc";
+import { TOCComponent, TOCVisualMeta } from "./toc";
 import { applyPersistentCommentHighlights } from "./commentHighlighter";
 import {
 	AnchorRect,
@@ -1712,6 +1712,113 @@ export class PresentationModal extends Component {
 			} else {
 				linkEl.removeClass("slideflow-link-has-diff");
 			}
+		}
+	}
+
+	/**
+	 * Mirrors the TOC unread-diff indicators (solid green/red dot for direct changes,
+	 * hollow green/red ring for descendant changes) directly onto every section heading
+	 * and clickable child-subsection title rendered inside the active slide.
+	 */
+	public decorateSlideHeadingDiffDots(currentNode: SectionNode | null, meta: TOCVisualMeta): void {
+		if (!this.contentEl) return;
+		this.contentEl.querySelectorAll(".slideflow-heading-diff-dot").forEach((el) => el.remove());
+		this.contentEl
+			.querySelectorAll(".slideflow-heading-has-diff")
+			.forEach((el) => el.removeClass("slideflow-heading-has-diff"));
+
+		const appendDot = (
+			hostEl: HTMLElement,
+			isDirty: boolean,
+			hasDirtyDesc: boolean,
+			isDeletionOnly: boolean,
+			isDescDeletionOnly: boolean
+		): void => {
+			if (!isDirty && !hasDirtyDesc) return;
+
+			const effectiveDeletionOnly = isDirty ? isDeletionOnly : isDescDeletionOnly;
+			const existingLinkDot = hostEl.querySelector<HTMLElement>(".slideflow-link-dirty-badge");
+			// Avoid stacking two identical solid green dots on an archived link heading whose target sub-note is also dirty
+			if (existingLinkDot && isDirty && !effectiveDeletionOnly) {
+				existingLinkDot.setAttribute(
+					"title",
+					"Unread diff in this section and linked note"
+				);
+				hostEl.addClass("slideflow-heading-has-diff");
+				return;
+			}
+
+			const dot = document.createElement("span");
+			const classes = ["slideflow-heading-diff-dot"];
+			let titleText = "";
+			if (isDirty) {
+				if (isDeletionOnly) {
+					classes.push("is-deletion-only");
+					titleText = "Unread deletion in this section";
+				} else {
+					titleText = "Unread changes in this section";
+				}
+			} else {
+				classes.push("is-descendant");
+				if (isDescDeletionOnly) {
+					classes.push("is-deletion-only");
+					titleText = "Contains unread deletion in a subsection";
+				} else {
+					titleText = "Contains unread changes in a subsection";
+				}
+			}
+			dot.className = classes.join(" ");
+			dot.setAttribute("title", titleText);
+			dot.setAttribute("aria-label", titleText);
+			hostEl.addClass("slideflow-heading-has-diff");
+			hostEl.appendChild(dot);
+		};
+
+		// 1. Decorate the active slide's own rendered title heading (`h1`..`h6`)
+		if (currentNode && currentNode.level > 0 && !currentNode.isVirtualDeleted) {
+			const headingCandidates = Array.from(
+				this.contentEl.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")
+			).filter(
+				(h) =>
+					!h.closest(".callout") &&
+					!h.closest(".dynamic-slides-child-heading") &&
+					!h.closest("[class*='block-language-']")
+			);
+			const exactLevelHeading =
+				headingCandidates.find(
+					(h) => h.tagName.toLowerCase() === `h${currentNode.level}`
+				) || headingCandidates[0];
+			if (exactLevelHeading) {
+				const isDirty = Boolean(meta.dirtyNodeIds?.has(currentNode.id));
+				const hasDirtyDesc = Boolean(meta.descendantDirtyNodeIds?.has(currentNode.id));
+				const isDeletionOnly = Boolean(meta.deletionOnlyNodeIds?.has(currentNode.id));
+				const isDescDeletionOnly = Boolean(
+					meta.descendantDeletionOnlyNodeIds?.has(currentNode.id)
+				);
+				appendDot(
+					exactLevelHeading,
+					isDirty,
+					hasDirtyDesc,
+					isDeletionOnly,
+					isDescDeletionOnly
+				);
+			}
+		}
+
+		// 2. Decorate all child section / subsection titles rendered on this slide
+		const childHeadings = Array.from(
+			this.contentEl.querySelectorAll<HTMLElement>(
+				".dynamic-slides-child-heading[data-node-id]:not(.is-deleted-child-heading)"
+			)
+		);
+		for (const childEl of childHeadings) {
+			const nodeId = childEl.getAttribute("data-node-id");
+			if (!nodeId) continue;
+			const isDirty = Boolean(meta.dirtyNodeIds?.has(nodeId));
+			const hasDirtyDesc = Boolean(meta.descendantDirtyNodeIds?.has(nodeId));
+			const isDeletionOnly = Boolean(meta.deletionOnlyNodeIds?.has(nodeId));
+			const isDescDeletionOnly = Boolean(meta.descendantDeletionOnlyNodeIds?.has(nodeId));
+			appendDot(childEl, isDirty, hasDirtyDesc, isDeletionOnly, isDescDeletionOnly);
 		}
 	}
 
