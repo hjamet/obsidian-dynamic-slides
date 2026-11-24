@@ -28,6 +28,7 @@ export interface AgyProjectInfo {
 
 export interface AgyServerSnapshot {
 	status: AgyServerStatus;
+	statusDetail: string | null;
 	pid: number | null;
 	instanceId: string | null;
 	hostname: string;
@@ -49,6 +50,112 @@ const REMOTE_CONTROL_ID_RE = /\[remote-control-([a-zA-Z0-9-]+)\]/;
 const CONNECTED_RE = /\[remote-control-([a-zA-Z0-9-]+)\]\s+Connection status:\s+Connected/i;
 const DISCONNECTED_RE =
 	/\[remote-control-[a-zA-Z0-9-]+\]\s+(?:Connection loop exited|Reconnection attempt)/i;
+const HEADLESS_AUTH_EMAIL_RE = /Headless auth:\s+authenticated as\s+"([^"]+)"/i;
+const AUTH_LOSS_RE =
+	/(?:\[auth-status\]\s+rpc=has_auth_token\s+has_token=false|Auth probe:\s+OAuth server rejected|Headless auth:\s+no valid auth)/i;
+const AUTH_RECOVERY_COOLDOWN_MS = 30_000;
+
+interface ShortCommandResult {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	timedOut: boolean;
+	stdout: string;
+	stderr: string;
+}
+
+function runShortCommand(
+	exe: string,
+	args: string[],
+	timeoutMs: number
+): Promise<ShortCommandResult> {
+	return new Promise((resolve) => {
+		const child = spawn(exe, args, {
+			shell: false,
+			windowsHide: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		let timedOut = false;
+		let settled = false;
+
+		const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ code, signal, timedOut, stdout: stdout.trim(), stderr: stderr.trim() });
+		};
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			try {
+				child.kill();
+			} catch {
+				// Ignore kill race
+			}
+		}, timeoutMs);
+
+		child.stdout?.on("data", (buf: Buffer) => {
+			stdout += buf.toString("utf8");
+		});
+		child.stderr?.on("data", (buf: Buffer) => {
+			stderr += buf.toString("utf8");
+		});
+		child.on("close", (code, signal) => finish(code, signal));
+		child.on("error", (err: Error) => {
+			stderr = stderr ? `${stderr}\n${err.message}` : err.message;
+			finish(-1, null);
+		});
+	});
+}
+
+export function getDaemonTokenFilePath(): string {
+	return path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}
+
+function getOfficialDaemonPidFilePath(): string {
+	return path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-cli-daemon.pid");
+}
+
+/**
+ * Headless `agy remote-control serve` reads exclusively from `~/.gemini/antigravity-cli/antigravity-oauth-token`
+ * (file-based token storage) and never falls back to the OS keyring used by interactive `agy`.
+ */
+export function isDaemonTokenFileUsable(tokenPath: string = getDaemonTokenFilePath()): boolean {
+	if (!fs.existsSync(tokenPath)) return false;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(tokenPath, "utf8"));
+		const tok = parsed?.token ?? parsed;
+		if (!tok || typeof tok !== "object") return false;
+		if (typeof tok.refresh_token === "string" && tok.refresh_token.trim().length > 0) {
+			return true;
+		}
+		if (typeof tok.access_token === "string" && tok.access_token.trim().length > 0) {
+			if (typeof tok.expiry === "string" && tok.expiry.trim()) {
+				const expMs = Date.parse(tok.expiry);
+				return Number.isFinite(expMs) && expMs > Date.now() + 60_000;
+			}
+			return true;
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+async function isPidAgyProcess(pid: number): Promise<boolean> {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	if (process.platform === "win32") {
+		const res = await runShortCommand(
+			"tasklist",
+			["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
+			4000
+		);
+		return res.code === 0 && res.stdout.toLowerCase().includes("agy");
+	}
+	const res = await runShortCommand("ps", ["-p", String(pid), "-o", "comm="], 4000);
+	return res.code === 0 && res.stdout.toLowerCase().includes("agy");
+}
 
 export function getDefaultAgyServerName(): string {
 	const raw = (os.hostname() || "obsidian").toLowerCase().replace(/[^a-z0-9-_]+/g, "-");
@@ -172,6 +279,9 @@ export class AgyServerManager {
 	private pollTimer: ReturnType<typeof setInterval> | null = null;
 	private logByteOffset: number = 0;
 	private stoppingIntentionally: boolean = false;
+	private startInFlight: boolean = false;
+	private launchEpoch: number = 0;
+	private lastAutoAuthRecoveryMs: number = 0;
 	private listeners: Set<(snap: AgyServerSnapshot) => void> = new Set();
 
 	private snapshot: AgyServerSnapshot;
@@ -189,6 +299,7 @@ export class AgyServerManager {
 		const proj = resolveAgyProjectInfo(cfg.projectName);
 		this.snapshot = {
 			status: "stopped",
+			statusDetail: null,
 			pid: null,
 			instanceId: readPersistentDaemonInstanceId(),
 			hostname: (cfg.serverName || "").trim() || getDefaultAgyServerName(),
@@ -269,15 +380,19 @@ export class AgyServerManager {
 		return path.join(this.ensureJobsLogDir(), "agy_server.log");
 	}
 
-	private cleanupStaleManagedPid(): void {
+	private async cleanupStaleManagedPid(): Promise<void> {
 		const pidFile = this.getPidFilePath();
 		if (!fs.existsSync(pidFile)) return;
 		try {
 			const raw = fs.readFileSync(pidFile, "utf8").trim();
 			const oldPid = parseInt(raw, 10);
-			if (Number.isInteger(oldPid) && oldPid > 0 && isPidAlive(oldPid)) {
-				// Avoid killing an unrelated PID if it is already our live child
-				if (!this.child || this.child.pid !== oldPid) {
+			if (
+				Number.isInteger(oldPid) &&
+				oldPid > 0 &&
+				isPidAlive(oldPid) &&
+				(!this.child || this.child.pid !== oldPid)
+			) {
+				if (await isPidAgyProcess(oldPid)) {
 					try {
 						process.kill(oldPid);
 					} catch {
@@ -293,6 +408,75 @@ export class AgyServerManager {
 		} catch {
 			// Ignore unlink race
 		}
+	}
+
+	/**
+	 * Stops any competing official `agy remote-control start` daemon sharing the same
+	 * installation UUID so two daemons never kick each other off WebChannel.
+	 */
+	private async stopCompetingOfficialDaemon(resolvedExe: string): Promise<void> {
+		const daemonPidFile = getOfficialDaemonPidFilePath();
+		if (!fs.existsSync(daemonPidFile)) return;
+		let pid = NaN;
+		try {
+			pid = parseInt(fs.readFileSync(daemonPidFile, "utf8").trim(), 10);
+		} catch {
+			return;
+		}
+		if (
+			Number.isInteger(pid) &&
+			pid > 0 &&
+			isPidAlive(pid) &&
+			(!this.child || this.child.pid !== pid)
+		) {
+			await runShortCommand(resolvedExe, ["remote-control", "stop"], 10_000);
+		}
+	}
+
+	/**
+	 * Uses the official `agy remote-control start --session` command to run `(*Daemon).SeedToken()`
+	 * (exporting the OS keyring OAuth token to `~/.gemini/antigravity-cli/antigravity-oauth-token`),
+	 * then immediately runs `agy remote-control stop` so zero detached daemon or OS logon key remains.
+	 */
+	private async seedDaemonToken(
+		resolvedExe: string,
+		hostname: string
+	): Promise<{ ok: boolean; error: string | null }> {
+		const startRes = await runShortCommand(
+			resolvedExe,
+			["remote-control", "start", "--session", "--name", hostname],
+			20_000
+		);
+
+		const mayHaveSpawnedOrRegistered =
+			startRes.code === 0 ||
+			startRes.timedOut ||
+			fs.existsSync(getOfficialDaemonPidFilePath()) ||
+			/registry Run key|logon task/i.test(startRes.stderr);
+
+		if (mayHaveSpawnedOrRegistered) {
+			await runShortCommand(resolvedExe, ["remote-control", "stop"], 10_000);
+		}
+
+		if (isDaemonTokenFileUsable()) {
+			return { ok: true, error: null };
+		}
+
+		const combined = `${startRes.stderr}\n${startRes.stdout}`.trim();
+		if (/not signed in/i.test(combined)) {
+			return {
+				ok: false,
+				error:
+					"Non connecté à AGY : ouvrez un terminal, lancez « agy » pour vous connecter, puis cliquez sur Démarrer.",
+			};
+		}
+		const detail = combined.replace(/\s+/g, " ").slice(0, 140);
+		return {
+			ok: false,
+			error: detail
+				? `Échec de synchronisation du jeton AGY (${startRes.code ?? "?"}): ${detail}`
+				: `Échec de synchronisation du jeton AGY (code ${startRes.code ?? "?"})`,
+		};
 	}
 
 	private stopLogPolling(): void {
@@ -334,6 +518,7 @@ export class AgyServerManager {
 		if (!chunk) return;
 
 		let changed = false;
+		let sawAuthLoss = false;
 		const lines = chunk.split(/\r?\n/);
 		for (const line of lines) {
 			if (!line) continue;
@@ -342,6 +527,17 @@ export class AgyServerManager {
 				this.snapshot.instanceId = idMatch[1];
 				changed = true;
 			}
+			const emailMatch = line.match(HEADLESS_AUTH_EMAIL_RE);
+			if (emailMatch && emailMatch[1]) {
+				if (this.snapshot.accountEmail !== emailMatch[1]) {
+					this.snapshot.accountEmail = emailMatch[1];
+					changed = true;
+				}
+				sawAuthLoss = false;
+			}
+			if (AUTH_LOSS_RE.test(line)) {
+				sawAuthLoss = true;
+			}
 			const connMatch = line.match(CONNECTED_RE);
 			if (connMatch) {
 				if (connMatch[1] && this.snapshot.instanceId !== connMatch[1]) {
@@ -349,15 +545,44 @@ export class AgyServerManager {
 				}
 				if (this.snapshot.status !== "connected") {
 					this.snapshot.status = "connected";
+					this.snapshot.statusDetail = null;
 					this.snapshot.lastError = null;
 					changed = true;
 				}
 			} else if (DISCONNECTED_RE.test(line)) {
 				if (this.snapshot.status === "connected") {
 					this.snapshot.status = "starting";
+					this.snapshot.statusDetail = "Reconnexion AGY…";
 					changed = true;
 				}
 			}
+		}
+
+		if (sawAuthLoss && !this.stoppingIntentionally) {
+			const now = Date.now();
+			if (now - this.lastAutoAuthRecoveryMs > AUTH_RECOVERY_COOLDOWN_MS) {
+				this.lastAutoAuthRecoveryMs = now;
+				void this.restart();
+				return;
+			}
+			this.stoppingIntentionally = true;
+			this.stopLogPolling();
+			const child = this.child;
+			this.child = null;
+			if (child && child.exitCode === null && !child.killed) {
+				try {
+					child.kill();
+				} catch {
+					// Ignore
+				}
+			}
+			this.snapshot.status = "error";
+			this.snapshot.statusDetail = null;
+			this.snapshot.pid = null;
+			this.snapshot.lastError =
+				"Session AGY expirée ou déconnectée. Lancez « agy » dans un terminal puis cliquez sur Redémarrer.";
+			this.emit();
+			return;
 		}
 
 		if (changed) {
@@ -365,10 +590,17 @@ export class AgyServerManager {
 		}
 	}
 
-	public start(): void {
-		if (this.child && this.child.exitCode === null && !this.child.killed) {
+	public async start(options?: { forceReseed?: boolean }): Promise<void> {
+		if (
+			(this.child && this.child.exitCode === null && !this.child.killed) ||
+			this.startInFlight
+		) {
 			return;
 		}
+
+		const myEpoch = ++this.launchEpoch;
+		this.startInFlight = true;
+		this.stoppingIntentionally = false;
 
 		const cfg = this.getConfig();
 		const proj = resolveAgyProjectInfo(cfg.projectName);
@@ -383,7 +615,9 @@ export class AgyServerManager {
 			const exeToken = extractAgyExecutableFromTemplate(cfg.cliCommandTemplate);
 			resolvedExe = resolveExecutablePath(exeToken);
 		} catch (err: any) {
+			this.startInFlight = false;
 			this.snapshot.status = "error";
+			this.snapshot.statusDetail = null;
 			this.snapshot.lastError = err?.message || String(err);
 			this.emit();
 			return;
@@ -395,13 +629,55 @@ export class AgyServerManager {
 			console.error("[SlideFlow AGY Server] Failed to sync cliRemoteControlHostname:", err);
 		}
 
-		this.cleanupStaleManagedPid();
+		this.snapshot.status = "starting";
+		this.snapshot.statusDetail = "Préparation du serveur AGY…";
+		this.snapshot.lastError = null;
+		this.emit();
+
+		await this.cleanupStaleManagedPid();
+		if (myEpoch !== this.launchEpoch) return;
+
+		await this.stopCompetingOfficialDaemon(resolvedExe);
+		if (myEpoch !== this.launchEpoch) return;
+
+		let seededThisLaunch = false;
+		if (options?.forceReseed || !isDaemonTokenFileUsable()) {
+			this.snapshot.statusDetail = "Synchronisation du jeton AGY…";
+			this.emit();
+			const seed = await this.seedDaemonToken(resolvedExe, hostname);
+			if (myEpoch !== this.launchEpoch) return;
+			if (!seed.ok) {
+				this.startInFlight = false;
+				this.snapshot.status = "error";
+				this.snapshot.statusDetail = null;
+				this.snapshot.lastError = seed.error;
+				this.emit();
+				return;
+			}
+			seededThisLaunch = true;
+		}
+
+		this.spawnServeProcess(resolvedExe, hostname, myEpoch, seededThisLaunch);
+	}
+
+	private spawnServeProcess(
+		resolvedExe: string,
+		hostname: string,
+		myEpoch: number,
+		alreadySeeded: boolean
+	): void {
+		if (myEpoch !== this.launchEpoch) {
+			this.startInFlight = false;
+			return;
+		}
 
 		const logPath = this.getServerLogPath();
 		try {
 			fs.writeFileSync(logPath, "", "utf8");
 		} catch (err: any) {
+			this.startInFlight = false;
 			this.snapshot.status = "error";
+			this.snapshot.statusDetail = null;
 			this.snapshot.lastError = `Cannot write server log: ${err?.message || String(err)}`;
 			this.emit();
 			return;
@@ -420,7 +696,9 @@ export class AgyServerManager {
 		});
 
 		this.child = child;
+		this.startInFlight = false;
 		this.snapshot.status = "starting";
+		this.snapshot.statusDetail = "Connexion AGY…";
 		this.snapshot.pid = child.pid ?? null;
 		this.snapshot.startedAt = new Date().toISOString();
 		this.snapshot.lastError = null;
@@ -459,6 +737,7 @@ export class AgyServerManager {
 			}
 			this.stopLogPolling();
 			this.snapshot.status = "error";
+			this.snapshot.statusDetail = null;
 			this.snapshot.pid = null;
 			this.snapshot.lastError = err.message;
 			this.emit();
@@ -485,12 +764,47 @@ export class AgyServerManager {
 			if (!wasOurs) return;
 
 			this.snapshot.pid = null;
-			if (this.stoppingIntentionally) {
+			if (this.stoppingIntentionally || myEpoch !== this.launchEpoch) {
 				this.snapshot.status = "stopped";
+				this.snapshot.statusDetail = null;
 				this.snapshot.lastError = null;
+				this.emit();
+				return;
+			}
+
+			const isAuthExit = code === 3 || /not signed in/i.test(stderrTail);
+			if (isAuthExit && !alreadySeeded) {
+				this.startInFlight = true;
+				this.snapshot.status = "starting";
+				this.snapshot.statusDetail = "Resynchronisation du jeton AGY…";
+				this.snapshot.lastError = null;
+				this.emit();
+
+				void this.seedDaemonToken(resolvedExe, hostname).then((seed) => {
+					if (myEpoch !== this.launchEpoch) {
+						this.startInFlight = false;
+						return;
+					}
+					if (!seed.ok) {
+						this.startInFlight = false;
+						this.snapshot.status = "error";
+						this.snapshot.statusDetail = null;
+						this.snapshot.lastError = seed.error;
+						this.emit();
+						return;
+					}
+					this.spawnServeProcess(resolvedExe, hostname, myEpoch, true);
+				});
+				return;
+			}
+
+			this.snapshot.status = "error";
+			this.snapshot.statusDetail = null;
+			if (isAuthExit) {
+				this.snapshot.lastError =
+					"Non connecté à AGY : ouvrez un terminal, lancez « agy » pour vous connecter, puis cliquez sur Démarrer.";
 			} else {
 				const detail = stderrTail.trim().replace(/\s+/g, " ").slice(0, 140);
-				this.snapshot.status = "error";
 				this.snapshot.lastError = detail
 					? `Arrêté (${code ?? signal ?? "?"}): ${detail}`
 					: `Serveur interrompu (code ${code ?? signal ?? "?"})`;
@@ -505,7 +819,9 @@ export class AgyServerManager {
 	}
 
 	public stop(): void {
+		this.launchEpoch++;
 		this.stoppingIntentionally = true;
+		this.startInFlight = false;
 		this.stopLogPolling();
 
 		const child = this.child;
@@ -529,6 +845,7 @@ export class AgyServerManager {
 		}
 
 		this.snapshot.status = "stopped";
+		this.snapshot.statusDetail = null;
 		this.snapshot.pid = null;
 		this.snapshot.lastError = null;
 		this.emit();
@@ -536,7 +853,9 @@ export class AgyServerManager {
 
 	public async restart(): Promise<void> {
 		this.stop();
+		const epochAfterStop = this.launchEpoch;
 		await new Promise((r) => setTimeout(r, 350));
-		this.start();
+		if (this.launchEpoch !== epochAfterStop) return;
+		await this.start({ forceReseed: true });
 	}
 }

@@ -182,7 +182,7 @@ export class AgySidebarView extends ItemView {
 
 		let statusText = "Arrêté";
 		if (snap.status === "connected") statusText = "Serveur AGY en ligne";
-		else if (snap.status === "starting") statusText = "Connexion AGY…";
+		else if (snap.status === "starting") statusText = snap.statusDetail || "Connexion AGY…";
 		else if (snap.status === "error") statusText = "Erreur serveur AGY";
 		statusWrap.createSpan({ cls: "sf-agy-server-title", text: statusText });
 
@@ -248,9 +248,17 @@ export class AgySidebarView extends ItemView {
 		openBtn.prepend(btnIcon);
 		setIcon(btnIcon, "globe");
 
-		if (!homeUrl) {
+		if (snap.status !== "connected" || !homeUrl) {
 			openBtn.disabled = true;
-			openBtn.setAttr("title", "En attente de l'identifiant d'instance du serveur…");
+			if (snap.status === "starting") {
+				openBtn.setAttr("title", snap.statusDetail || "Connexion du serveur AGY en cours…");
+			} else if (snap.status === "error") {
+				openBtn.setAttr("title", "Serveur AGY en erreur — démarrez ou redémarrez le serveur.");
+			} else if (snap.status === "stopped") {
+				openBtn.setAttr("title", "Démarrez le serveur AGY pour ouvrir l'interface web.");
+			} else {
+				openBtn.setAttr("title", "En attente de l'identifiant d'instance du serveur…");
+			}
 		} else {
 			openBtn.setAttr("title", homeUrl);
 			openBtn.addEventListener("click", () => openExternalUrl(homeUrl));
@@ -295,8 +303,9 @@ export class AgySidebarView extends ItemView {
 
 			const actions = card.createDiv({ cls: "sf-agy-actions-row" });
 
-			// Adaptive 3A: while running, prefer live ephemeral tunnel if available, else persistent server
-			const liveInstance = job.liveInstanceId || serverSnap.instanceId;
+			// Adaptive 3A: while running, prefer live ephemeral tunnel if available, else persistent server (only when connected)
+			const liveInstance =
+				job.liveInstanceId || (serverSnap.status === "connected" ? serverSnap.instanceId : null);
 			const liveUrl = this.callbacks.getConversationUrl(
 				job.conversationId,
 				job.projectId,
@@ -312,7 +321,12 @@ export class AgySidebarView extends ItemView {
 
 			if (!liveUrl) {
 				openBtn.disabled = true;
-				openBtn.setAttr("title", "ID de conversation en cours d'attribution (~2s)…");
+				openBtn.setAttr(
+					"title",
+					!job.conversationId
+						? "ID de conversation en cours d'attribution (~2s)…"
+						: "En attente de la connexion du serveur AGY…"
+				);
 			} else {
 				openBtn.setAttr("title", liveUrl);
 				openBtn.addEventListener("click", () => openExternalUrl(liveUrl));
@@ -400,21 +414,30 @@ export class AgySidebarView extends ItemView {
 
 			// Open partial conversation on the persistent server if a conversationId was created
 			const convId = linkedJob?.conversationId || null;
+			const isServerReady = serverSnap.status === "connected";
 			const openUrl = this.callbacks.getConversationUrl(
 				convId,
 				linkedJob?.projectId,
 				serverSnap.instanceId
 			);
-			if (openUrl) {
+			if (convId) {
 				const openBtn = actions.createEl("button", {
 					cls: "sf-agy-btn",
 					text: "Ouvrir",
-					attr: { title: openUrl },
 				});
 				const webIcon = openBtn.createSpan({ cls: "sf-agy-btn-icon" });
 				openBtn.prepend(webIcon);
 				setIcon(webIcon, "external-link");
-				openBtn.addEventListener("click", () => openExternalUrl(openUrl));
+				if (!isServerReady || !openUrl) {
+					openBtn.disabled = true;
+					openBtn.setAttr(
+						"title",
+						"Démarrez le serveur AGY pour ouvrir cette conversation dans le navigateur."
+					);
+				} else {
+					openBtn.setAttr("title", openUrl);
+					openBtn.addEventListener("click", () => openExternalUrl(openUrl));
+				}
 			}
 
 			if (convId) {
@@ -536,6 +559,7 @@ export class AgySidebarView extends ItemView {
 			const actions = card.createDiv({ cls: "sf-agy-actions-row" });
 
 			// Always open finished/errored conversations on the persistent Obsidian server!
+			const isServerReady = serverSnap.status === "connected";
 			const permanentUrl = this.callbacks.getConversationUrl(
 				job.conversationId,
 				job.projectId,
@@ -549,9 +573,15 @@ export class AgySidebarView extends ItemView {
 			openBtn.prepend(webIcon);
 			setIcon(webIcon, "external-link");
 
-			if (!permanentUrl) {
+			if (!job.conversationId) {
 				openBtn.disabled = true;
 				openBtn.setAttr("title", "ID de conversation non disponible pour cette exécution.");
+			} else if (!isServerReady || !permanentUrl) {
+				openBtn.disabled = true;
+				openBtn.setAttr(
+					"title",
+					"Démarrez le serveur AGY pour ouvrir cette conversation dans le navigateur."
+				);
 			} else {
 				openBtn.setAttr("title", permanentUrl);
 				openBtn.addEventListener("click", () => openExternalUrl(permanentUrl));
