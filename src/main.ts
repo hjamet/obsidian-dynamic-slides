@@ -1,4 +1,4 @@
-import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile, EventRef } from "obsidian";
+import { Plugin, Notice, MarkdownView, PluginSettingTab, Setting, App, TFile, EventRef, WorkspaceLeaf } from "obsidian";
 import * as path from "path";
 import {
 	buildChildHeadingsHtml,
@@ -29,6 +29,7 @@ import {
 	extractZoomContext,
 } from "./contextExtractor";
 import {
+	CliSessionBatch,
 	GENERAL_NOTE_PATH,
 	isGeneralComment,
 	partitionCommentsForCliSessions,
@@ -53,6 +54,12 @@ import {
 	extractModelLabelFromCommand,
 	isPidAlive,
 } from "./activeJobsTracker";
+import {
+	AgyServerManager,
+	getDefaultAgyServerName,
+	resolveAgyProjectInfo,
+} from "./agyServerManager";
+import { AgySidebarView, SLIDEFLOW_AGY_VIEW_TYPE } from "./agySidebarView";
 
 export interface SlideFlowSettings {
 	transitionDuration: number; // in seconds
@@ -61,6 +68,9 @@ export interface SlideFlowSettings {
 	blockDiffThreshold: number; // 0.1 to 0.8 (default 0.25 = 25%)
 	directCliEnabled: boolean; // optional direct CLI send (instead of clipboard)
 	directCliCommand: string; // command template containing {{COMMENTS}}
+	agyProjectName: string; // Antigravity project name or ID (default "Obsidian")
+	agyServerAutoStart: boolean; // start `agy remote-control serve` with Obsidian & stop on unload
+	agyServerName: string; // custom instance name (empty = auto `obsidian-<hostname>`)
 	whisperModel: string;
 	whisperLanguage: string;
 }
@@ -84,6 +94,9 @@ export const DEFAULT_SETTINGS: SlideFlowSettings = {
 	blockDiffThreshold: DEFAULT_BLOCK_DIFF_THRESHOLD,
 	directCliEnabled: false,
 	directCliCommand: DEFAULT_CLI_COMMAND,
+	agyProjectName: "Obsidian",
+	agyServerAutoStart: true,
+	agyServerName: "",
 	whisperModel: "medium",
 	whisperLanguage: "fr",
 };
@@ -121,6 +134,7 @@ export default class SlideFlowPlugin extends Plugin {
 	public reviewStore!: ReviewStore;
 	private voiceService!: VoiceDictationService;
 	private activeJobsTracker!: ActiveJobsTracker;
+	private agyServer!: AgyServerManager;
 
 	private rootNode: SectionNode | null = null;
 	private flatNodes: SectionNode[] = [];
@@ -145,15 +159,66 @@ export default class SlideFlowPlugin extends Plugin {
 		this.baselinesStore = new BaselinesStore(this.app);
 		this.reviewStore = new ReviewStore(this.app, pluginDir);
 		this.activeJobsTracker = new ActiveJobsTracker(this.app, pluginDir);
+		this.activeJobsTracker.setProtectedBatchIdsProvider(() =>
+			this.reviewStore.getActiveFailedBatchIds()
+		);
+
+		this.agyServer = new AgyServerManager(
+			() => this.reviewStore.getVaultBasePath(),
+			() => this.activeJobsTracker.ensureJobsLogDir(),
+			() => ({
+				cliCommandTemplate: this.settings.directCliCommand,
+				projectName: this.settings.agyProjectName,
+				serverName: this.settings.agyServerName,
+			})
+		);
+
+		this.registerView(
+			SLIDEFLOW_AGY_VIEW_TYPE,
+			(leaf: WorkspaceLeaf) =>
+				new AgySidebarView(leaf, {
+					getServerSnapshot: () => this.agyServer.getSnapshot(),
+					getServerHomeUrl: () => this.agyServer.getServerHomeUrl(),
+					getConversationUrl: (convId, projId, overrideInst) =>
+						this.agyServer.getConversationUrl(convId, projId, overrideInst),
+					getJobs: () => this.activeJobsTracker.getCachedJobs(),
+					getFailedBatches: () => this.reviewStore.getFailedBatches(),
+					getNewPendingComments: () => this.reviewStore.getNewPendingComments(),
+					getVaultBasePath: () => this.reviewStore.getVaultBasePath(),
+					onStartServer: () => this.agyServer.start(),
+					onStopServer: () => this.agyServer.stop(),
+					onRestartServer: () => this.agyServer.restart(),
+					onRefreshAll: async () => {
+						await this.reviewStore.loadFromDisk();
+						await this.reconcileOrphanWipBatches();
+						await this.activeJobsTracker.refreshAndSync();
+						this.refreshAgySidebarViews();
+					},
+					onRetryFailedBatch: (groupKey) => this.retryFailedBatch(groupKey),
+					onDiscardFailedBatch: (groupKey) => this.discardFailedBatch(groupKey),
+					onSendNewPending: async () => {
+						await this.sendNewPendingCommentsToCli();
+					},
+					onRemoveHistoryJob: (jobId) => this.activeJobsTracker.removeJob(jobId),
+					subscribeServer: (fn) => this.agyServer.subscribe(() => fn()),
+					subscribeJobs: (fn) => this.activeJobsTracker.subscribe(() => fn()),
+				})
+		);
 
 		this.app.workspace.onLayoutReady(() => {
+			void this.activateAgySidebarView(false);
+			if (this.settings.agyServerAutoStart) {
+				this.agyServer.start();
+			}
 			void this.reviewStore
 				.loadFromDisk()
 				.then(() => this.reconcileOrphanWipBatches())
 				.then(() => {
 					pruneStaleTempImages(this.reviewStore.getAllReferencedImagePaths());
 				})
+				.then(() => this.activeJobsTracker.stripLegacyDashboardBlock())
 				.then(() => this.activeJobsTracker.refreshAndSync())
+				.then(() => this.refreshAgySidebarViews())
 				.catch((err) => console.error("[SlideFlow] Startup reconcile failed:", err));
 		});
 		this.registerInterval(
@@ -175,12 +240,33 @@ export default class SlideFlowPlugin extends Plugin {
 			void this.startPresentation();
 		});
 
+		this.addRibbonIcon("bot", "SlideFlow AGY Panel", () => {
+			void this.activateAgySidebarView(true);
+		});
+
 		this.addCommand({
 			id: "start-slideflow",
 			name: "Open slide presentation & review cockpit",
 			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "p" }],
 			callback: () => {
 				void this.startPresentation();
+			}
+		});
+
+		this.addCommand({
+			id: "open-slideflow-agy-sidebar",
+			name: "Open SlideFlow AGY sidebar",
+			callback: () => {
+				void this.activateAgySidebarView(true);
+			}
+		});
+
+		this.addCommand({
+			id: "restart-agy-server",
+			name: "Restart AGY Remote Control server",
+			callback: () => {
+				void this.agyServer.restart();
+				new Notice("Redémarrage du serveur AGY Remote Control…");
 			}
 		});
 
@@ -196,7 +282,48 @@ export default class SlideFlowPlugin extends Plugin {
 	onunload() {
 		this.closePresentation();
 		this.voiceService?.shutdownNow();
+		this.agyServer?.stop();
 		console.log("Unloading SlideFlow plugin");
+	}
+
+	public refreshAgySidebarViews(): void {
+		const leaves = this.app.workspace.getLeavesOfType(SLIDEFLOW_AGY_VIEW_TYPE);
+		for (const leaf of leaves) {
+			if (leaf.view instanceof AgySidebarView) {
+				leaf.view.render();
+			}
+		}
+	}
+
+	public async activateAgySidebarView(reveal: boolean): Promise<void> {
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(SLIDEFLOW_AGY_VIEW_TYPE)[0] ?? null;
+		if (!leaf) {
+			const rightLeaf = workspace.getRightLeaf(false);
+			if (!rightLeaf) return;
+			await rightLeaf.setViewState({
+				type: SLIDEFLOW_AGY_VIEW_TYPE,
+				active: reveal,
+			});
+			leaf = rightLeaf;
+		}
+		if (reveal && leaf) {
+			workspace.revealLeaf(leaf);
+		}
+		this.refreshAgySidebarViews();
+	}
+
+	public onAgyServerConfigChanged(): void {
+		this.agyServer?.refreshProjectConfig();
+	}
+
+	public applyAgyServerAutoStartToggle(enabled: boolean): void {
+		if (!this.agyServer) return;
+		if (enabled) {
+			this.agyServer.start();
+		} else {
+			this.agyServer.stop();
+		}
 	}
 
 	async loadSettings() {
@@ -906,6 +1033,7 @@ export default class SlideFlowPlugin extends Plugin {
 				this.reviewStore.getWipCommentCount()
 			);
 		}
+		this.refreshAgySidebarViews();
 	}
 
 	/**
@@ -1859,8 +1987,46 @@ export default class SlideFlowPlugin extends Plugin {
 			new Notice("No pending comments to send.");
 			return false;
 		}
-
 		const sessions = partitionCommentsForCliSessions(toSend);
+		return this.launchCliSessionBatches(sessions);
+	}
+
+	public async sendNewPendingCommentsToCli(): Promise<boolean> {
+		const fresh = this.reviewStore.getNewPendingComments();
+		if (fresh.length === 0) {
+			new Notice("Aucun nouveau commentaire en attente.");
+			return false;
+		}
+		const sessions = partitionCommentsForCliSessions(fresh);
+		return this.launchCliSessionBatches(sessions);
+	}
+
+	public async retryFailedBatch(groupKey: string): Promise<void> {
+		const failedBatches = this.reviewStore.getFailedBatches();
+		const target = failedBatches.find((b) => b.groupKey === groupKey);
+		if (!target || target.comments.length === 0) {
+			new Notice("Ce lot interrompu n'existe plus dans la file.");
+			this.refreshAgySidebarViews();
+			return;
+		}
+		await this.launchCliSessionBatches([target]);
+	}
+
+	public async discardFailedBatch(groupKey: string): Promise<void> {
+		const failedBatches = this.reviewStore.getFailedBatches();
+		const target = failedBatches.find((b) => b.groupKey === groupKey);
+		const oldBatchId = target?.comments[0]?.failedBatchId || null;
+		const removed = await this.reviewStore.discardFailedBatch(groupKey);
+		if (oldBatchId) {
+			await this.activeJobsTracker.removeJob(oldBatchId);
+		}
+		this.refreshAllActiveUI();
+		if (removed > 0) {
+			new Notice(`Lot échoué supprimé (${removed} commentaire${removed > 1 ? "s" : ""}).`);
+		}
+	}
+
+	private async launchCliSessionBatches(sessions: CliSessionBatch[]): Promise<boolean> {
 		if (sessions.length === 0) {
 			return false;
 		}
@@ -1884,6 +2050,8 @@ export default class SlideFlowPlugin extends Plugin {
 		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
 		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
 		const cwd = this.reviewStore.getVaultBasePath();
+		const configuredProject = (this.settings.agyProjectName || "Obsidian").trim();
+		const resolvedProj = resolveAgyProjectInfo(configuredProject);
 		const baseTs = Date.now();
 		let totalSentComments = 0;
 		let launchedSessions = 0;
@@ -1891,6 +2059,8 @@ export default class SlideFlowPlugin extends Plugin {
 
 		for (let idx = 0; idx < sessions.length; idx++) {
 			const session = sessions[idx];
+			const oldFailedBatchId =
+				session.kind === "retry" ? session.comments[0]?.failedBatchId || null : null;
 			const formatted = this.reviewStore.formatExport(includeOneShotPrefix, session.comments);
 			const sentIds = session.comments.map((c) => c.id);
 			const jobId = `job_${baseTs + idx}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1908,6 +2078,10 @@ export default class SlideFlowPlugin extends Plugin {
 				continue;
 			}
 
+			if (oldFailedBatchId) {
+				void this.activeJobsTracker.removeJob(oldFailedBatchId);
+			}
+
 			totalSentComments += moved.length;
 			launchedSessions += 1;
 			if (session.kind === "retry") retrySessions += 1;
@@ -1923,34 +2097,65 @@ export default class SlideFlowPlugin extends Plugin {
 				commentCount: moved.length,
 				notes: noteTitles,
 				logPath: path.join(jobsDir, `${jobId}.log`),
+				agyLogPath: path.join(jobsDir, `${jobId}.agy.log`),
+				projectName: resolvedProj.name || configuredProject || null,
+				projectId: resolvedProj.id || null,
+				liveStep: "⏳ Démarrage…",
 			});
 
 			void runCliCommand(this.settings.directCliCommand, formatted, {
 				cwd,
 				jobsDir,
 				jobId,
+				projectName: configuredProject,
 				onSpawn: (pid) => {
 					void this.reviewStore.setWipBatchPid(jobId, pid);
 					void this.activeJobsTracker.updateJobPid(jobId, pid);
+				},
+				onConversationId: (conversationId) => {
+					void this.activeJobsTracker.updateJobMetadata(jobId, { conversationId }, true);
+				},
+				onProjectId: (projectId) => {
+					void this.activeJobsTracker.updateJobMetadata(jobId, { projectId }, true);
+				},
+				onRemoteInstanceId: (liveInstanceId) => {
+					void this.activeJobsTracker.updateJobMetadata(jobId, { liveInstanceId }, true);
+				},
+				onStepUpdate: (liveStep) => {
+					void this.activeJobsTracker.updateJobMetadata(jobId, { liveStep }, false);
 				},
 			})
 				.then(async (res) => {
 					this.liveOwnedJobIds.delete(jobId);
 
+					const finalMeta = {
+						conversationId: res.conversationId || undefined,
+						projectId: res.projectId || resolvedProj.id || undefined,
+						liveInstanceId: res.liveInstanceId || undefined,
+						agyLogPath: res.agyLogPath || undefined,
+					};
+
 					if (res.exitCode === 0) {
 						const purged = await this.reviewStore.purgeWipBatch(jobId);
-						await this.activeJobsTracker.completeJob(jobId, 0, null);
+						await this.activeJobsTracker.completeJob(jobId, 0, null, finalMeta);
 						this.refreshAllActiveUI();
 						new Notice(
 							`${res.displayName} finished — ${purged} comment(s) completed & purged.`,
 							6000
 						);
 					} else {
-						const rawErr = (res.stderr || res.stdout || "").trim().replace(/\s+/g, " ");
+						const rawErr = (res.streamError || res.stderr || res.stdout || "")
+							.trim()
+							.replace(/\s+/g, " ");
 						const detail = rawErr ? rawErr.slice(0, 140) : "";
 						const reason = `exit ${res.exitCode}${detail ? `: ${detail}` : ""}`;
 						const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, reason);
-						await this.activeJobsTracker.completeJob(jobId, res.exitCode, detail || null);
+						await this.activeJobsTracker.completeJob(
+							jobId,
+							res.exitCode,
+							detail || null,
+							finalMeta
+						);
 						this.refreshAllActiveUI();
 						console.error("[SlideFlow CLI] Non-zero exit:", res);
 						new Notice(
@@ -1981,7 +2186,7 @@ export default class SlideFlowPlugin extends Plugin {
 
 		if (launchedSessions === 1) {
 			new Notice(
-				`Sent ${totalSentComments} comment(s) to ${cliDisplayName} (WIP) — queue is now clear for your next project.`,
+				`Sent ${totalSentComments} comment(s) to ${cliDisplayName} (${resolvedProj.name || configuredProject}) — queue is now clear.`,
 				5000
 			);
 		} else {
@@ -2596,7 +2801,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("CLI command template")
 			.setDesc(
-				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). Runs in the vault root directory."
+				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). For `agy`, `--project`, `--output-format stream-json`, and `--log-file` are injected automatically."
 			)
 			.addTextArea(text => {
 				text
@@ -2609,6 +2814,53 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 				text.inputEl.rows = 3;
 				text.inputEl.addClass("slideflow-settings-cli-textarea");
 			});
+
+		new Setting(containerEl)
+			.setName("AGY Project (name or ID)")
+			.setDesc(
+				"Antigravity project used for all SlideFlow `agy` runs and the AGY sidebar (resolved by name across PCs, default: Obsidian)."
+			)
+			.addText(text =>
+				text
+					.setPlaceholder("Obsidian")
+					.setValue(this.plugin.settings.agyProjectName)
+					.onChange(async (val) => {
+						this.plugin.settings.agyProjectName = val.trim() || "Obsidian";
+						await this.plugin.saveSettings();
+						this.plugin.onAgyServerConfigChanged();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-start AGY Remote Control server with Obsidian")
+			.setDesc(
+				"Runs `agy remote-control serve` tied to Obsidian's lifecycle (starts on load, stops on close/restart) so finished conversations remain accessible in one permanent web instance."
+			)
+			.addToggle(toggle =>
+				toggle
+					.setValue(this.plugin.settings.agyServerAutoStart)
+					.onChange(async (val) => {
+						this.plugin.settings.agyServerAutoStart = val;
+						await this.plugin.saveSettings();
+						this.plugin.applyAgyServerAutoStartToggle(val);
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("AGY Remote Control server name")
+			.setDesc(
+				`Instance name displayed on antigravity.google.com (leave empty for automatic \`${getDefaultAgyServerName()}\`; restart server from the sidebar after changing).`
+			)
+			.addText(text =>
+				text
+					.setPlaceholder(getDefaultAgyServerName())
+					.setValue(this.plugin.settings.agyServerName)
+					.onChange(async (val) => {
+						this.plugin.settings.agyServerName = val.trim();
+						await this.plugin.saveSettings();
+						this.plugin.onAgyServerConfigChanged();
+					})
+			);
 
 		containerEl.createEl("h3", { text: "Voice Dictation (V / Ctrl+M)" });
 

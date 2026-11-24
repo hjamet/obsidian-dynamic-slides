@@ -4,9 +4,12 @@
  * - Quote-aware tokenization BEFORE substituting `{{COMMENTS}}`, spawning with `shell: false`
  *   so multiline XML, `< >`, quotes, backticks, and `$` are delivered 100% verbatim.
  * - Automatically prevents duplicate `/one-shot` prefix when the command template already includes it.
+ * - Automatically injects `--project <projectName>`, `--output-format stream-json`, and
+ *   `--log-file <jobId>.agy.log` for `agy` binaries (when not already present in the template)
+ *   so every run lands in the configured Antigravity project (`Obsidian`) and reports real-time
+ *   `conversationId`, `projectId`, `liveInstanceId`, and step progress.
  * - Automatically spills huge payloads (> 24,000 chars on Windows) to a job XML file on disk so
- *   Windows' 32,767-char `CreateProcessW` limit can never reject large review batches!
- * - Streams live stdout/stderr to a per-job log file and exposes `onSpawn(pid)` for real-time tracking.
+ *   Windows' 32,767-char `CreateProcessW` limit can never reject large review batches.
  */
 
 import { spawn } from "child_process";
@@ -16,7 +19,7 @@ import * as path from "path";
 
 export const COMMENTS_PLACEHOLDER = "{{COMMENTS}}";
 export const DEFAULT_CLI_COMMAND =
-	'agy -remote-control -model "Gemini 4 Neon (XHigh)" -p "{{COMMENTS}}"';
+	'agy --remote-control --model "Gemini 4 Neon (XHigh)" -p "/one-shot {{COMMENTS}}"';
 
 export interface ParsedCliCommand {
 	executable: string;
@@ -28,7 +31,12 @@ export interface CliRunOptions {
 	cwd: string;
 	jobsDir?: string;
 	jobId?: string;
+	projectName?: string;
 	onSpawn?: (pid: number | null) => void;
+	onConversationId?: (conversationId: string) => void;
+	onProjectId?: (projectId: string) => void;
+	onRemoteInstanceId?: (instanceId: string) => void;
+	onStepUpdate?: (stepLabel: string, stepIndex: number) => void;
 }
 
 export interface CliRunResult {
@@ -37,6 +45,11 @@ export interface CliRunResult {
 	stderr: string;
 	displayName: string;
 	logPath: string | null;
+	agyLogPath: string | null;
+	conversationId: string | null;
+	projectId: string | null;
+	liveInstanceId: string | null;
+	streamError: string | null;
 }
 
 export function templateIncludesOneShot(template: string): boolean {
@@ -131,7 +144,7 @@ export function parseCommandTemplate(template: string, commentsPayload: string):
 	return { executable, args, displayName };
 }
 
-function resolveExecutablePath(executable: string): string {
+export function resolveExecutablePath(executable: string): string {
 	if (executable.includes("/") || executable.includes("\\")) {
 		if (!fs.existsSync(executable)) {
 			throw new Error(`CLI executable not found: ${executable}`);
@@ -181,6 +194,51 @@ function resolveExecutablePath(executable: string): string {
 	return executable;
 }
 
+function hasCliFlag(args: string[], names: string[]): boolean {
+	const lowered = names.map((n) => n.toLowerCase());
+	for (const tok of args) {
+		const low = tok.toLowerCase();
+		for (const name of lowered) {
+			if (low === name || low.startsWith(`${name}=`)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function formatLiveStepLabel(stepUpdate: any): string | null {
+	if (!stepUpdate || typeof stepUpdate !== "object") return null;
+	const stepType = String(stepUpdate.step_type || "").toLowerCase();
+	const state = String(stepUpdate.state || "").toUpperCase();
+	const idx = typeof stepUpdate.step_index === "number" ? stepUpdate.step_index : null;
+	const suffix = idx !== null && idx > 0 ? ` · #${idx}` : "";
+
+	if (stepType === "tool") {
+		const toolName = String(stepUpdate.tool_name || stepUpdate.tool_info?.name || "tool");
+		let icon = "🔧";
+		if (/read_file|view_file|list_dir|find_by_name|grep/i.test(toolName)) icon = "📖";
+		else if (/edit|write|replace/i.test(toolName)) icon = "✏️";
+		else if (/search_web|read_url/i.test(toolName)) icon = "🔍";
+		else if (/mcp/i.test(toolName)) icon = "🔌";
+		else if (/subagent/i.test(toolName)) icon = "🤖";
+		return `${icon} ${toolName}${suffix}`;
+	}
+	if (stepType === "agent_response") {
+		if (state === "ACTIVE") return `💬 Réponse en cours…${suffix}`;
+		return `💭 Analyse…${suffix}`;
+	}
+	if (stepType === "user_input") {
+		return "🚀 Prompt envoyé";
+	}
+	return null;
+}
+
+const LOG_REMOTE_ID_RE =
+	/\[remote-control-([a-zA-Z0-9-]+)\]\s+(?:Connection status:\s+Connected|Starting V2 remote control connection)/i;
+const LOG_PROJECT_ID_RE = /Conversation using project ID:\s+(\S+)/i;
+const LOG_CONV_ID_RE = /Created conversation\s+([a-f0-9-]+)/i;
+
 export function runCliCommand(
 	template: string,
 	commentsPayload: string,
@@ -216,6 +274,43 @@ export function runCliCommand(
 		);
 	}
 
+	const isAgy = parsed.displayName.toLowerCase() === "agy";
+	const finalArgs = [...parsed.args];
+	let agyLogPath: string | null = null;
+	let usingStreamJson = false;
+
+	if (isAgy) {
+		const extraPrefixArgs: string[] = [];
+
+		const projectName = (options.projectName || "").trim();
+		if (projectName && !hasCliFlag(finalArgs, ["-project", "--project"])) {
+			extraPrefixArgs.push("--project", projectName);
+		}
+
+		if (!hasCliFlag(finalArgs, ["-output-format", "--output-format"])) {
+			extraPrefixArgs.push("--output-format", "stream-json");
+			usingStreamJson = true;
+		} else {
+			usingStreamJson = finalArgs.some(
+				(a, idx) =>
+					/^--?output-format=stream-json$/i.test(a) ||
+					(/^--?output-format$/i.test(a) && /^stream-json$/i.test(finalArgs[idx + 1] || ""))
+			);
+		}
+
+		if (options.jobsDir && options.jobId && !hasCliFlag(finalArgs, ["-log-file", "--log-file"])) {
+			if (!fs.existsSync(options.jobsDir)) {
+				fs.mkdirSync(options.jobsDir, { recursive: true });
+			}
+			agyLogPath = path.join(options.jobsDir, `${options.jobId}.agy.log`);
+			extraPrefixArgs.push("--log-file", agyLogPath);
+		}
+
+		if (extraPrefixArgs.length > 0) {
+			finalArgs.unshift(...extraPrefixArgs);
+		}
+	}
+
 	let logPath: string | null = null;
 	let logStream: fs.WriteStream | null = null;
 	if (options.jobsDir && options.jobId) {
@@ -226,7 +321,7 @@ export function runCliCommand(
 			logPath = path.join(options.jobsDir, `${options.jobId}.log`);
 			logStream = fs.createWriteStream(logPath, { flags: "a", encoding: "utf8" });
 			logStream.write(
-				`[${new Date().toISOString()}] Launching: ${resolvedExe} (payload=${commentsPayload.length} chars${spilledPayloadFile ? `, file=${spilledPayloadFile}` : ""})\n`
+				`[${new Date().toISOString()}] Launching: ${resolvedExe} (project=${options.projectName || "default"}, payload=${commentsPayload.length} chars${spilledPayloadFile ? `, file=${spilledPayloadFile}` : ""})\n`
 			);
 		} catch {
 			logPath = null;
@@ -237,9 +332,121 @@ export function runCliCommand(
 	return new Promise<CliRunResult>((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
+		let stdoutLineBuf = "";
 		let settled = false;
 
-		const child = spawn(resolvedExe, parsed.args, {
+		let conversationId: string | null = null;
+		let projectId: string | null = null;
+		let liveInstanceId: string | null = null;
+		let streamError: string | null = null;
+		let lastStepLabel = "";
+
+		const notifyConvId = (id: string | null | undefined) => {
+			if (!id || conversationId === id) return;
+			conversationId = id;
+			options.onConversationId?.(id);
+		};
+		const notifyProjectId = (id: string | null | undefined) => {
+			if (!id || projectId === id) return;
+			projectId = id;
+			options.onProjectId?.(id);
+		};
+		const notifyRemoteId = (id: string | null | undefined) => {
+			if (!id || liveInstanceId === id) return;
+			liveInstanceId = id;
+			options.onRemoteInstanceId?.(id);
+		};
+
+		let agyLogPollTimer: ReturnType<typeof setInterval> | null = null;
+		let agyLogOffset = 0;
+
+		const stopAgyLogPoll = () => {
+			if (agyLogPollTimer !== null) {
+				clearInterval(agyLogPollTimer);
+				agyLogPollTimer = null;
+			}
+		};
+
+		const scanAgyInternalLog = () => {
+			if (!agyLogPath || !fs.existsSync(agyLogPath)) return;
+			let stat: fs.Stats;
+			try {
+				stat = fs.statSync(agyLogPath);
+			} catch {
+				return;
+			}
+			if (stat.size <= agyLogOffset) return;
+
+			let text = "";
+			try {
+				const fd = fs.openSync(agyLogPath, "r");
+				try {
+					const len = stat.size - agyLogOffset;
+					const buf = Buffer.alloc(len);
+					fs.readSync(fd, buf, 0, len, agyLogOffset);
+					agyLogOffset = stat.size;
+					text = buf.toString("utf8");
+				} finally {
+					fs.closeSync(fd);
+				}
+			} catch {
+				return;
+			}
+
+			if (!liveInstanceId) {
+				const m = text.match(LOG_REMOTE_ID_RE);
+				if (m && m[1]) notifyRemoteId(m[1]);
+			}
+			if (!projectId) {
+				const m = text.match(LOG_PROJECT_ID_RE);
+				if (m && m[1]) notifyProjectId(m[1]);
+			}
+			if (!conversationId) {
+				const m = text.match(LOG_CONV_ID_RE);
+				if (m && m[1]) notifyConvId(m[1]);
+			}
+
+			if (liveInstanceId && projectId && conversationId) {
+				stopAgyLogPoll();
+			}
+		};
+
+		const handleStreamJsonLine = (rawLine: string) => {
+			const trimmed = rawLine.trim();
+			if (!trimmed.startsWith("{")) return;
+			let parsedEvent: any;
+			try {
+				parsedEvent = JSON.parse(trimmed);
+			} catch {
+				return;
+			}
+
+			if (typeof parsedEvent.conversation_id === "string" && parsedEvent.conversation_id) {
+				notifyConvId(parsedEvent.conversation_id);
+			}
+
+			if (parsedEvent.event === "step_update" && parsedEvent.step_update) {
+				const su = parsedEvent.step_update;
+				if (typeof su.conversation_id === "string" && su.conversation_id) {
+					notifyConvId(su.conversation_id);
+				}
+				const label = formatLiveStepLabel(su);
+				if (label && label !== lastStepLabel) {
+					lastStepLabel = label;
+					options.onStepUpdate?.(label, typeof su.step_index === "number" ? su.step_index : 0);
+				}
+			} else if (parsedEvent.event === "result" && parsedEvent.result) {
+				const r = parsedEvent.result;
+				if (typeof r.conversation_id === "string" && r.conversation_id) {
+					notifyConvId(r.conversation_id);
+				}
+				if (typeof r.error === "string" && r.error.trim()) {
+					streamError = r.error.trim();
+				}
+			}
+		};
+
+		const child = spawn(resolvedExe, finalArgs, {
 			cwd: options.cwd || undefined,
 			shell: false,
 			windowsHide: true,
@@ -251,11 +458,25 @@ export function runCliCommand(
 			logStream.write(`[${new Date().toISOString()}] PID=${child.pid}\n`);
 		}
 
+		if (agyLogPath) {
+			agyLogPollTimer = setInterval(scanAgyInternalLog, 1000);
+		}
+
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
 			stdout += text;
 			logStream?.write(text);
+
+			if (usingStreamJson) {
+				stdoutLineBuf += text;
+				const lines = stdoutLineBuf.split(/\r?\n/);
+				stdoutLineBuf = lines.pop() ?? "";
+				for (const line of lines) {
+					handleStreamJsonLine(line);
+				}
+			}
 		});
+
 		child.stderr?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
 			stderr += text;
@@ -265,6 +486,7 @@ export function runCliCommand(
 		child.on("error", (err: Error) => {
 			if (settled) return;
 			settled = true;
+			stopAgyLogPoll();
 			logStream?.write(`\n[ERROR] ${err.message}\n`);
 			logStream?.end();
 			reject(new Error(`Failed to start ${parsed.displayName}: ${err.message}`));
@@ -273,7 +495,16 @@ export function runCliCommand(
 		child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
 			if (settled) return;
 			settled = true;
-			logStream?.write(`\n[${new Date().toISOString()}] Exit code=${code}, signal=${signal || "none"}\n`);
+			if (usingStreamJson && stdoutLineBuf.trim()) {
+				handleStreamJsonLine(stdoutLineBuf);
+				stdoutLineBuf = "";
+			}
+			scanAgyInternalLog();
+			stopAgyLogPoll();
+
+			logStream?.write(
+				`\n[${new Date().toISOString()}] Exit code=${code}, signal=${signal || "none"}, conv=${conversationId || "none"}, project=${projectId || "none"}\n`
+			);
 			logStream?.end();
 
 			if (code === 0 && spilledPayloadFile) {
@@ -298,6 +529,11 @@ export function runCliCommand(
 				stderr,
 				displayName: parsed.displayName,
 				logPath,
+				agyLogPath,
+				conversationId,
+				projectId,
+				liveInstanceId,
+				streamError,
 			});
 		});
 	});

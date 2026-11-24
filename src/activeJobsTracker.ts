@@ -1,10 +1,12 @@
 /**
- * activeJobsTracker.ts — Tracks active & recent SlideFlow CLI (`agy`) jobs in
- * `_agents/slideflow_active_jobs.json` and synchronizes a live status block inside `🎯 Projets.md`.
+ * activeJobsTracker.ts — Tracks active, interrupted, and recent SlideFlow CLI (`agy`) jobs in
+ * `_agents/slideflow_active_jobs.json` for the dedicated SlideFlow AGY Sidebar View.
  *
  * - Self-healing PID check (`process.kill(pid, 0)`) prevents zombie "running" entries if Obsidian reloads.
- * - Cleanly integrates with Project Memory (`dashboardUpdater.ts` & `project_memory_cli.py`) via
- *   `<!-- SLIDEFLOW_AGY_JOBS_START --> ... <!-- SLIDEFLOW_AGY_JOBS_END -->` markers.
+ * - Retains finished jobs up to 24h capped at the 5 most recent (while keeping all running jobs and
+ *   all failed jobs whose comments are still waiting for retry in ReviewStore).
+ * - Cleans up any legacy `<!-- SLIDEFLOW_AGY_JOBS_START --> ... <!-- SLIDEFLOW_AGY_JOBS_END -->`
+ *   Markdown block from `🎯 Projets.md` so the project dashboard stays 100% pure.
  */
 
 import { App, TFile } from "obsidian";
@@ -16,8 +18,8 @@ export const ACTIVE_JOBS_FILE_PATH = "_agents/slideflow_active_jobs.json";
 export const JOBS_BLOCK_START = "<!-- SLIDEFLOW_AGY_JOBS_START -->";
 export const JOBS_BLOCK_END = "<!-- SLIDEFLOW_AGY_JOBS_END -->";
 
-const DONE_RETENTION_MS = 15 * 60 * 1000; // keep completed notice for 15 min
-const ERROR_RETENTION_MS = 60 * 60 * 1000; // keep error notice for 60 min
+const FINISHED_RETENTION_MS = 24 * 60 * 60 * 1000; // keep completed/error history for 24h
+const MAX_FINISHED_JOBS = 5; // cap non-retryable history at 5 most recent entries
 
 export interface SlideFlowCliJob {
 	id: string;
@@ -31,7 +33,13 @@ export interface SlideFlowCliJob {
 	commentCount: number;
 	notes: string[];
 	logPath?: string | null;
+	agyLogPath?: string | null;
 	errorSummary?: string | null;
+	conversationId?: string | null;
+	projectId?: string | null;
+	projectName?: string | null;
+	liveInstanceId?: string | null;
+	liveStep?: string | null;
 }
 
 interface ActiveJobsPayload {
@@ -56,14 +64,6 @@ export function extractModelLabelFromCommand(template: string): string {
 	const m = template.match(/(?:--?model)(?:\s+|=)(?:"([^"]+)"|'([^']+)'|(\S+))/i);
 	if (!m) return "";
 	return (m[1] || m[2] || m[3] || "").trim();
-}
-
-function formatHHMM(iso: string): string {
-	const d = new Date(iso);
-	if (isNaN(d.getTime())) return "--:--";
-	const hh = String(d.getHours()).padStart(2, "0");
-	const mm = String(d.getMinutes()).padStart(2, "0");
-	return `${hh}:${mm}`;
 }
 
 function getDashboardMatchKeys(dashboardPath: string): Set<string> {
@@ -106,19 +106,25 @@ export function orderNotesWithDashboardLast(
 	return [...regular, ...dashboard];
 }
 
-function formatNotesLabel(notes: string[], dashboardPath: string = "🎯 Projets.md"): string {
+export function formatJobNotesLabel(notes: string[], dashboardPath: string = "🎯 Projets.md"): string {
 	const ordered = orderNotesWithDashboardLast(notes, dashboardPath);
 	if (ordered.length === 0) return "Revue SlideFlow";
 	if (ordered.length === 1) return ordered[0];
 	return `${ordered[0]} (+${ordered.length - 1} note${ordered.length - 1 > 1 ? "s" : ""})`;
 }
 
-export function pruneAndHealJobs(jobs: SlideFlowCliJob[], nowMs: number = Date.now()): {
+export function pruneAndHealJobs(
+	jobs: SlideFlowCliJob[],
+	nowMs: number = Date.now(),
+	protectedBatchIds?: Set<string>
+): {
 	jobs: SlideFlowCliJob[];
 	changed: boolean;
 } {
 	let changed = false;
-	const kept: SlideFlowCliJob[] = [];
+	const running: SlideFlowCliJob[] = [];
+	const protectedErrors: SlideFlowCliJob[] = [];
+	const finishedCandidates: SlideFlowCliJob[] = [];
 
 	for (const job of jobs) {
 		const copy: SlideFlowCliJob = { ...job };
@@ -130,82 +136,89 @@ export function pruneAndHealJobs(jobs: SlideFlowCliJob[], nowMs: number = Date.n
 				copy.errorSummary =
 					copy.errorSummary || `PID ${copy.pid} terminé sans code de succès confirmé`;
 				copy.finishedAt = copy.finishedAt || new Date(nowMs).toISOString();
+				copy.liveStep = null;
 				changed = true;
 			}
 		}
 
 		if (copy.status === "running") {
-			kept.push(copy);
+			running.push(copy);
+			continue;
+		}
+
+		if (copy.status === "error" && protectedBatchIds && protectedBatchIds.has(copy.id)) {
+			protectedErrors.push(copy);
 			continue;
 		}
 
 		const finTime = new Date(copy.finishedAt || copy.startedAt).getTime();
 		const age = isNaN(finTime) ? Infinity : nowMs - finTime;
-		const limit = copy.status === "error" ? ERROR_RETENTION_MS : DONE_RETENTION_MS;
-		if (age <= limit) {
-			kept.push(copy);
+		if (age <= FINISHED_RETENTION_MS) {
+			finishedCandidates.push(copy);
 		} else {
 			changed = true;
 		}
 	}
 
-	return { jobs: kept, changed };
-}
+	finishedCandidates.sort((a, b) => {
+		const ta = new Date(a.finishedAt || a.startedAt).getTime() || 0;
+		const tb = new Date(b.finishedAt || b.startedAt).getTime() || 0;
+		return tb - ta;
+	});
 
-export function renderActiveJobsMarkdownBlock(
-	jobs: SlideFlowCliJob[],
-	dashboardPath: string = "🎯 Projets.md"
-): string {
-	if (!jobs || jobs.length === 0) return "";
-
-	const running = jobs.filter((j) => j.status === "running");
-	const recent = jobs.filter((j) => j.status !== "running");
-
-	const lines: string[] = [JOBS_BLOCK_START];
-
-	if (running.length > 0) {
-		lines.push(`> 🤖 **Commandes \`agy\` en cours (${running.length})** :`);
-		for (const j of running) {
-			const label = formatNotesLabel(j.notes, dashboardPath);
-			const modelPart = j.model ? ` · \`${j.model}\`` : "";
-			const pidPart = j.pid ? ` · PID \`${j.pid}\`` : "";
-			const timeStr = formatHHMM(j.startedAt);
-			lines.push(
-				`> - ⏳ **${label}** · \`${j.commentCount} commentaire${j.commentCount > 1 ? "s" : ""}\`${modelPart} · démarré à \`${timeStr}\`${pidPart}`
-			);
-		}
-	} else {
-		lines.push(`> 🤖 **Dernières exécutions \`agy\`** :`);
+	if (finishedCandidates.length > MAX_FINISHED_JOBS) {
+		finishedCandidates.length = MAX_FINISHED_JOBS;
+		changed = true;
 	}
 
-	for (const j of recent) {
-		const label = formatNotesLabel(j.notes, dashboardPath);
-		const modelPart = j.model ? ` · \`${j.model}\`` : "";
-		const finStr = formatHHMM(j.finishedAt || j.startedAt);
-		if (j.status === "done") {
-			lines.push(
-				`> - ✅ **${label}** · \`${j.commentCount} commentaire${j.commentCount > 1 ? "s" : ""}\`${modelPart} · terminé à \`${finStr}\``
-			);
-		} else {
-			const errPart = j.errorSummary ? ` — ${j.errorSummary.slice(0, 120)}` : "";
-			lines.push(
-				`> - ❌ **${label}** · \`${j.commentCount} commentaire${j.commentCount > 1 ? "s" : ""}\`${modelPart} · échec \`exit ${j.exitCode ?? "?"}\` à \`${finStr}\`${errPart}`
-			);
-		}
-	}
-
-	lines.push(JOBS_BLOCK_END);
-	return lines.join("\n");
+	return {
+		jobs: [...running, ...protectedErrors, ...finishedCandidates],
+		changed,
+	};
 }
 
 export class ActiveJobsTracker {
 	private app: App;
 	private pluginDirRelative: string;
 	private writeChain: Promise<void> = Promise.resolve();
+	private cachedJobs: SlideFlowCliJob[] = [];
+	private listeners: Set<(jobs: SlideFlowCliJob[]) => void> = new Set();
+	private protectedIdsProvider: (() => Set<string>) | null = null;
 
 	constructor(app: App, pluginDirRelative: string) {
 		this.app = app;
 		this.pluginDirRelative = pluginDirRelative;
+	}
+
+	public setProtectedBatchIdsProvider(provider: () => Set<string>): void {
+		this.protectedIdsProvider = provider;
+	}
+
+	private getProtectedBatchIds(): Set<string> | undefined {
+		return this.protectedIdsProvider ? this.protectedIdsProvider() : undefined;
+	}
+
+	public subscribe(listener: (jobs: SlideFlowCliJob[]) => void): () => void {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+
+	private emit(jobs: SlideFlowCliJob[]): void {
+		this.cachedJobs = jobs.map((j) => ({ ...j, notes: [...(j.notes || [])] }));
+		const snap = this.getCachedJobs();
+		for (const fn of this.listeners) {
+			try {
+				fn(snap);
+			} catch (err) {
+				console.error("[SlideFlow ActiveJobsTracker] Listener error:", err);
+			}
+		}
+	}
+
+	public getCachedJobs(): SlideFlowCliJob[] {
+		return this.cachedJobs.map((j) => ({ ...j, notes: [...(j.notes || [])] }));
 	}
 
 	private getVaultBasePath(): string {
@@ -213,7 +226,7 @@ export class ActiveJobsTracker {
 		return typeof adapter.getBasePath === "function" ? adapter.getBasePath() : "";
 	}
 
-	private async resolveDashboardVaultPath(): Promise<string> {
+	public async resolveDashboardVaultPath(): Promise<string> {
 		const adapter = this.app.vault.adapter;
 		const pmDataPath = ".obsidian/plugins/project-memory/data.json";
 		try {
@@ -230,6 +243,28 @@ export class ActiveJobsTracker {
 			// fallback to default dashboard filename
 		}
 		return "🎯 Projets.md";
+	}
+
+	/**
+	 * Removes any legacy `<!-- SLIDEFLOW_AGY_JOBS_START --> ... <!-- SLIDEFLOW_AGY_JOBS_END -->`
+	 * block from `🎯 Projets.md` now that jobs live cleanly in the dedicated SlideFlow AGY Sidebar.
+	 */
+	public async stripLegacyDashboardBlock(): Promise<void> {
+		const dashboardPath = await this.resolveDashboardVaultPath();
+		const targetFile = this.app.vault.getAbstractFileByPath(dashboardPath);
+		if (!(targetFile instanceof TFile)) return;
+
+		const original = (await this.app.vault.read(targetFile)).replace(/\r\n/g, "\n");
+		const markerRe = new RegExp(
+			`\\n?${JOBS_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${JOBS_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
+			"g"
+		);
+		if (!markerRe.test(original)) return;
+
+		const cleaned = original.replace(markerRe, "\n\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+		if (cleaned !== original) {
+			await this.app.vault.modify(targetFile, cleaned);
+		}
 	}
 
 	private async loadJobsRaw(): Promise<SlideFlowCliJob[]> {
@@ -252,7 +287,7 @@ export class ActiveJobsTracker {
 		if (parentDir && !(await adapter.exists(parentDir))) {
 			await adapter.mkdir(parentDir);
 		}
-		const payload: ActiveJobsPayload = { version: 1, jobs };
+		const payload: ActiveJobsPayload = { version: 2, jobs };
 		await adapter.write(ACTIVE_JOBS_FILE_PATH, JSON.stringify(payload, null, 2));
 	}
 
@@ -289,52 +324,16 @@ export class ActiveJobsTracker {
 		});
 
 		const sorted = Array.from(byNote.values()).sort((a, b) => {
-			// Configured Project File (e.g. 🎯 Projets) ALWAYS goes last (inside +X notes)
 			if (a.isDashboard !== b.isDashboard) {
 				return a.isDashboard ? 1 : -1;
 			}
-			// Lowest navigation depth first (Master Project Note before sub-notes)
 			if (a.minDepth !== b.minDepth) {
 				return a.minDepth - b.minDepth;
 			}
-			// First-seen tie-breaker
 			return a.firstIdx - b.firstIdx;
 		});
 
 		return sorted.map((e) => e.label);
-	}
-
-	private async updateDashboardNote(jobs: SlideFlowCliJob[]): Promise<void> {
-		const dashboardPath = await this.resolveDashboardVaultPath();
-		const targetFile = this.app.vault.getAbstractFileByPath(dashboardPath);
-		if (!(targetFile instanceof TFile)) return;
-
-		const original = (await this.app.vault.read(targetFile)).replace(/\r\n/g, "\n");
-		const block = renderActiveJobsMarkdownBlock(jobs, dashboardPath);
-		const markerRe = new RegExp(
-			`\\n?${JOBS_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${JOBS_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
-			"g"
-		);
-
-		let updated = original;
-		if (markerRe.test(original)) {
-			updated = original.replace(markerRe, block ? `\n\n${block}\n\n` : "\n\n");
-		} else if (block) {
-			const tableIdx = original.indexOf("\n| Title |");
-			if (tableIdx !== -1) {
-				updated =
-					original.slice(0, tableIdx).replace(/\n+$/, "") +
-					`\n\n${block}\n\n` +
-					original.slice(tableIdx + 1);
-			} else {
-				updated = original.replace(/\n+$/, "") + `\n\n${block}\n`;
-			}
-		}
-
-		updated = updated.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
-		if (updated !== original) {
-			await this.app.vault.modify(targetFile, updated);
-		}
 	}
 
 	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -355,23 +354,40 @@ export class ActiveJobsTracker {
 	public registerJob(job: SlideFlowCliJob): Promise<void> {
 		return this.enqueue(async () => {
 			const raw = await this.loadJobsRaw();
-			const { jobs } = pruneAndHealJobs(raw);
+			const { jobs } = pruneAndHealJobs(raw, Date.now(), this.getProtectedBatchIds());
 			const filtered = jobs.filter((j) => j.id !== job.id);
 			filtered.unshift(job);
 			await this.saveJobsRaw(filtered);
-			await this.updateDashboardNote(filtered);
+			this.emit(filtered);
 		});
 	}
 
 	public updateJobPid(jobId: string, pid: number | null): Promise<void> {
+		if (!pid) return Promise.resolve();
+		return this.updateJobMetadata(jobId, { pid }, true);
+	}
+
+	public updateJobMetadata(
+		jobId: string,
+		patch: Partial<SlideFlowCliJob>,
+		persistToDisk: boolean = true
+	): Promise<void> {
+		if (!persistToDisk) {
+			const target = this.cachedJobs.find((j) => j.id === jobId);
+			if (target) {
+				Object.assign(target, patch);
+				this.emit(this.cachedJobs);
+			}
+			return Promise.resolve();
+		}
 		return this.enqueue(async () => {
 			const raw = await this.loadJobsRaw();
-			const { jobs } = pruneAndHealJobs(raw);
+			const { jobs } = pruneAndHealJobs(raw, Date.now(), this.getProtectedBatchIds());
 			const target = jobs.find((j) => j.id === jobId);
-			if (target && pid) {
-				target.pid = pid;
+			if (target) {
+				Object.assign(target, patch);
 				await this.saveJobsRaw(jobs);
-				await this.updateDashboardNote(jobs);
+				this.emit(jobs);
 			}
 		});
 	}
@@ -379,32 +395,48 @@ export class ActiveJobsTracker {
 	public completeJob(
 		jobId: string,
 		exitCode: number | null,
-		errorSummary?: string | null
+		errorSummary?: string | null,
+		extraPatch?: Partial<SlideFlowCliJob>
 	): Promise<void> {
 		return this.enqueue(async () => {
 			const raw = await this.loadJobsRaw();
-			const { jobs } = pruneAndHealJobs(raw);
+			const { jobs } = pruneAndHealJobs(raw, Date.now(), this.getProtectedBatchIds());
 			const target = jobs.find((j) => j.id === jobId);
 			if (target) {
 				target.status = exitCode === 0 ? "done" : "error";
 				target.exitCode = exitCode;
 				target.finishedAt = new Date().toISOString();
 				target.errorSummary = errorSummary || null;
+				target.liveStep = null;
+				if (extraPatch) {
+					Object.assign(target, extraPatch);
+				}
 			}
-			const cleaned = pruneAndHealJobs(jobs).jobs;
+			const cleaned = pruneAndHealJobs(jobs, Date.now(), this.getProtectedBatchIds()).jobs;
 			await this.saveJobsRaw(cleaned);
-			await this.updateDashboardNote(cleaned);
+			this.emit(cleaned);
+		});
+	}
+
+	public removeJob(jobId: string): Promise<void> {
+		return this.enqueue(async () => {
+			const raw = await this.loadJobsRaw();
+			const filtered = raw.filter((j) => j.id !== jobId);
+			if (filtered.length !== raw.length) {
+				await this.saveJobsRaw(filtered);
+			}
+			this.emit(filtered);
 		});
 	}
 
 	public refreshAndSync(): Promise<SlideFlowCliJob[]> {
 		return this.enqueue(async () => {
 			const raw = await this.loadJobsRaw();
-			const { jobs, changed } = pruneAndHealJobs(raw);
+			const { jobs, changed } = pruneAndHealJobs(raw, Date.now(), this.getProtectedBatchIds());
 			if (changed) {
 				await this.saveJobsRaw(jobs);
 			}
-			await this.updateDashboardNote(jobs);
+			this.emit(jobs);
 			return jobs;
 		});
 	}

@@ -246,6 +246,38 @@ export class ReviewStore {
 		return this.comments.length > 0;
 	}
 
+	public getFailedBatches(): CliSessionBatch[] {
+		return partitionCommentsForCliSessions(this.comments).filter((b) => b.kind === "retry");
+	}
+
+	public getNewPendingComments(): ReviewComment[] {
+		return this.comments.filter((c) => !Boolean(c.failedAt || c.failedReason || c.failedBatchId));
+	}
+
+	public getActiveFailedBatchIds(): Set<string> {
+		const ids = new Set<string>();
+		for (const c of this.comments) {
+			if (c.failedBatchId) {
+				ids.add(c.failedBatchId);
+			}
+		}
+		return ids;
+	}
+
+	public discardFailedBatch(groupKey: string): Promise<number> {
+		return this.enqueue(async () => {
+			const batches = partitionCommentsForCliSessions(this.comments);
+			const target = batches.find((b) => b.kind === "retry" && b.groupKey === groupKey);
+			if (!target || target.comments.length === 0) return 0;
+			const removeIds = new Set(target.comments.map((c) => c.id));
+			const removedPaths = target.comments.flatMap((c) => (c.images || []).map((img) => img.path));
+			this.comments = this.comments.filter((c) => !removeIds.has(c.id));
+			await this.saveToDiskUnlocked();
+			this.cleanupUnreferencedImages(removedPaths);
+			return removeIds.size;
+		});
+	}
+
 	public getAllReferencedImagePaths(): Set<string> {
 		const paths = new Set<string>();
 		for (const c of this.comments) {

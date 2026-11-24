@@ -3173,3 +3173,390 @@ mark.slideflow-comment-mark.is-failed {
 	background-color: transparent;
 	transform: none;
 }
+
+
+/* ==========================================================================
+   SlideFlow v2.13.0 — Dedicated AGY Remote Control & Jobs Sidebar
+   ========================================================================== */
+
+.slideflow-agy-sidebar {
+	padding: 12px 10px 20px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	font-size: 0.86rem;
+}
+
+.sf-agy-card {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 10px 11px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.sf-agy-server-card {
+	background: var(--background-primary-alt, var(--background-secondary));
+}
+
+.sf-agy-server-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.sf-agy-server-status {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.sf-agy-server-title {
+	font-weight: 700;
+	font-size: 0.88rem;
+	color: var(--text-normal);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.sf-agy-dot {
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--text-faint);
+}
+
+.sf-agy-dot.is-connected {
+	background: #22c55e;
+	box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.22);
+}
+
+.sf-agy-dot.is-starting {
+	background: #f59e0b;
+	box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+}
+
+.sf-agy-dot.is-error {
+	background: #ef4444;
+	box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22);
+}
+
+.sf-agy-icon-group {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.sf-agy-icon-btn {
+	appearance: none;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	color: var(--text-muted);
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	box-shadow: none !important;
+}
+
+.sf-agy-icon-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.sf-agy-icon-btn svg {
+	width: 14px;
+	height: 14px;
+}
+
+.sf-agy-meta-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 5px;
+}
+
+.sf-agy-pill {
+	font-size: 0.74rem;
+	font-weight: 600;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sf-agy-pill.is-project {
+	color: var(--interactive-accent);
+	border-color: color-mix(in srgb, var(--interactive-accent) 40%, var(--background-modifier-border));
+}
+
+.sf-agy-pill.is-error {
+	color: #dc2626;
+	border-color: rgba(220, 38, 38, 0.35);
+	background: rgba(220, 38, 38, 0.08);
+}
+
+.theme-dark .sf-agy-pill.is-error {
+	color: #f87171;
+}
+
+.sf-agy-meta-muted {
+	font-size: 0.74rem;
+	color: var(--text-faint);
+}
+
+.sf-agy-section {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.sf-agy-section-header {
+	font-size: 0.73rem;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	padding: 0 2px;
+}
+
+.sf-agy-section-header.is-error {
+	color: #dc2626;
+}
+
+.theme-dark .sf-agy-section-header.is-error {
+	color: #f87171;
+}
+
+.sf-agy-job-card.is-running {
+	border-left: 3px solid #3b82f6;
+}
+
+.sf-agy-job-card.is-error {
+	border-left: 3px solid #ef4444;
+}
+
+.sf-agy-job-card.is-done {
+	border-left: 3px solid #22c55e;
+}
+
+.sf-agy-job-title-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.sf-agy-job-badge {
+	flex-shrink: 0;
+	font-size: 0.76rem;
+	font-weight: 700;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-top: 1px;
+}
+
+.sf-agy-job-badge.is-running {
+	background: rgba(59, 130, 246, 0.14);
+	color: #3b82f6;
+}
+
+.sf-agy-job-badge.is-done {
+	background: rgba(34, 197, 94, 0.15);
+	color: #16a34a;
+}
+
+.sf-agy-job-badge.is-error {
+	background: rgba(239, 68, 68, 0.16);
+	color: #dc2626;
+}
+
+.theme-dark .sf-agy-job-badge.is-done {
+	color: #4ade80;
+}
+
+.theme-dark .sf-agy-job-badge.is-error {
+	color: #f87171;
+}
+
+.sf-agy-job-title {
+	font-weight: 650;
+	font-size: 0.85rem;
+	color: var(--text-normal);
+	line-height: 1.3;
+	word-break: break-word;
+}
+
+.sf-agy-live-step {
+	font-size: 0.78rem;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	background: var(--background-primary);
+	border-radius: 6px;
+	padding: 4px 7px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sf-agy-error-note {
+	font-size: 0.76rem;
+	color: #b91c1c;
+	background: rgba(239, 68, 68, 0.08);
+	border-radius: 6px;
+	padding: 5px 7px;
+	line-height: 1.35;
+	word-break: break-word;
+}
+
+.theme-dark .sf-agy-error-note {
+	color: #fca5a5;
+	background: rgba(239, 68, 68, 0.14);
+}
+
+.sf-agy-comment-preview {
+	font-size: 0.77rem;
+	font-style: italic;
+	color: var(--text-muted);
+	line-height: 1.35;
+	word-break: break-word;
+}
+
+.sf-agy-actions-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.sf-agy-btn {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	height: 27px;
+	padding: 0 9px;
+	border-radius: 7px;
+	font-size: 0.77rem;
+	font-weight: 600;
+	cursor: pointer;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: none !important;
+	transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.sf-agy-btn:hover:not(:disabled) {
+	background: var(--background-modifier-hover);
+}
+
+.sf-agy-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+
+.sf-agy-btn-full {
+	width: 100%;
+	height: 31px;
+	font-size: 0.82rem;
+}
+
+.sf-agy-btn-icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.sf-agy-btn-icon svg,
+.sf-agy-btn.is-ghost svg {
+	width: 13px;
+	height: 13px;
+}
+
+.sf-agy-btn.is-primary {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: transparent;
+}
+
+.sf-agy-btn.is-primary:hover:not(:disabled) {
+	background: var(--interactive-accent-hover);
+}
+
+.sf-agy-btn.is-accent {
+	background: #2563eb;
+	color: #ffffff;
+	border-color: transparent;
+}
+
+.sf-agy-btn.is-accent:hover:not(:disabled) {
+	background: #1d4ed8;
+}
+
+.sf-agy-btn.is-retry {
+	background: #d97706;
+	color: #ffffff;
+	border-color: transparent;
+}
+
+.sf-agy-btn.is-retry:hover:not(:disabled) {
+	background: #b45309;
+}
+
+.sf-agy-btn.is-ghost {
+	background: transparent;
+	border-color: transparent;
+	color: var(--text-muted);
+	padding: 0 6px;
+	margin-left: auto;
+}
+
+.sf-agy-btn.is-ghost:hover:not(:disabled) {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.sf-agy-btn.is-danger-confirm {
+	background: #dc2626 !important;
+	color: #ffffff !important;
+	padding: 0 8px;
+}
+
+.sf-agy-pending-banner {
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.sf-agy-pending-text {
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.sf-agy-empty {
+	font-size: 0.78rem;
+	color: var(--text-faint);
+	padding: 6px 4px;
+}
