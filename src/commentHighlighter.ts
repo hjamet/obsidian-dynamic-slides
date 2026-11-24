@@ -40,6 +40,13 @@ const STRUCTURAL_CONTAINER_TAGS = new Set([
 
 const BLOCK_BOUNDARY_SELECTOR = "td, th, p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, tr";
 
+const LINK_ANCHOR_SELECTOR =
+	"a[href], a.internal-link, .internal-link, .slideflow-child-heading-linked-title";
+
+function findEnclosingLink(node: Text): HTMLElement | null {
+	return (node.parentElement?.closest(LINK_ANCHOR_SELECTOR) as HTMLElement | null) || null;
+}
+
 /**
  * Unwraps any previously injected `.slideflow-comment-mark` elements inside `containerEl`
  * and normalizes adjacent text nodes so re-applying highlights is 100% idempotent.
@@ -50,7 +57,15 @@ export function clearCommentHighlights(containerEl: HTMLElement): void {
 		const parent = mark.parentNode;
 		if (!parent) continue;
 		while (mark.firstChild) {
-			parent.insertBefore(mark.firstChild, mark);
+			const child = mark.firstChild;
+			if (
+				child instanceof HTMLElement &&
+				child.getAttribute("data-sf-suppress-title") === "1"
+			) {
+				child.removeAttribute("title");
+				child.removeAttribute("data-sf-suppress-title");
+			}
+			parent.insertBefore(child, mark);
 		}
 		parent.removeChild(mark);
 	}
@@ -252,6 +267,43 @@ function wrapTextSlice(
 	const tooltip = isFailed
 		? `[FAILED: ${comment.failedReason || "retry"}] Click to edit: ${preview}`
 		: `Click to edit comment: ${preview}`;
+	const linkBorderTooltip = isFailed
+		? `[FAILED: ${comment.failedReason || "retry"}] Click yellow border to edit: ${preview}`
+		: `Click yellow border to edit comment: ${preview}`;
+
+	// Detect clickable links whose entire visible text is covered by this comment range.
+	// Wrapping the `<a>` INSIDE `<mark class="slideflow-comment-mark is-link-highlight">`
+	// lets clicks on the link text open the link directly while clicks on the outer yellow
+	// contour (padding/border of `<mark>`) open the comment editor.
+	const touchedAnchors = new Set<HTMLElement>();
+	for (const seg of intersecting) {
+		const anchor = findEnclosingLink(seg.node);
+		if (anchor) touchedAnchors.add(anchor);
+	}
+
+	const fullyCoveredAnchors = new Set<HTMLElement>();
+	for (const anchor of touchedAnchors) {
+		if (anchor.closest("mark.slideflow-comment-mark")) continue;
+		if (anchor.querySelector("mark.slideflow-comment-mark")) continue;
+		const anchorParent = anchor.parentElement;
+		if (!anchorParent || STRUCTURAL_CONTAINER_TAGS.has(anchorParent.tagName.toLowerCase())) {
+			continue;
+		}
+		const anchorSegments = segments.filter(
+			(s) => anchor.contains(s.node) && s.node.data.trim().length > 0
+		);
+		if (anchorSegments.length === 0) continue;
+		const allCovered = anchorSegments.every((aSeg) => {
+			const firstNonWs = aSeg.node.data.search(/\S/);
+			const lastNonWsEnd = aSeg.node.data.trimEnd().length;
+			return aSeg.start + firstNonWs >= origStart && aSeg.start + lastNonWsEnd <= origEnd;
+		});
+		if (allCovered) {
+			fullyCoveredAnchors.add(anchor);
+		}
+	}
+
+	const wrappedAnchors = new Set<HTMLElement>();
 
 	// Wrap in reverse document order so splitText never invalidates earlier segments
 	for (let i = intersecting.length - 1; i >= 0; i--) {
@@ -266,6 +318,34 @@ function wrapTextSlice(
 			continue;
 		}
 
+		const enclosingLink = findEnclosingLink(seg.node);
+		if (enclosingLink && fullyCoveredAnchors.has(enclosingLink)) {
+			if (wrappedAnchors.has(enclosingLink)) {
+				continue;
+			}
+			wrappedAnchors.add(enclosingLink);
+
+			const mark = document.createElement("mark");
+			mark.className = isFailed
+				? "slideflow-comment-mark is-link-highlight is-failed"
+				: "slideflow-comment-mark is-link-highlight";
+			mark.setAttribute("data-comment-id", comment.id);
+			mark.setAttribute("title", linkBorderTooltip);
+
+			// Suppress ancestor `<mark>` comment tooltip when hovering directly over the link text
+			if (!enclosingLink.hasAttribute("title")) {
+				enclosingLink.setAttribute("title", "");
+				enclosingLink.setAttribute("data-sf-suppress-title", "1");
+			}
+
+			const parent = enclosingLink.parentNode;
+			if (parent) {
+				parent.insertBefore(mark, enclosingLink);
+				mark.appendChild(enclosingLink);
+			}
+			continue;
+		}
+
 		let targetNode = seg.node;
 		if (localEnd < targetNode.data.length) {
 			targetNode.splitText(localEnd);
@@ -275,9 +355,16 @@ function wrapTextSlice(
 		}
 
 		const mark = document.createElement("mark");
-		mark.className = isFailed ? "slideflow-comment-mark is-failed" : "slideflow-comment-mark";
+		if (enclosingLink) {
+			mark.className = isFailed
+				? "slideflow-comment-mark is-partial-in-link is-failed"
+				: "slideflow-comment-mark is-partial-in-link";
+			mark.setAttribute("title", linkBorderTooltip);
+		} else {
+			mark.className = isFailed ? "slideflow-comment-mark is-failed" : "slideflow-comment-mark";
+			mark.setAttribute("title", tooltip);
+		}
 		mark.setAttribute("data-comment-id", comment.id);
-		mark.setAttribute("title", tooltip);
 
 		const parent = targetNode.parentNode;
 		if (parent) {

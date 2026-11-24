@@ -275,10 +275,13 @@ export class PresentationModal extends Component {
 				return;
 			}
 
-			const target = evt.target as HTMLElement;
+			const rawTarget = evt.target as Node | null;
+			const target =
+				rawTarget instanceof HTMLElement ? rawTarget : rawTarget?.parentElement ?? null;
+			if (!target) return;
 
 			const commentMarkEl = target.closest("mark.slideflow-comment-mark") as HTMLElement | null;
-			if (commentMarkEl) {
+			if (commentMarkEl && this.shouldCommentMarkHandleClick(target, commentMarkEl, evt)) {
 				const commentId = commentMarkEl.getAttribute("data-comment-id");
 				if (commentId) {
 					evt.preventDefault();
@@ -339,7 +342,7 @@ export class PresentationModal extends Component {
 
 			const extLinkEl = target.closest('a[href]') as HTMLAnchorElement | null;
 			if (extLinkEl) {
-				const href = extLinkEl.getAttribute('href') || '';
+				const href = (extLinkEl.getAttribute('href') || '').trim();
 				const cleanBeforeHash = href.split('#')[0].split('?')[0].toLowerCase();
 				if (cleanBeforeHash.endsWith('.pdf')) {
 					evt.preventDefault();
@@ -349,6 +352,10 @@ export class PresentationModal extends Component {
 					} else {
 						this.onLinkClickCallback?.(href);
 					}
+					return;
+				}
+				if (href && href !== '#' && !/^javascript:/i.test(href)) {
+					// Let native browser/Obsidian link navigation proceed without triggering media/table zoom underneath
 					return;
 				}
 			}
@@ -423,6 +430,58 @@ export class PresentationModal extends Component {
 		};
 		this.contentEl.addEventListener("mousemove", this.boundContentMouseMoveHandler);
 		this.contentEl.addEventListener("mouseleave", this.boundContentMouseLeaveHandler);
+	}
+
+	private isClickInsideMarkTextContent(
+		markEl: HTMLElement,
+		clientX: number,
+		clientY: number
+	): boolean {
+		const range = document.createRange();
+		range.selectNodeContents(markEl);
+		const rects = Array.from(range.getClientRects());
+		if (rects.length === 0) {
+			return true;
+		}
+		return rects.some(
+			(r) =>
+				r.width > 0 &&
+				r.height > 0 &&
+				clientX >= r.left &&
+				clientX <= r.right &&
+				clientY >= r.top &&
+				clientY <= r.bottom
+		);
+	}
+
+	/**
+	 * Decides whether a click on `<mark class="slideflow-comment-mark">` should open the comment
+	 * editor or let an associated link handle navigation:
+	 * - Normal non-link highlight -> always opens the comment.
+	 * - Full-link highlight (`<mark class="is-link-highlight"><a>text</a></mark>`):
+	 *   clicking the link text (`<a>` or descendant) opens the link; clicking the outer yellow
+	 *   contour (`<mark>` padding/border outside `<a>`) opens the comment.
+	 * - Partial-link highlight (`<a>...<mark class="is-partial-in-link">text</mark>...</a>`):
+	 *   clicking the text glyphs opens the link; clicking the yellow contour opens the comment.
+	 */
+	private shouldCommentMarkHandleClick(
+		target: HTMLElement,
+		commentMarkEl: HTMLElement,
+		evt: MouseEvent
+	): boolean {
+		const linkEl = target.closest(
+			"a[href], a.internal-link, .internal-link, .slideflow-child-heading-linked-title"
+		) as HTMLElement | null;
+		if (!linkEl) {
+			return true;
+		}
+		if (commentMarkEl.contains(linkEl)) {
+			return false;
+		}
+		if (linkEl.contains(commentMarkEl)) {
+			return !this.isClickInsideMarkTextContent(commentMarkEl, evt.clientX, evt.clientY);
+		}
+		return false;
 	}
 
 	private setHoveredBlock(nextBlock: HTMLElement | null): void {
@@ -1453,9 +1512,12 @@ export class PresentationModal extends Component {
 				if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
 					return;
 				}
-				const target = evt.target as HTMLElement;
+				const rawTarget = evt.target as Node | null;
+				const target =
+					rawTarget instanceof HTMLElement ? rawTarget : rawTarget?.parentElement ?? null;
+				if (!target) return;
 				const commentMarkEl = target.closest("mark.slideflow-comment-mark") as HTMLElement | null;
-				if (commentMarkEl) {
+				if (commentMarkEl && this.shouldCommentMarkHandleClick(target, commentMarkEl, evt)) {
 					const commentId = commentMarkEl.getAttribute("data-comment-id");
 					if (commentId) {
 						evt.preventDefault();

@@ -1559,6 +1559,49 @@ mark.slideflow-comment-mark.is-failed {
 	border-bottom-color: #dc2626 !important;
 }
 
+/* Highlighted links: visible clickable amber contour around the link text.
+   Clicking the link text opens the link; clicking the yellow contour opens the comment. */
+mark.slideflow-comment-mark.is-link-highlight,
+mark.slideflow-comment-mark.is-partial-in-link {
+	padding: 1px 6px;
+	border: 1.5px solid rgba(217, 119, 6, 0.7);
+	border-radius: 5px;
+	box-decoration-break: clone;
+	-webkit-box-decoration-break: clone;
+}
+
+mark.slideflow-comment-mark.is-link-highlight > a,
+mark.slideflow-comment-mark.is-link-highlight > .internal-link {
+	display: inline;
+	padding: 0;
+	margin: 0;
+	cursor: pointer;
+}
+
+mark.slideflow-comment-mark.is-link-highlight:hover:has(> a:hover):not(.is-hovered-from-rail),
+mark.slideflow-comment-mark.is-link-highlight:hover:has(> .internal-link:hover):not(.is-hovered-from-rail) {
+	background-color: rgba(250, 204, 21, 0.28) !important;
+	border-color: rgba(217, 119, 6, 0.68);
+	box-shadow: none;
+}
+
+.theme-dark mark.slideflow-comment-mark.is-link-highlight,
+.theme-dark mark.slideflow-comment-mark.is-partial-in-link {
+	border-color: rgba(251, 191, 36, 0.72);
+}
+
+.theme-dark mark.slideflow-comment-mark.is-link-highlight:hover:has(> a:hover):not(.is-hovered-from-rail),
+.theme-dark mark.slideflow-comment-mark.is-link-highlight:hover:has(> .internal-link:hover):not(.is-hovered-from-rail) {
+	background-color: rgba(250, 204, 21, 0.2) !important;
+	border-color: rgba(251, 191, 36, 0.72);
+	box-shadow: none;
+}
+
+mark.slideflow-comment-mark.is-link-highlight.is-failed,
+mark.slideflow-comment-mark.is-partial-in-link.is-failed {
+	border-color: #dc2626 !important;
+}
+
 .dynamic-slides-overlay {
 	--sf-diff-ins-bg: #dcfce7;
 	--sf-diff-ins-fg: #166534;
