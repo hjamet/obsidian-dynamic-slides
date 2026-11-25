@@ -27,6 +27,7 @@ export interface SlideFlowCliJob {
 	cli: string;
 	model: string;
 	status: "running" | "done" | "error";
+	backendMode?: "hub" | "cli";
 	startedAt: string;
 	finishedAt?: string | null;
 	exitCode?: number | null;
@@ -38,6 +39,7 @@ export interface SlideFlowCliJob {
 	conversationId?: string | null;
 	projectId?: string | null;
 	projectName?: string | null;
+	instanceId?: string | null;
 	liveInstanceId?: string | null;
 	liveStep?: string | null;
 }
@@ -128,9 +130,9 @@ export function pruneAndHealJobs(
 
 	for (const job of jobs) {
 		const copy: SlideFlowCliJob = { ...job };
-		if (copy.status === "running") {
+		if (copy.status === "running" && copy.backendMode !== "hub") {
 			if (copy.pid && !isPidAlive(copy.pid)) {
-				// Fail-Fast: PID vanished without receiving exit code 0 confirmation
+				// Fail-Fast: CLI child PID vanished without receiving exit code 0 confirmation
 				copy.status = "error";
 				copy.exitCode = copy.exitCode ?? -1;
 				copy.errorSummary =

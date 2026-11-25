@@ -53,13 +53,22 @@ import {
 import {
 	ActiveJobsTracker,
 	extractModelLabelFromCommand,
+	formatJobNotesLabel,
 	isPidAlive,
 } from "./activeJobsTracker";
 import {
 	AgyServerManager,
 	getDefaultAgyServerName,
+	listAvailableAgyProjects,
 	resolveAgyProjectInfo,
 } from "./agyServerManager";
+import {
+	AntigravityHubInfo,
+	createHubConversation,
+	getHubConversation,
+	monitorHubConversation,
+	readHubConversationLiveProgress,
+} from "./antigravityHubClient";
 import { AgySidebarView, SLIDEFLOW_AGY_VIEW_TYPE } from "./agySidebarView";
 import { QuotaTracker } from "./quotaTracker";
 
@@ -153,6 +162,7 @@ export default class SlideFlowPlugin extends Plugin {
 	private diffEnabled: boolean = false;
 	private pendingCommentContext: ExtractedCommentContext | null = null;
 	private liveOwnedJobIds: Set<string> = new Set();
+	private unloaded: boolean = false;
 	private activeLoadedMarkdown: string = "";
 	private activeVaultModifyRef: EventRef | null = null;
 	private liveReloadTimerId: number | null = null;
@@ -176,6 +186,7 @@ export default class SlideFlowPlugin extends Plugin {
 				cliCommandTemplate: this.settings.directCliCommand,
 				projectName: this.settings.agyProjectName,
 				serverName: this.settings.agyServerName,
+				autoStart: this.settings.agyServerAutoStart,
 			})
 		);
 
@@ -217,7 +228,9 @@ export default class SlideFlowPlugin extends Plugin {
 					onStopServer: () => this.agyServer.stop(),
 					onRestartServer: () => this.agyServer.restart(),
 					onRefreshAll: async () => {
+						await this.agyServer.ensureConnected();
 						await this.reviewStore.loadFromDisk();
+						await this.activeJobsTracker.refreshAndSync();
 						await this.reconcileOrphanWipBatches();
 						await this.activeJobsTracker.refreshAndSync();
 						void this.quotaTracker.refresh();
@@ -241,16 +254,19 @@ export default class SlideFlowPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			void this.activateAgySidebarView(false);
 			if (this.settings.agyServerAutoStart) {
-				this.agyServer.start();
+				void this.agyServer.start();
+			} else if (this.settings.directCliEnabled) {
+				void this.agyServer.getLiveHub();
 			}
 			void this.quotaTracker.refresh();
 			void this.reviewStore
 				.loadFromDisk()
+				.then(() => this.activeJobsTracker.stripLegacyDashboardBlock())
+				.then(() => this.activeJobsTracker.refreshAndSync())
 				.then(() => this.reconcileOrphanWipBatches())
 				.then(() => {
 					pruneStaleTempImages(this.reviewStore.getAllReferencedImagePaths());
 				})
-				.then(() => this.activeJobsTracker.stripLegacyDashboardBlock())
 				.then(() => this.activeJobsTracker.refreshAndSync())
 				.then(() => this.refreshAgySidebarViews())
 				.catch((err) => console.error("[SlideFlow] Startup reconcile failed:", err));
@@ -314,6 +330,7 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.unloaded = true;
 		this.closePresentation();
 		this.voiceService?.shutdownNow();
 		this.agyServer?.stop();
@@ -1091,16 +1108,75 @@ export default class SlideFlowPlugin extends Plugin {
 		const batches = this.reviewStore.getWipBatches();
 		if (batches.length === 0) return 0;
 
+		const trackedJobs = this.activeJobsTracker.getCachedJobs();
+		const jobsById = new Map(trackedJobs.map((j) => [j.id, j]));
+
 		let totalRestored = 0;
+		let totalCompleted = 0;
 		const nowMs = Date.now();
 
 		for (const batch of batches) {
-			// If spawned by this live Obsidian session, let child.on("close") handle its exit code
+			// If actively monitored by this live Obsidian session, let its monitor handle completion
 			if (this.liveOwnedJobIds.has(batch.jobId)) {
 				continue;
 			}
 
-			// If the process is still alive in the OS (e.g. survived an Obsidian reload), keep it in WIP
+			const tracked = jobsById.get(batch.jobId);
+			if (tracked?.backendMode === "hub" && tracked.conversationId) {
+				const liveHub = await this.agyServer.getLiveHub();
+				if (liveHub) {
+					try {
+						const conv = await getHubConversation(liveHub, tracked.conversationId);
+						if (conv && (conv.runState === "RUN_STATE_RUNNING" || conv.runState === "RUN_STATE_CANCELLING")) {
+							// Survived Obsidian reload cleanly — re-attach live monitor!
+							this.attachHubJobMonitor(
+								batch.jobId,
+								tracked.conversationId,
+								tracked.projectId || "",
+								liveHub
+							);
+							continue;
+						}
+						if (conv && conv.runState === "RUN_STATE_IDLE") {
+							const prog = readHubConversationLiveProgress(tracked.conversationId);
+							if (prog.terminalState === "canceled" || prog.terminalState === "error") {
+								const reason = prog.errorDetail || "Conversation interrompue dans Antigravity";
+								const restoredCount = await this.reviewStore.restoreWipBatchAsFailed(batch.jobId, reason);
+								await this.activeJobsTracker.completeJob(batch.jobId, 1, reason, {
+									conversationId: tracked.conversationId,
+									projectId: conv.projectId || tracked.projectId || undefined,
+									instanceId: liveHub.instanceId || tracked.instanceId || undefined,
+								});
+								totalRestored += restoredCount;
+							} else {
+								const purged = await this.reviewStore.purgeWipBatch(batch.jobId);
+								await this.activeJobsTracker.completeJob(batch.jobId, 0, null, {
+									conversationId: tracked.conversationId,
+									projectId: conv.projectId || tracked.projectId || undefined,
+									instanceId: liveHub.instanceId || tracked.instanceId || undefined,
+								});
+								totalCompleted += purged;
+							}
+							continue;
+						}
+					} catch {
+						// Hub briefly unreachable — give a grace window before marking failed
+						const ageMs = nowMs - new Date(batch.startedAt).getTime();
+						if (ageMs < 30_000) continue;
+					}
+				} else {
+					const ageMs = nowMs - new Date(batch.startedAt).getTime();
+					if (ageMs < 30_000) continue;
+				}
+
+				const reason = "Conversation Antigravity Hub interrompue ou introuvable après rechargement";
+				const restoredCount = await this.reviewStore.restoreWipBatchAsFailed(batch.jobId, reason);
+				await this.activeJobsTracker.completeJob(batch.jobId, -1, reason);
+				totalRestored += restoredCount;
+				continue;
+			}
+
+			// CLI process path: if the process is still alive in the OS (e.g. survived an Obsidian reload), keep it in WIP
 			if (batch.pid && isPidAlive(batch.pid)) {
 				continue;
 			}
@@ -1117,6 +1193,11 @@ export default class SlideFlowPlugin extends Plugin {
 			const restoredCount = await this.reviewStore.restoreWipBatchAsFailed(batch.jobId, reason);
 			await this.activeJobsTracker.completeJob(batch.jobId, -1, reason);
 			totalRestored += restoredCount;
+		}
+
+		if (totalCompleted > 0) {
+			void this.quotaTracker.refresh();
+			this.refreshAllActiveUI();
 		}
 
 		if (totalRestored > 0) {
@@ -2122,6 +2203,83 @@ export default class SlideFlowPlugin extends Plugin {
 		}
 	}
 
+	private attachHubJobMonitor(
+		jobId: string,
+		conversationId: string,
+		expectedProjectId: string,
+		initialHub: AntigravityHubInfo
+	): void {
+		if (this.liveOwnedJobIds.has(jobId)) return;
+		this.liveOwnedJobIds.add(jobId);
+
+		void monitorHubConversation({
+			conversationId,
+			expectedProjectId,
+			initialHub,
+			isStopped: () => this.unloaded,
+			onStepUpdate: (liveStep) => {
+				if (this.unloaded) return;
+				void this.activeJobsTracker.updateJobMetadata(jobId, { liveStep }, false);
+			},
+			onHubUpdated: (updatedHub) => {
+				if (this.unloaded) return;
+				void this.activeJobsTracker.updateJobMetadata(
+					jobId,
+					{
+						pid: updatedHub.pid,
+						instanceId: updatedHub.instanceId || undefined,
+					},
+					true
+				);
+			},
+		})
+			.then(async (res) => {
+				this.liveOwnedJobIds.delete(jobId);
+				if (res.aborted || this.unloaded) {
+					return;
+				}
+				const finalMeta = {
+					conversationId: res.conversationId,
+					projectId: res.projectId || expectedProjectId || undefined,
+					instanceId: res.instanceId || initialHub.instanceId || undefined,
+				};
+
+				if (res.exitCode === 0) {
+					const purged = await this.reviewStore.purgeWipBatch(jobId);
+					await this.activeJobsTracker.completeJob(jobId, 0, null, finalMeta);
+					void this.quotaTracker.refresh();
+					this.refreshAllActiveUI();
+					new Notice(
+						`Antigravity Hub finished — ${purged} comment(s) completed & purged.`,
+						6000
+					);
+				} else {
+					const reason = res.streamError || `Antigravity Hub exit ${res.exitCode}`;
+					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, reason);
+					await this.activeJobsTracker.completeJob(jobId, res.exitCode, reason, finalMeta);
+					void this.quotaTracker.refresh();
+					this.refreshAllActiveUI();
+					new Notice(
+						`SlideFlow: Antigravity Hub failed (${reason}). ${restored} comment(s) restored for retry.`,
+						10000
+					);
+				}
+			})
+			.catch(async (err: any) => {
+				this.liveOwnedJobIds.delete(jobId);
+				const errMsg = err?.message || String(err);
+				const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
+				await this.activeJobsTracker.completeJob(jobId, -1, errMsg);
+				void this.quotaTracker.refresh();
+				this.refreshAllActiveUI();
+				console.error("[SlideFlow Hub] Monitor failed:", err);
+				new Notice(
+					`SlideFlow Hub error: ${errMsg}. ${restored} comment(s) restored for retry.`,
+					10000
+				);
+			});
+	}
+
 	private async launchCliSessionBatches(sessions: CliSessionBatch[]): Promise<boolean> {
 		if (sessions.length === 0) {
 			return false;
@@ -2143,15 +2301,37 @@ export default class SlideFlowPlugin extends Plugin {
 			return false;
 		}
 
+		const isAgy = cliDisplayName.toLowerCase() === "agy";
 		const jobsDir = this.activeJobsTracker.ensureJobsLogDir();
 		const modelLabel = extractModelLabelFromCommand(this.settings.directCliCommand);
 		const cwd = this.reviewStore.getVaultBasePath();
 		const configuredProject = (this.settings.agyProjectName || "Obsidian").trim();
-		const resolvedProj = resolveAgyProjectInfo(configuredProject);
+		const resolvedProj = resolveAgyProjectInfo(configuredProject, cwd);
+
+		// Fail-Fast project guard: NEVER silently launch an AGY conversation into default-cli-project or outside-of-project
+		if (isAgy && !resolvedProj.id) {
+			const available = listAvailableAgyProjects()
+				.map((p) => p.name)
+				.slice(0, 8)
+				.join(", ");
+			new Notice(
+				`SlideFlow : projet Antigravity « ${configuredProject} » introuvable dans ~/.gemini/config/projects/${available ? ` (disponibles : ${available})` : ""}. Annulation pour éviter tout lancement hors projet.`,
+				12000
+			);
+			return false;
+		}
+
+		// Primary path: launch directly into the running Antigravity Desktop App Hub (unified project & single Remote Control!)
+		const liveHub = isAgy ? await this.agyServer.getLiveHub() : null;
+		if (isAgy && !liveHub && this.settings.agyServerAutoStart) {
+			void this.agyServer.ensureConnected();
+		}
+
 		const baseTs = Date.now();
 		let totalSentComments = 0;
 		let launchedSessions = 0;
 		let retrySessions = 0;
+		let hubSessions = 0;
 
 		for (let idx = 0; idx < sessions.length; idx++) {
 			const session = sessions[idx];
@@ -2166,7 +2346,7 @@ export default class SlideFlowPlugin extends Plugin {
 			// Immediately move this session's comments into its own isolated WIP batch
 			const moved = await this.reviewStore.moveCommentsToWip(sentIds, {
 				jobId,
-				cli: cliDisplayName,
+				cli: liveHub ? "Antigravity Hub" : cliDisplayName,
 				model: modelLabel,
 				startedAt,
 			});
@@ -2178,17 +2358,92 @@ export default class SlideFlowPlugin extends Plugin {
 				void this.activeJobsTracker.removeJob(oldFailedBatchId);
 			}
 
+			if (isAgy && liveHub) {
+				const hubPrompt =
+					templateIncludesOneShot(this.settings.directCliCommand) &&
+					!formatted.trimStart().startsWith("/one-shot")
+						? `/one-shot\n\n${formatted}`
+						: formatted;
+				const convTitle = `SlideFlow · ${formatJobNotesLabel(noteTitles)}`;
+
+				try {
+					const created = await createHubConversation(liveHub, {
+						projectId: resolvedProj.id,
+						title: convTitle,
+						model: modelLabel || null,
+						prompt: hubPrompt,
+						tags: ["slideflow"],
+					});
+
+					totalSentComments += moved.length;
+					launchedSessions += 1;
+					hubSessions += 1;
+					if (session.kind === "retry") retrySessions += 1;
+
+					await this.reviewStore.setWipBatchPid(jobId, created.hubPid);
+					await this.activeJobsTracker.registerJob({
+						id: jobId,
+						pid: created.hubPid,
+						cli: "Antigravity Hub",
+						model: modelLabel,
+						status: "running",
+						backendMode: "hub",
+						startedAt,
+						commentCount: moved.length,
+						notes: noteTitles,
+						projectName: resolvedProj.name || configuredProject,
+						projectId: created.projectId,
+						conversationId: created.conversationId,
+						instanceId: created.instanceId,
+						liveStep: `🚀 Démarré dans ${resolvedProj.name || configuredProject}`,
+					});
+
+					this.attachHubJobMonitor(jobId, created.conversationId, created.projectId, liveHub);
+					continue;
+				} catch (err: any) {
+					const errMsg = err?.message || String(err);
+					console.error("[SlideFlow Hub] CreateConversation failed:", err);
+					const restored = await this.reviewStore.restoreWipBatchAsFailed(jobId, errMsg);
+					await this.activeJobsTracker.registerJob({
+						id: jobId,
+						pid: liveHub.pid,
+						cli: "Antigravity Hub",
+						model: modelLabel,
+						status: "error",
+						backendMode: "hub",
+						startedAt,
+						finishedAt: new Date().toISOString(),
+						exitCode: -1,
+						errorSummary: errMsg,
+						commentCount: moved.length,
+						notes: noteTitles,
+						projectName: resolvedProj.name || configuredProject,
+						projectId: resolvedProj.id,
+						instanceId: liveHub.instanceId,
+						liveStep: null,
+					});
+					new Notice(
+						`SlideFlow Hub error: ${errMsg}. ${restored} comment(s) restored for retry.`,
+						10000
+					);
+					continue;
+				}
+			}
+
+			// Fallback CLI path (when Antigravity Desktop App is closed, or non-agy CLI configured)
 			totalSentComments += moved.length;
 			launchedSessions += 1;
 			if (session.kind === "retry") retrySessions += 1;
 			this.liveOwnedJobIds.add(jobId);
 
+			const fallbackInstanceId = this.agyServer.getSnapshot().instanceId;
 			void this.activeJobsTracker.registerJob({
 				id: jobId,
 				pid: null,
 				cli: cliDisplayName,
 				model: modelLabel,
 				status: "running",
+				backendMode: "cli",
 				startedAt,
 				commentCount: moved.length,
 				notes: noteTitles,
@@ -2196,6 +2451,7 @@ export default class SlideFlowPlugin extends Plugin {
 				agyLogPath: path.join(jobsDir, `${jobId}.agy.log`),
 				projectName: resolvedProj.name || configuredProject || null,
 				projectId: resolvedProj.id || null,
+				instanceId: fallbackInstanceId,
 				liveStep: "⏳ Démarrage…",
 			});
 
@@ -2203,7 +2459,7 @@ export default class SlideFlowPlugin extends Plugin {
 				cwd,
 				jobsDir,
 				jobId,
-				projectName: configuredProject,
+				projectName: resolvedProj.id || configuredProject,
 				disablePerTaskRemoteControl:
 					this.settings.agyServerAutoStart || this.agyServer.getSnapshot().status !== "stopped",
 				onSpawn: (pid) => {
@@ -2229,6 +2485,7 @@ export default class SlideFlowPlugin extends Plugin {
 					const finalMeta = {
 						conversationId: res.conversationId || undefined,
 						projectId: res.projectId || resolvedProj.id || undefined,
+						instanceId: this.agyServer.getSnapshot().instanceId || fallbackInstanceId || undefined,
 						liveInstanceId: res.liveInstanceId || undefined,
 						agyLogPath: res.agyLogPath || undefined,
 					};
@@ -2285,15 +2542,16 @@ export default class SlideFlowPlugin extends Plugin {
 			return false;
 		}
 
+		const targetLabel = hubSessions > 0 ? "Antigravity Hub" : cliDisplayName;
 		if (launchedSessions === 1) {
 			new Notice(
-				`Sent ${totalSentComments} comment(s) to ${cliDisplayName} (${resolvedProj.name || configuredProject}) — queue is now clear.`,
+				`Sent ${totalSentComments} comment(s) to ${targetLabel} (${resolvedProj.name || configuredProject}) — queue is now clear.`,
 				5000
 			);
 		} else {
 			const retryInfo = retrySessions > 0 ? ` (${retrySessions} retry + ${launchedSessions - retrySessions} new)` : "";
 			new Notice(
-				`Launched ${launchedSessions} separate ${cliDisplayName} sessions${retryInfo} for ${totalSentComments} comment(s) — queue is now clear.`,
+				`Launched ${launchedSessions} separate ${targetLabel} sessions${retryInfo} for ${totalSentComments} comment(s) — queue is now clear.`,
 				6500
 			);
 		}
@@ -2907,7 +3165,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("CLI command template")
 			.setDesc(
-				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected directly as an argument (no shell escaping issues). For `agy`, `--project`, `--output-format stream-json`, and `--log-file` are injected automatically, while per-task `--remote-control` flags are omitted when SlideFlow's persistent AGY server is enabled so every conversation shares one instance."
+				"Terminal command with {{COMMENTS}} marking where the XML /one-shot payload is injected. For `agy`, SlideFlow routes directly through the running Antigravity Desktop Hub (native project & single Remote Control, honoring `--model` and `/one-shot`), falling back to `agy` CLI (`--project <id>`, `--output-format stream-json`, `--log-file`) only when Antigravity Desktop is closed."
 			)
 			.addTextArea(text => {
 				text
@@ -2924,7 +3182,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("AGY Project (name or ID)")
 			.setDesc(
-				"Antigravity project used for all SlideFlow `agy` runs and the AGY sidebar (resolved by name across PCs, default: Obsidian)."
+				"Antigravity project required for all SlideFlow `agy` runs and the AGY sidebar (resolved by ID, name, or vault folder across PCs; default: Obsidian). Fail-Fast: refuses to launch if this project cannot be resolved."
 			)
 			.addText(text =>
 				text
@@ -2940,7 +3198,7 @@ export class SlideFlowSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Auto-start AGY Remote Control server with Obsidian")
 			.setDesc(
-				"Runs `agy remote-control serve` tied to Obsidian's lifecycle (starts on load, stops on close/restart) so finished conversations remain accessible in one permanent web instance."
+				"Automatically attaches to the running Antigravity Desktop Hub (unified Remote Control) when open, and falls back to an auto-reconnecting `agy remote-control serve` daemon only when Antigravity Desktop is closed."
 			)
 			.addToggle(toggle =>
 				toggle

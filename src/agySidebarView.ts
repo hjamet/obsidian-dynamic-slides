@@ -294,6 +294,7 @@ export class AgySidebarView extends ItemView {
 
 	private renderServerCard(container: HTMLElement, snap: AgyServerSnapshot): void {
 		const card = container.createDiv({ cls: "sf-agy-card sf-agy-server-card" });
+		const isHubMode = snap.backendMode === "hub";
 
 		const topRow = card.createDiv({ cls: "sf-agy-server-top" });
 		const statusWrap = topRow.createDiv({ cls: "sf-agy-server-status" });
@@ -301,16 +302,25 @@ export class AgySidebarView extends ItemView {
 		dot.setAttr("aria-hidden", "true");
 
 		let statusText = "Arrêté";
-		if (snap.status === "connected") statusText = "Serveur AGY en ligne";
-		else if (snap.status === "starting") statusText = snap.statusDetail || "Connexion AGY…";
-		else if (snap.status === "error") statusText = "Erreur serveur AGY";
+		if (snap.status === "connected") {
+			statusText = isHubMode
+				? snap.statusDetail || "Antigravity Hub connecté"
+				: "Serveur AGY en ligne";
+		} else if (snap.status === "starting") {
+			statusText = snap.statusDetail || "Connexion AGY…";
+		} else if (snap.status === "error") {
+			statusText = "Erreur serveur AGY";
+		}
 		statusWrap.createSpan({ cls: "sf-agy-server-title", text: statusText });
 
 		const controls = topRow.createDiv({ cls: "sf-agy-icon-group" });
 
 		const refreshBtn = controls.createEl("button", {
 			cls: "sf-agy-icon-btn",
-			attr: { title: "Actualiser les jobs", "aria-label": "Actualiser" },
+			attr: {
+				title: "Actualiser connexion, jobs et quotas",
+				"aria-label": "Actualiser",
+			},
 		});
 		setIcon(refreshBtn, "refresh-cw");
 		refreshBtn.addEventListener("click", () => {
@@ -319,32 +329,39 @@ export class AgySidebarView extends ItemView {
 
 		const restartBtn = controls.createEl("button", {
 			cls: "sf-agy-icon-btn",
-			attr: { title: "Redémarrer le serveur AGY", "aria-label": "Redémarrer" },
+			attr: {
+				title: isHubMode
+					? "Reconnecter au Hub Antigravity"
+					: "Redémarrer le serveur AGY",
+				"aria-label": "Redémarrer",
+			},
 		});
 		setIcon(restartBtn, "rotate-cw");
 		restartBtn.addEventListener("click", () => {
 			void this.callbacks.onRestartServer();
 		});
 
-		const toggleBtn = controls.createEl("button", {
-			cls: "sf-agy-icon-btn",
-			attr: {
-				title:
-					snap.status === "stopped" || snap.status === "error"
-						? "Démarrer le serveur AGY"
-						: "Arrêter le serveur AGY",
-				"aria-label":
-					snap.status === "stopped" || snap.status === "error" ? "Démarrer" : "Arrêter",
-			},
-		});
-		setIcon(toggleBtn, snap.status === "stopped" || snap.status === "error" ? "play" : "square");
-		toggleBtn.addEventListener("click", () => {
-			if (snap.status === "stopped" || snap.status === "error") {
-				this.callbacks.onStartServer();
-			} else {
-				this.callbacks.onStopServer();
-			}
-		});
+		if (!isHubMode) {
+			const toggleBtn = controls.createEl("button", {
+				cls: "sf-agy-icon-btn",
+				attr: {
+					title:
+						snap.status === "stopped" || snap.status === "error"
+							? "Démarrer le serveur AGY"
+							: "Arrêter le serveur AGY",
+					"aria-label":
+						snap.status === "stopped" || snap.status === "error" ? "Démarrer" : "Arrêter",
+				},
+			});
+			setIcon(toggleBtn, snap.status === "stopped" || snap.status === "error" ? "play" : "square");
+			toggleBtn.addEventListener("click", () => {
+				if (snap.status === "stopped" || snap.status === "error") {
+					this.callbacks.onStartServer();
+				} else {
+					this.callbacks.onStopServer();
+				}
+			});
+		}
 
 		const metaRow = card.createDiv({ cls: "sf-agy-meta-row" });
 		metaRow.createSpan({ cls: "sf-agy-pill", text: snap.hostname });
@@ -352,7 +369,10 @@ export class AgySidebarView extends ItemView {
 			metaRow.createSpan({ cls: "sf-agy-pill is-project", text: `Projet : ${snap.projectName}` });
 		}
 		if (snap.pid) {
-			metaRow.createSpan({ cls: "sf-agy-meta-muted", text: `PID ${snap.pid}` });
+			metaRow.createSpan({
+				cls: "sf-agy-meta-muted",
+				text: isHubMode ? `Hub · PID ${snap.pid}` : `PID ${snap.pid}`,
+			});
 		}
 
 		if (snap.lastError) {
@@ -368,18 +388,26 @@ export class AgySidebarView extends ItemView {
 		openBtn.prepend(btnIcon);
 		setIcon(btnIcon, "globe");
 
-		if (snap.status !== "connected" || !homeUrl) {
+		const webRemoteReady =
+			snap.status === "connected" && Boolean(homeUrl) && (!isHubMode || snap.remoteControlEnabled);
+
+		if (!webRemoteReady) {
 			openBtn.disabled = true;
-			if (snap.status === "starting") {
+			if (isHubMode && snap.status === "connected" && !snap.remoteControlEnabled) {
+				openBtn.setAttr(
+					"title",
+					"Activez Remote Control dans les paramètres d'Antigravity pour ouvrir dans le navigateur (les conversations locales fonctionnent déjà)."
+				);
+			} else if (snap.status === "starting") {
 				openBtn.setAttr("title", snap.statusDetail || "Connexion du serveur AGY en cours…");
 			} else if (snap.status === "error") {
-				openBtn.setAttr("title", "Serveur AGY en erreur — démarrez ou redémarrez le serveur.");
+				openBtn.setAttr("title", "Serveur AGY en erreur — cliquez sur Actualiser ou Redémarrer.");
 			} else if (snap.status === "stopped") {
-				openBtn.setAttr("title", "Démarrez le serveur AGY pour ouvrir l'interface web.");
+				openBtn.setAttr("title", "Démarrez Antigravity ou le serveur AGY pour ouvrir l'interface web.");
 			} else {
 				openBtn.setAttr("title", "En attente de l'identifiant d'instance du serveur…");
 			}
-		} else {
+		} else if (homeUrl) {
 			openBtn.setAttr("title", homeUrl);
 			openBtn.addEventListener("click", () => openExternalUrl(homeUrl));
 		}
@@ -423,14 +451,17 @@ export class AgySidebarView extends ItemView {
 
 			const actions = card.createDiv({ cls: "sf-agy-actions-row" });
 
-			// Always open running conversations inside the single persistent Obsidian AGY server
-			// so all SlideFlow conversations live in one place (never ephemeral per-task instances).
-			const isServerReady = serverSnap.status === "connected";
+			// Open running conversation on the exact unified Remote Control instance (Antigravity Hub
+			// when launched via Hub, or persistent Obsidian CLI server in fallback mode).
+			const targetInstanceId = job.instanceId || serverSnap.instanceId;
+			const isServerReady =
+				serverSnap.status === "connected" &&
+				(serverSnap.backendMode !== "hub" || serverSnap.remoteControlEnabled);
 			const serverUrl = isServerReady
 				? this.callbacks.getConversationUrl(
 						job.conversationId,
 						job.projectId,
-						serverSnap.instanceId
+						targetInstanceId
 					)
 				: null;
 			const openBtn = actions.createEl("button", {
@@ -535,13 +566,15 @@ export class AgySidebarView extends ItemView {
 					});
 			});
 
-			// Open partial conversation on the persistent server if a conversationId was created
+			// Open partial conversation on its target Remote Control instance if a conversationId exists
 			const convId = linkedJob?.conversationId || null;
-			const isServerReady = serverSnap.status === "connected";
+			const isServerReady =
+				serverSnap.status === "connected" &&
+				(serverSnap.backendMode !== "hub" || serverSnap.remoteControlEnabled);
 			const openUrl = this.callbacks.getConversationUrl(
 				convId,
 				linkedJob?.projectId,
-				serverSnap.instanceId
+				linkedJob?.instanceId || serverSnap.instanceId
 			);
 			if (convId) {
 				const openBtn = actions.createEl("button", {
@@ -681,12 +714,14 @@ export class AgySidebarView extends ItemView {
 
 			const actions = card.createDiv({ cls: "sf-agy-actions-row" });
 
-			// Always open finished/errored conversations on the persistent Obsidian server!
-			const isServerReady = serverSnap.status === "connected";
+			// Open finished/errored conversation on its owning instance (Antigravity Hub or CLI server)
+			const isServerReady =
+				serverSnap.status === "connected" &&
+				(serverSnap.backendMode !== "hub" || serverSnap.remoteControlEnabled);
 			const permanentUrl = this.callbacks.getConversationUrl(
 				job.conversationId,
 				job.projectId,
-				serverSnap.instanceId
+				job.instanceId || serverSnap.instanceId
 			);
 			const openBtn = actions.createEl("button", {
 				cls: "sf-agy-btn",
