@@ -974,7 +974,7 @@ export default class SlideFlowPlugin extends Plugin {
 			return newFlatNodes.length > 1 ? newFlatNodes[1] : newFlatNodes[0];
 		}
 		if (prevNode.level === 0) {
-			return newFlatNodes.length > 1 ? newFlatNodes[1] : newFlatNodes[0];
+			return newFlatNodes[0];
 		}
 		const prevNorm = normalizeTitle(prevNode.title);
 		const exactMatch = newFlatNodes.find(

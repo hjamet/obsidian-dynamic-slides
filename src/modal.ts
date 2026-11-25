@@ -117,6 +117,7 @@ export class PresentationModal extends Component {
 
 	private mediaElements: HTMLElement[] = [];
 	private activeZoomIndex: number = -1;
+	private isFullDocumentMode: boolean = false;
 	private zoomOverlayEl: HTMLElement | null = null;
 	private zoomContentEl: HTMLElement | null = null;
 	private zoomSlideComponent: Component | null = null;
@@ -2071,6 +2072,20 @@ export class PresentationModal extends Component {
 			return true;
 		}
 
+		if (this.isFullDocumentMode) {
+			if (this.isMediaZoomActive()) {
+				this.closeMediaZoom(true);
+				this.activeZoomIndex = -1;
+				return true;
+			}
+			if (!wasAnimating && this.canScrollDown()) {
+				this.scrollDown();
+				return true;
+			}
+			this.hasCompletedAllSteps = true;
+			return false;
+		}
+
 		const mediaElements = this.detectMediaElements();
 		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
 
@@ -2158,6 +2173,19 @@ export class PresentationModal extends Component {
 			// Link-opened zoom (e.g. clicked local PDF link): close cleanly and stay on slide
 			this.closeMediaZoom(true);
 			return true;
+		}
+
+		if (this.isFullDocumentMode) {
+			if (this.isMediaZoomActive()) {
+				this.closeMediaZoom(true);
+				this.activeZoomIndex = -1;
+				return true;
+			}
+			if (!wasAnimating && this.canScrollUp()) {
+				this.scrollUp();
+				return true;
+			}
+			return false;
 		}
 
 		const mediaElements = this.detectMediaElements();
@@ -2256,6 +2284,7 @@ export class PresentationModal extends Component {
 		if (this.contentEl) {
 			this.contentEl.scrollTop = 0;
 			this.contentEl.removeClass("is-only-zoomable-slide");
+			this.contentEl.removeClass("is-full-document-slide");
 			this.contentEl.style.removeProperty("opacity");
 		}
 
@@ -2283,8 +2312,12 @@ export class PresentationModal extends Component {
 			this
 		);
 
+		const isFullDocument = node.level === 0;
+		this.isFullDocumentMode = isFullDocument;
+		this.contentEl.toggleClass("is-full-document-slide", isFullDocument);
+
 		const mediaElements = this.detectMediaElements();
-		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
+		const isOnlyZoomable = !isFullDocument && this.checkOnlyZoomableContent() && mediaElements.length > 0;
 		if (isOnlyZoomable) {
 			this.contentEl.addClass("is-only-zoomable-slide");
 		} else {
@@ -2292,7 +2325,7 @@ export class PresentationModal extends Component {
 		}
 
 		if (enterFrom === 'end') {
-			if (mediaElements.length > 0) {
+			if (!isFullDocument && mediaElements.length > 0) {
 				this.activeZoomIndex = mediaElements.length - 1;
 				this.openMediaZoom(this.activeZoomIndex, false);
 			} else if (this.canScrollDown() || this.contentEl.scrollHeight > this.contentEl.clientHeight) {
@@ -2353,8 +2386,12 @@ export class PresentationModal extends Component {
 			this
 		);
 
+		const isFullDocument = node.level === 0;
+		this.isFullDocumentMode = isFullDocument;
+		this.contentEl.toggleClass("is-full-document-slide", isFullDocument);
+
 		const mediaElements = this.detectMediaElements();
-		const isOnlyZoomable = this.checkOnlyZoomableContent() && mediaElements.length > 0;
+		const isOnlyZoomable = !isFullDocument && this.checkOnlyZoomableContent() && mediaElements.length > 0;
 		this.contentEl.toggleClass("is-only-zoomable-slide", isOnlyZoomable);
 
 		if (this.contentEl) {
