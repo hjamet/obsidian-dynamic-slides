@@ -152,6 +152,263 @@ export function enhanceIframeElements(containerEl: HTMLElement) {
 	});
 }
 
+interface ExtractedDetailsBlock {
+	isOpen: boolean;
+	summaryMd: string;
+	bodyMd: string;
+}
+
+/**
+ * Extracts balanced HTML `<details>...</details>` blocks outside fenced code blocks
+ * so Obsidian's CommonMark parser never splits them at inner blank lines (which would
+ * otherwise render an empty `<details>` followed by orphaned content outside).
+ */
+export function extractDetailsBlocks(markdown: string): {
+	transformed: string;
+	blocks: ExtractedDetailsBlock[];
+} {
+	const normalized = markdown.replace(/\r\n/g, "\n");
+	if (!/<details(?:\s[^>]*)?>/i.test(normalized)) {
+		return { transformed: normalized, blocks: [] };
+	}
+
+	const lines = normalized.split("\n");
+	const outLines: string[] = [];
+	const blocks: ExtractedDetailsBlock[] = [];
+
+	let openFenceChar: string | null = null;
+	let openFenceLen = 0;
+
+	let i = 0;
+	while (i < lines.length) {
+		const line = lines[i];
+
+		const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+		if (fenceMatch) {
+			const marker = fenceMatch[1];
+			const ch = marker[0];
+			if (!openFenceChar) {
+				if (!(ch === "`" && fenceMatch[2].includes("`"))) {
+					openFenceChar = ch;
+					openFenceLen = marker.length;
+				}
+			} else if (
+				ch === openFenceChar &&
+				marker.length >= openFenceLen &&
+				/^\s{0,3}(?:`{3,}|~{3,})\s*$/.test(line)
+			) {
+				openFenceChar = null;
+				openFenceLen = 0;
+			}
+			outLines.push(line);
+			i++;
+			continue;
+		}
+
+		if (openFenceChar) {
+			outLines.push(line);
+			i++;
+			continue;
+		}
+
+		const openTagMatch = line.match(/^\s*<details(\s[^>]*)?>/i);
+		if (!openTagMatch) {
+			outLines.push(line);
+			i++;
+			continue;
+		}
+
+		// Collect lines until balanced `</details>` (ignoring any tags inside nested code fences)
+		const attrs = openTagMatch[1] || "";
+		const isOpen = /\bopen\b/i.test(attrs);
+		const blockLines: string[] = [];
+		let depth = 0;
+		let innerFenceChar: string | null = null;
+		let innerFenceLen = 0;
+		let closed = false;
+		let trailingAfterClose = "";
+
+		let j = i;
+		while (j < lines.length) {
+			const curLine = lines[j];
+			const innerFenceMatch = curLine.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+			if (innerFenceMatch) {
+				const marker = innerFenceMatch[1];
+				const ch = marker[0];
+				if (!innerFenceChar) {
+					if (!(ch === "`" && innerFenceMatch[2].includes("`"))) {
+						innerFenceChar = ch;
+						innerFenceLen = marker.length;
+					}
+				} else if (
+					ch === innerFenceChar &&
+					marker.length >= innerFenceLen &&
+					/^\s{0,3}(?:`{3,}|~{3,})\s*$/.test(curLine)
+				) {
+					innerFenceChar = null;
+					innerFenceLen = 0;
+				}
+				blockLines.push(curLine);
+				j++;
+				continue;
+			}
+
+			if (innerFenceChar) {
+				blockLines.push(curLine);
+				j++;
+				continue;
+			}
+
+			// Scan `<details...>` and `</details>` tags on this line in document order
+			const tagRe = /<(\/?)details(?:\s[^>]*)?>/gi;
+			let m: RegExpExecArray | null;
+			let closeEndOffset = -1;
+			while ((m = tagRe.exec(curLine)) !== null) {
+				if (m[1] === "/") {
+					depth--;
+					if (depth === 0) {
+						closeEndOffset = m.index + m[0].length;
+						break;
+					}
+				} else {
+					depth++;
+				}
+			}
+
+			if (closeEndOffset !== -1) {
+				blockLines.push(curLine.slice(0, closeEndOffset));
+				trailingAfterClose = curLine.slice(closeEndOffset);
+				closed = true;
+				j++;
+				break;
+			}
+
+			blockLines.push(curLine);
+			j++;
+		}
+
+		if (!closed) {
+			// Unclosed `<details>`: leave untouched so we never swallow the rest of the document
+			outLines.push(line);
+			i++;
+			continue;
+		}
+
+		const fullHtml = blockLines.join("\n").trim();
+		const innerRaw = fullHtml
+			.replace(/^<details(?:\s[^>]*)?>/i, "")
+			.replace(/<\/details>\s*$/i, "");
+
+		let summaryMd = "Details";
+		let bodyMd = innerRaw.trim();
+		const summaryMatch = innerRaw.match(/^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary>/i);
+		if (summaryMatch) {
+			summaryMd = summaryMatch[1].trim() || "Details";
+			bodyMd = innerRaw.slice(summaryMatch[0].length).trim();
+		}
+
+		const idx = blocks.length;
+		blocks.push({ isOpen, summaryMd, bodyMd });
+		outLines.push("");
+		outLines.push(`<div class="slideflow-details-placeholder" data-sf-details-idx="${idx}"></div>`);
+		if (trailingAfterClose.trim().length > 0) {
+			outLines.push(trailingAfterClose);
+		}
+		outLines.push("");
+		i = j;
+	}
+
+	return { transformed: outLines.join("\n"), blocks };
+}
+
+async function renderMarkdownWithDetails(
+	app: App,
+	markdown: string,
+	containerEl: HTMLElement,
+	sourcePath: string,
+	slideComponent: Component
+): Promise<void> {
+	const { transformed, blocks } = extractDetailsBlocks(markdown);
+	await MarkdownRenderer.render(app, transformed, containerEl, sourcePath, slideComponent);
+
+	if (blocks.length === 0) return;
+
+	const placeholders = Array.from(
+		containerEl.querySelectorAll<HTMLElement>(".slideflow-details-placeholder[data-sf-details-idx]")
+	);
+
+	for (const placeholder of placeholders) {
+		const idxAttr = placeholder.getAttribute("data-sf-details-idx");
+		const idx = idxAttr !== null ? parseInt(idxAttr, 10) : -1;
+		const block = blocks[idx];
+		if (!block) continue;
+
+		const detailsEl = document.createElement("details");
+		detailsEl.className = "slideflow-details";
+		if (block.isOpen) {
+			detailsEl.open = true;
+		}
+
+		const summaryEl = document.createElement("summary");
+		summaryEl.className = "slideflow-details-summary";
+
+		const chevronEl = document.createElement("span");
+		chevronEl.className = "slideflow-details-chevron";
+		chevronEl.setAttribute("aria-hidden", "true");
+		chevronEl.textContent = "▸";
+		summaryEl.appendChild(chevronEl);
+
+		const titleEl = document.createElement("span");
+		titleEl.className = "slideflow-details-title";
+		await MarkdownRenderer.render(app, block.summaryMd, titleEl, sourcePath, slideComponent);
+		// Unwrap single-paragraph Markdown wrapper so summary stays inline with the chevron
+		if (titleEl.children.length === 1 && titleEl.firstElementChild?.tagName.toLowerCase() === "p") {
+			const p = titleEl.firstElementChild;
+			while (p.firstChild) {
+				titleEl.insertBefore(p.firstChild, p);
+			}
+			p.remove();
+		}
+		summaryEl.appendChild(titleEl);
+		detailsEl.appendChild(summaryEl);
+
+		const bodyEl = document.createElement("div");
+		bodyEl.className = "slideflow-details-body";
+		if (block.bodyMd.length > 0) {
+			await renderMarkdownWithDetails(app, block.bodyMd, bodyEl, sourcePath, slideComponent);
+		}
+		detailsEl.appendChild(bodyEl);
+
+		// Add a convenient 1-click Copy button when the collapsible holds a copyable code/text block
+		const copyableCodeEl = bodyEl.querySelector<HTMLElement>("pre code, pre");
+		if (copyableCodeEl) {
+			const copyBtn = document.createElement("button");
+			copyBtn.type = "button";
+			copyBtn.className = "slideflow-details-copy-btn";
+			copyBtn.textContent = "Copy";
+			copyBtn.setAttribute("title", "Copy text to clipboard");
+			copyBtn.setAttribute("aria-label", "Copy text to clipboard");
+			copyBtn.addEventListener("click", (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				const textToCopy = (copyableCodeEl.textContent || "").replace(/\n$/, "");
+				if (!textToCopy) return;
+				void navigator.clipboard.writeText(textToCopy).then(() => {
+					copyBtn.textContent = "Copied ✓";
+					copyBtn.classList.add("is-copied");
+					window.setTimeout(() => {
+						copyBtn.textContent = "Copy";
+						copyBtn.classList.remove("is-copied");
+					}, 1600);
+				});
+			});
+			summaryEl.appendChild(copyBtn);
+		}
+
+		placeholder.replaceWith(detailsEl);
+	}
+}
+
 export async function renderSlideContent(
 	app: App,
 	markdown: string,
@@ -162,7 +419,7 @@ export async function renderSlideContent(
 	containerEl.empty();
 	const slideComponent = new Component();
 	parentComponent.addChild(slideComponent);
-	await MarkdownRenderer.render(app, markdown, containerEl, sourcePath, slideComponent);
+	await renderMarkdownWithDetails(app, markdown, containerEl, sourcePath, slideComponent);
 	enhanceMermaidSvgElements(containerEl);
 	enhanceIframeElements(containerEl);
 	return slideComponent;

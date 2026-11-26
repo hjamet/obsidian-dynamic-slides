@@ -36,6 +36,8 @@ export interface ExtractedCommentContext {
 const SKIP_CLASS_LIST = [
 	"dynamic-slides-child-heading",
 	"copy-code-button",
+	"slideflow-details-copy-btn",
+	"slideflow-details-chevron",
 	"slideflow-deleted-sections-title",
 	"callout-icon",
 	"callout-fold",
@@ -196,7 +198,7 @@ function serializeNode(node: Node, mode: "current" | "old", checkLiveVisibility:
 		);
 	}
 
-	if (tag === "p" || tag === "div" || tag === "section" || tag === "article") {
+	if (tag === "p" || tag === "div" || tag === "section" || tag === "article" || tag === "summary" || tag === "details") {
 		const clean = childrenText.trim();
 		return clean ? `${clean}\n\n` : "";
 	}
@@ -525,6 +527,7 @@ const HOVER_EXCLUDED_SELECTOR = [
 	".dynamic-slides-child-heading",
 	".slideflow-deleted-sections-title",
 	".copy-code-button",
+	".slideflow-details-copy-btn",
 	".slideflow-selection-toolbar",
 	".slideflow-comments-rail",
 	".slideflow-hover-add-btn",
@@ -567,6 +570,12 @@ export function findHoverableMarkdownBlock(
 	const calloutEl = startEl.closest(".callout") as HTMLElement | null;
 	if (calloutEl && contentEl.contains(calloutEl) && isVisibleHoverCandidate(calloutEl)) {
 		return calloutEl;
+	}
+
+	// If inside a collapsible `<details>` block, target it cleanly
+	const detailsEl = startEl.closest("details") as HTMLElement | null;
+	if (detailsEl && contentEl.contains(detailsEl) && isVisibleHoverCandidate(detailsEl)) {
+		return detailsEl;
 	}
 
 	// If inside a live third-party plugin code block (e.g. chess-pgn, dataview), target the outer widget atomically
@@ -635,6 +644,7 @@ export function findHoverableMarkdownBlock(
 export function getMarkdownBlockLabel(el: HTMLElement): string {
 	if (el.classList.contains("callout")) return "Callout";
 	const tag = el.tagName.toLowerCase();
+	if (tag === "details") return "Collapsible";
 	if (tag === "p") return "Paragraph";
 	if (tag === "li") return "List item";
 	if (tag === "blockquote") return "Quote";
@@ -722,6 +732,7 @@ export function extractBlockContext(
 
 const READING_FOCUS_SKIP_SELECTOR = [
 	".copy-code-button",
+	".slideflow-details-copy-btn",
 	".slideflow-selection-toolbar",
 	".slideflow-comments-rail",
 	".slideflow-hover-add-btn",
@@ -771,6 +782,11 @@ export function collectReadableBlocks(contentEl: HTMLElement): HTMLElement[] {
 			if (tag === "hr" || tag === "br" || tag === "style" || tag === "script") continue;
 
 			if (child.classList.contains("callout")) {
+				pushUnique(child);
+				continue;
+			}
+
+			if (tag === "details") {
 				pushUnique(child);
 				continue;
 			}

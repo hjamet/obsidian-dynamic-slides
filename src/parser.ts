@@ -280,6 +280,29 @@ export function parseMarkdownSections(
 	};
 }
 
+export function hasSubstantivePreamble(markdown: string, firstHeadingLine: number): boolean {
+	if (firstHeadingLine <= 0) return false;
+	const normalized = markdown.replace(/\r\n/g, "\n");
+	const lines = normalized.split("\n");
+	let startIdx = 0;
+	if (lines.length > 0 && /^---\s*$/.test(lines[0])) {
+		for (let j = 1; j < lines.length; j++) {
+			if (/^(?:---|\.\.\.)\s*$/.test(lines[j])) {
+				startIdx = j + 1;
+				break;
+			}
+		}
+	}
+	if (startIdx >= firstHeadingLine) return false;
+	const preamble = lines
+		.slice(startIdx, firstHeadingLine)
+		.join("\n")
+		.replace(/<!--[\s\S]*?-->/g, "")
+		.replace(/^[\s\-*_]+$/gm, "")
+		.trim();
+	return preamble.length > 0;
+}
+
 export function findCurrentSectionNode(flatNodes: SectionNode[], cursorLine: number): SectionNode {
 	let bestMatch: SectionNode | null = null;
 	for (const node of flatNodes) {

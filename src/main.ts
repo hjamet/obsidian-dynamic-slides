@@ -3,6 +3,7 @@ import * as path from "path";
 import {
 	buildChildHeadingsHtml,
 	buildInlineDeletedHeadingHtml,
+	hasSubstantivePreamble,
 	isHeadingOnlySkippedSlide,
 	parseMarkdownSections,
 	findCurrentSectionNode,
@@ -612,11 +613,15 @@ export default class SlideFlowPlugin extends Plugin {
 		});
 
 		const minValidIdx = this.flatNodes.length > 1 ? 1 : 0;
-		if (removedIdx >= minValidIdx && removedIdx < this.flatNodes.length) {
-			return { nextNode: this.flatNodes[removedIdx], movedForward: true };
+		for (let i = Math.max(minValidIdx, removedIdx); i < this.flatNodes.length; i++) {
+			if (!this.isSkippedEmptySlide(this.flatNodes[i])) {
+				return { nextNode: this.flatNodes[i], movedForward: true };
+			}
 		}
-		if (this.flatNodes.length > minValidIdx) {
-			return { nextNode: this.flatNodes[this.flatNodes.length - 1], movedForward: false };
+		for (let i = Math.min(removedIdx - 1, this.flatNodes.length - 1); i >= minValidIdx; i--) {
+			if (!this.isSkippedEmptySlide(this.flatNodes[i])) {
+				return { nextNode: this.flatNodes[i], movedForward: false };
+			}
 		}
 		return { nextNode: this.flatNodes[0] || null, movedForward: false };
 	}
@@ -797,9 +802,9 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!isHeadingOnlySkippedSlide(node) || !node) return false;
 		if (this.diffEnabled && this.activeDiffContext) {
 			const info = this.activeDiffContext.slideDiffs.get(node.id);
-			// Only keep an empty heading-only leaf navigable while diff mode has unread deleted body content
-			// (e.g., a section whose body was just archived to a sub-note and hasn't been validated yet).
-			if (info && info.hasChanges && !info.validatedByComment && info.removedCount > 0) {
+			// Keep an empty heading-only leaf navigable while diff mode still displays deleted body
+			// content (including after commenting on it, until leaving the slide clears `hasChanges`).
+			if (info && info.hasChanges && info.removedCount > 0) {
 				return false;
 			}
 		}
@@ -1454,8 +1459,11 @@ export default class SlideFlowPlugin extends Plugin {
 		this.rootNode = parsed.root;
 		this.flatNodes = parsed.flatNodes;
 		const cursorLine = view.getMode() === "source" ? view.editor.getCursor().line : 0;
+		const hasPreamble =
+			this.flatNodes.length > 1 &&
+			hasSubstantivePreamble(markdownText, this.flatNodes[1].lineStart);
 		this.currentNode = findCurrentSectionNode(this.flatNodes, cursorLine);
-		if (this.currentNode && this.currentNode.level === 0 && this.flatNodes.length > 1) {
+		if (this.currentNode && this.currentNode.level === 0 && this.flatNodes.length > 1 && !hasPreamble) {
 			this.currentNode = this.flatNodes[1];
 		}
 
@@ -2634,7 +2642,16 @@ export default class SlideFlowPlugin extends Plugin {
 		const nav = this.getNavigableNodes();
 		const total = nav.length > 1 ? nav.length - 1 : 1;
 		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
-		const current = nav.length > 1 ? Math.max(1, idx) : 1;
+		let current: number;
+		if (idx >= 0) {
+			current = nav.length > 1 ? Math.max(1, idx) : 1;
+		} else {
+			const currFlatIdx = this.currentNode.flatIndex ?? 0;
+			const passedCount = nav.filter(
+				(n) => (nav.length === 1 || n.level > 0) && (n.flatIndex ?? 0) <= currFlatIdx
+			).length;
+			current = Math.max(1, Math.min(total, passedCount));
+		}
 		this.activeModal.setCounter(current, total);
 	}
 
@@ -2822,7 +2839,12 @@ export default class SlideFlowPlugin extends Plugin {
 				}) || this.flatNodes.find(n => n.contentMarkdown.toLowerCase().includes(anchorQuery)) || null;
 			}
 
-			this.currentNode = initialNode || ((this.flatNodes.length > 1) ? this.flatNodes[1] : this.rootNode);
+			const hasPreamble =
+				this.flatNodes.length > 1 &&
+				hasSubstantivePreamble(markdownText, this.flatNodes[1].lineStart);
+			this.currentNode =
+				initialNode ||
+				(this.flatNodes.length > 1 && !hasPreamble ? this.flatNodes[1] : this.rootNode);
 
 			const diffInit = await this.computeDiffForLoadedNote(targetFile.path, markdownText, this.flatNodes);
 			this.activeDiffContext = diffInit.ctx;
@@ -2960,8 +2982,20 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const nav = this.getNavigableNodes();
 		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
-		if (idx === -1 && nav.length > 0) {
-			void this.goToNode(nav[0], undefined, 'start');
+		if (idx === -1) {
+			// Current slide became skipped after its deleted-body diff was validated/commented:
+			// always advance strictly forward in document order and NEVER fall back to `0. Full document`.
+			const currFlatIdx =
+				this.currentNode.flatIndex ??
+				this.flatNodes.findIndex((n) => n.id === this.currentNode?.id);
+			const nextForward = nav.find(
+				(n) => (nav.length === 1 || n.level > 0) && (n.flatIndex ?? 0) > currFlatIdx
+			);
+			if (nextForward) {
+				void this.goToNode(nextForward, 'next', 'start');
+			} else {
+				new Notice("End of presentation reached.");
+			}
 			return;
 		}
 		if (idx >= 0 && idx < nav.length - 1) {
@@ -2975,6 +3009,27 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!this.currentNode) return;
 		const nav = this.getNavigableNodes();
 		const idx = nav.findIndex(n => n.id === this.currentNode?.id);
+		if (idx === -1) {
+			const currFlatIdx =
+				this.currentNode.flatIndex ??
+				this.flatNodes.findIndex((n) => n.id === this.currentNode?.id);
+			let prevBackward: SectionNode | null = null;
+			for (let i = nav.length - 1; i >= 0; i--) {
+				const candidate = nav[i];
+				if ((nav.length === 1 || candidate.level > 0) && (candidate.flatIndex ?? 0) < currFlatIdx) {
+					prevBackward = candidate;
+					break;
+				}
+			}
+			if (prevBackward) {
+				void this.goToNode(prevBackward, 'prev', enterFrom);
+			} else if (this.documentStack.length > 0) {
+				void this.popDocumentStack();
+			} else {
+				new Notice("Beginning of presentation reached.");
+			}
+			return;
+		}
 		if (idx > 0) {
 			void this.goToNode(nav[idx - 1], undefined, enterFrom);
 		} else {

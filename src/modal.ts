@@ -361,7 +361,9 @@ export class PresentationModal extends Component {
 				}
 			}
 
-			if (target.closest('.callout-icon, .svg-icon, .dynamic-slides-child-heading, .internal-link')) return;
+			if (target.closest('.callout-icon, .svg-icon, .dynamic-slides-child-heading, .internal-link, summary, .slideflow-details-copy-btn')) return;
+
+			if (target.closest('details, .slideflow-details')) return;
 
 			const zoomableEl = target.closest(MEDIA_SELECTOR) as HTMLElement;
 			if (zoomableEl) {
@@ -840,6 +842,12 @@ export class PresentationModal extends Component {
 			return this.activateLinkElement(targetLink);
 		}
 
+		if (blockEl.tagName.toLowerCase() === "details") {
+			const detailsEl = blockEl as HTMLDetailsElement;
+			detailsEl.open = !detailsEl.open;
+			return true;
+		}
+
 		if (
 			blockEl.classList.contains("dynamic-slides-child-heading") &&
 			!blockEl.classList.contains("is-empty-heading-leaf")
@@ -1275,6 +1283,7 @@ export class PresentationModal extends Component {
 			if (
 				el.closest(".callout-icon") ||
 				el.closest(".dynamic-slides-toc-fold-icon") ||
+				el.closest("details, .slideflow-details") ||
 				el.classList.contains("callout-icon") ||
 				el.classList.contains("svg-icon") ||
 				el.classList.contains("emoji")
@@ -2038,25 +2047,37 @@ export class PresentationModal extends Component {
 			return false;
 		}
 
-		// Pressing → while scrolling UP smoothly reverses the scroll back to its origin
-		// instead of jumping immediately to the next slide.
-		if (
-			this.currentScrollAnimId !== null &&
-			this.currentScrollDirection === "up" &&
-			this.contentEl
-		) {
-			const reverseTarget = this.currentScrollStartTop;
-			const prevTarget = this.currentTargetTop;
-			const currentPos = this.contentEl.scrollTop;
-			const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
-			const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
-			this.cancelScrollAnimation(false);
-			void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
-			return true;
-		}
-
-		const wasAnimating = this.currentScrollAnimId !== null;
-		if (wasAnimating) {
+		// While a scroll animation is running, NEVER skip scrolling or jump straight to the next slide:
+		// - Pressing → while scrolling UP smoothly cancels/reverses back downward.
+		// - Pressing → while scrolling DOWN chains another half-slide scroll smoothly (or finishes
+		//   settling cleanly at the bottom boundary so only a subsequent keypress advances slides).
+		if (this.currentScrollAnimId !== null && this.contentEl) {
+			const maxScrollTop = Math.max(0, this.contentEl.scrollHeight - this.contentEl.clientHeight);
+			if (this.currentScrollDirection === "up") {
+				const currentPos = this.contentEl.scrollTop;
+				const prevTarget = this.currentTargetTop;
+				const reverseTarget =
+					Math.abs(currentPos - this.currentScrollStartTop) >= 24
+						? this.currentScrollStartTop
+						: Math.min(maxScrollTop, currentPos + this.contentEl.clientHeight * 0.5);
+				const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
+				const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
+				this.cancelScrollAnimation(false);
+				void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
+				return true;
+			}
+			if (this.currentScrollDirection === "down") {
+				if (this.currentTargetTop < maxScrollTop - 10) {
+					const chainedTarget = Math.min(
+						maxScrollTop,
+						this.currentTargetTop + this.contentEl.clientHeight * 0.5
+					);
+					void this.animateScrollTo(chainedTarget, this.scrollDurationMs);
+					return true;
+				}
+				this.cancelScrollAnimation(true);
+				return true;
+			}
 			this.cancelScrollAnimation(true);
 		}
 
@@ -2078,7 +2099,7 @@ export class PresentationModal extends Component {
 				this.activeZoomIndex = -1;
 				return true;
 			}
-			if (!wasAnimating && this.canScrollDown()) {
+			if (this.canScrollDown()) {
 				this.scrollDown();
 				return true;
 			}
@@ -2123,7 +2144,7 @@ export class PresentationModal extends Component {
 			}
 		}
 
-		if (!wasAnimating && this.canScrollDown()) {
+		if (this.canScrollDown()) {
 			this.scrollDown();
 			return true;
 		}
@@ -2141,25 +2162,36 @@ export class PresentationModal extends Component {
 	public handlePrev(): boolean {
 		this.hasCompletedAllSteps = false;
 
-		// Pressing ← while scrolling DOWN cancels the downward motion and smoothly
-		// reverse-scrolls back to where the downward scroll started (never jumps slide!).
-		if (
-			this.currentScrollAnimId !== null &&
-			this.currentScrollDirection === "down" &&
-			this.contentEl
-		) {
-			const reverseTarget = this.currentScrollStartTop;
-			const prevTarget = this.currentTargetTop;
-			const currentPos = this.contentEl.scrollTop;
-			const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
-			const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
-			this.cancelScrollAnimation(false);
-			void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
-			return true;
-		}
-
-		const wasAnimating = this.currentScrollAnimId !== null;
-		if (wasAnimating) {
+		// While a scroll animation is running, NEVER skip scrolling or jump straight to the previous slide:
+		// - Pressing ← while scrolling DOWN smoothly cancels/reverses back upward.
+		// - Pressing ← while scrolling UP chains another half-slide scroll smoothly (or finishes
+		//   settling cleanly at the top boundary so only a subsequent keypress moves to the previous slide).
+		if (this.currentScrollAnimId !== null && this.contentEl) {
+			if (this.currentScrollDirection === "down") {
+				const currentPos = this.contentEl.scrollTop;
+				const prevTarget = this.currentTargetTop;
+				const reverseTarget =
+					Math.abs(currentPos - this.currentScrollStartTop) >= 24
+						? this.currentScrollStartTop
+						: Math.max(0, currentPos - this.contentEl.clientHeight * 0.5);
+				const fullDist = Math.max(1, Math.abs(prevTarget - reverseTarget));
+				const ratio = Math.min(1, Math.max(0.2, Math.abs(currentPos - reverseTarget) / fullDist));
+				this.cancelScrollAnimation(false);
+				void this.animateScrollTo(reverseTarget, Math.round(this.scrollDurationMs * ratio));
+				return true;
+			}
+			if (this.currentScrollDirection === "up") {
+				if (this.currentTargetTop > 10) {
+					const chainedTarget = Math.max(
+						0,
+						this.currentTargetTop - this.contentEl.clientHeight * 0.5
+					);
+					void this.animateScrollTo(chainedTarget, this.scrollDurationMs);
+					return true;
+				}
+				this.cancelScrollAnimation(true);
+				return true;
+			}
 			this.cancelScrollAnimation(true);
 		}
 
@@ -2181,7 +2213,7 @@ export class PresentationModal extends Component {
 				this.activeZoomIndex = -1;
 				return true;
 			}
-			if (!wasAnimating && this.canScrollUp()) {
+			if (this.canScrollUp()) {
 				this.scrollUp();
 				return true;
 			}
@@ -2220,7 +2252,7 @@ export class PresentationModal extends Component {
 			}
 		}
 
-		if (!wasAnimating && this.canScrollUp()) {
+		if (this.canScrollUp()) {
 			this.scrollUp();
 			return true;
 		}
