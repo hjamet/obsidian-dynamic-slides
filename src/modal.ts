@@ -126,6 +126,10 @@ export class PresentationModal extends Component {
 	private activePdfBlobUrl: string | null = null;
 	private pdfMutationObserver: MutationObserver | null = null;
 	private pdfKickTimers: number[] = [];
+	private pdfReflowInProgress: boolean = false;
+	private pdfReflowDone: boolean = false;
+	private pdfWheelBodyEl: HTMLElement | null = null;
+	private boundPdfWheelHandler: ((evt: WheelEvent) => void) | null = null;
 	private currentSourcePath: string = "";
 	private hasCompletedAllSteps: boolean = false;
 
@@ -1347,10 +1351,25 @@ export class PresentationModal extends Component {
 	}
 
 	public scrollPdfZoom(direction: "down" | "up", stepFraction: number = 0.72): boolean {
+		if (!this.zoomContentEl) return false;
+		// External file:/// PDF rendered via iframe: keep PDF zoom open on Arrow keys (Escape closes it).
+		if (this.zoomContentEl.querySelector("iframe.slideflow-pdf-iframe")) {
+			return true;
+		}
 		const viewer = this.getPdfScrollContainer();
-		if (!viewer) return false;
+		const body = this.zoomContentEl.querySelector<HTMLElement>(".slideflow-pdf-frame-body");
+		if (!viewer) {
+			return true;
+		}
 		const maxScroll = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
-		if (maxScroll <= 4) return false;
+		if (maxScroll <= 4) {
+			// If PDF.js pages exist (or are still hydrating) but scrollHeight is not unlocked yet,
+			// trigger an on-demand 280ms resize reflow instead of closing the PDF zoom!
+			if (body) {
+				this.triggerRealPdfResizeReflow(body, true);
+			}
+			return true;
+		}
 
 		const delta = Math.max(120, Math.round(viewer.clientHeight * stepFraction));
 		const current = viewer.scrollTop;
@@ -1358,15 +1377,19 @@ export class PresentationModal extends Component {
 			direction === "down"
 				? Math.min(maxScroll, current + delta)
 				: Math.max(0, current - delta);
-		if (Math.abs(target - current) < 2) {
-			return false;
+		if (Math.abs(target - current) >= 2) {
+			viewer.scrollTo({ top: target, behavior: "smooth" });
 		}
-		viewer.scrollTo({ top: target, behavior: "smooth" });
 		return true;
 	}
 
 	private cleanupZoomResources(leaveClosingGhost: boolean = false): void {
 		this.restoreZoomedLiveElement(leaveClosingGhost);
+		if (this.pdfWheelBodyEl && this.boundPdfWheelHandler) {
+			this.pdfWheelBodyEl.removeEventListener("wheel", this.boundPdfWheelHandler);
+			this.pdfWheelBodyEl = null;
+			this.boundPdfWheelHandler = null;
+		}
 		if (this.pdfMutationObserver) {
 			this.pdfMutationObserver.disconnect();
 			this.pdfMutationObserver = null;
@@ -1375,6 +1398,8 @@ export class PresentationModal extends Component {
 			window.clearTimeout(id);
 		}
 		this.pdfKickTimers = [];
+		this.pdfReflowInProgress = false;
+		this.pdfReflowDone = false;
 		if (this.zoomSlideComponent) {
 			unloadSlideContent(this.zoomSlideComponent, this);
 			this.zoomSlideComponent = null;
@@ -1390,16 +1415,95 @@ export class PresentationModal extends Component {
 	}
 
 	/**
+	 * Performs a real 280ms container width change (> Obsidian's 200ms debounced ResizeObserver
+	 * on `.pdf-container`) so Obsidian fires `onResize()` with a genuinely distinct width,
+	 * bypassing PDF.js `_isSameScale()` early-return and forcing full page/scrollbar layout.
+	 */
+	private triggerRealPdfResizeReflow(body: HTMLElement, force: boolean = false): void {
+		if (!body.isConnected) return;
+		if (this.pdfReflowInProgress) return;
+		if (this.pdfReflowDone && !force) return;
+
+		const embedEl = body.querySelector<HTMLElement>(".pdf-embed, .internal-embed");
+		if (embedEl && embedEl.style.height) {
+			embedEl.style.removeProperty("height");
+		}
+		const viewerEl = body.querySelector<HTMLElement>(".pdf-viewer-container");
+		if (!viewerEl) return;
+
+		this.pdfReflowInProgress = true;
+		viewerEl.style.overflowY = "auto";
+		viewerEl.style.overflowX = "auto";
+		if (!viewerEl.hasAttribute("tabindex")) {
+			viewerEl.setAttribute("tabindex", "-1");
+		}
+
+		// Phase 1: shrink content width by 14px and HOLD for 280ms so Obsidian's 200ms debounced ResizeObserver fires!
+		body.style.boxSizing = "border-box";
+		body.style.paddingRight = "14px";
+		void body.offsetWidth;
+		try {
+			viewerEl.dispatchEvent(new Event("transitionend"));
+		} catch {
+			// ignore
+		}
+		try {
+			this.appRef.workspace.trigger("resize");
+			window.dispatchEvent(new Event("resize"));
+		} catch {
+			// ignore
+		}
+
+		const restoreId = window.setTimeout(() => {
+			if (!body.isConnected) {
+				this.pdfReflowInProgress = false;
+				return;
+			}
+			const curEmbed = body.querySelector<HTMLElement>(".pdf-embed, .internal-embed");
+			if (curEmbed && curEmbed.style.height) {
+				curEmbed.style.removeProperty("height");
+			}
+			// Phase 2: restore full width -> triggers a second ResizeObserver + PDF.js reflow at exact 100% width
+			body.style.removeProperty("padding-right");
+			void body.offsetWidth;
+			const curViewer = body.querySelector<HTMLElement>(".pdf-viewer-container");
+			if (curViewer) {
+				curViewer.style.overflowY = "auto";
+				curViewer.style.overflowX = "auto";
+				try {
+					curViewer.dispatchEvent(new Event("transitionend"));
+				} catch {
+					// ignore
+				}
+			}
+			try {
+				this.appRef.workspace.trigger("resize");
+				window.dispatchEvent(new Event("resize"));
+			} catch {
+				// ignore
+			}
+			const finishId = window.setTimeout(() => {
+				this.pdfReflowInProgress = false;
+				const v = body.querySelector<HTMLElement>(".pdf-viewer-container");
+				if (v && v.scrollHeight > v.clientHeight + 8) {
+					this.pdfReflowDone = true;
+				}
+			}, 260);
+			this.pdfKickTimers.push(finishId);
+		}, 280);
+		this.pdfKickTimers.push(restoreId);
+	}
+
+	/**
 	 * Hydrates Obsidian's native PDF.js viewer once mounted inside the zoom overlay:
-	 * Obsidian initializes `.pdf-embed` asynchronously (`initDelay: 300ms`) inside a temporary
-	 * offscreen container and relies on ResizeObserver / `transitionend` on `.pdf-viewer-container`
-	 * to recompute page metrics & scrollbars. Dispatching `transitionend` + `window resize` once
-	 * mounted and once pages render unlocks scrolling immediately without requiring a modal resize.
+	 * Obsidian initializes `.pdf-embed` asynchronously (`initDelay: 300ms`, `height: "page"`)
+	 * inside a 0x0 offscreen `loadingEl` and observes `.pdf-container` with a 200ms debounced
+	 * ResizeObserver. We strip Obsidian's inline 1-page height override, run a real 280ms width
+	 * reflow once pages mount (matching what opening a right-docked comment modal previously did),
+	 * and install a wheel safeguard so mouse-wheel scrolling always moves `.pdf-viewer-container`.
 	 */
 	private schedulePdfViewerHydration(body: HTMLElement): void {
-		let lastKickAt = 0;
-
-		const kickViewer = (focusViewer: boolean): boolean => {
+		const normalizeEmbedAndFocus = (focusViewer: boolean): boolean => {
 			if (!body.isConnected) return false;
 			const embedEl = body.querySelector<HTMLElement>(".pdf-embed, .internal-embed");
 			if (embedEl && embedEl.style.height) {
@@ -1411,37 +1515,8 @@ export class PresentationModal extends Component {
 			if (!viewerEl.hasAttribute("tabindex")) {
 				viewerEl.setAttribute("tabindex", "-1");
 			}
-			viewerEl.style.overflow = "auto";
-
-			const now = Date.now();
-			if (now - lastKickAt >= 80) {
-				lastKickAt = now;
-				// 1-frame 1px layout nudge forces ResizeObserver on `.pdf-viewer-container`
-				// (exactly what opening a side modal previously triggered) so PDF.js computes
-				// full scroll height & scrollbars immediately on first open!
-				body.style.paddingRight = "1px";
-				void body.offsetWidth;
-				requestAnimationFrame(() => {
-					if (body.isConnected) {
-						body.style.removeProperty("padding-right");
-					}
-				});
-				try {
-					viewerEl.dispatchEvent(new Event("transitionend"));
-				} catch {
-					// ignore
-				}
-				try {
-					this.appRef.workspace.trigger("resize");
-				} catch {
-					// ignore
-				}
-				try {
-					window.dispatchEvent(new Event("resize"));
-				} catch {
-					// ignore
-				}
-			}
+			viewerEl.style.overflowY = "auto";
+			viewerEl.style.overflowX = "auto";
 
 			if (
 				focusViewer &&
@@ -1454,28 +1529,101 @@ export class PresentationModal extends Component {
 					// ignore
 				}
 			}
-			return Boolean(body.querySelector(".pdfViewer .page"));
+			const hasPages = Boolean(body.querySelector(".pdfViewer .page"));
+			const isScrollable = viewerEl.scrollHeight > viewerEl.clientHeight + 8;
+			return hasPages && isScrollable;
 		};
 
+		// Non-intrusive wheel safeguard: preserves native trackpad/wheel smooth scroll when Chromium
+		// handles it, and transparently drives `.pdf-viewer-container` if the event lands outside
+		// `.pdf-viewer-container` or if Electron's compositor drops wheel scrolling inside the fixed overlay.
+		const wheelHandler = (evt: WheelEvent) => {
+			if (evt.ctrlKey || evt.metaKey || Math.abs(evt.deltaY) < 0.5) return;
+			const target = evt.target instanceof HTMLElement ? evt.target : null;
+			if (target?.closest(".pdf-sidebar-container, .pdf-toolbar")) return;
+			const viewerEl = body.querySelector<HTMLElement>(".pdf-viewer-container");
+			if (!viewerEl) return;
+
+			const maxScroll = Math.max(0, viewerEl.scrollHeight - viewerEl.clientHeight);
+			if (maxScroll <= 4) {
+				this.triggerRealPdfResizeReflow(body, true);
+				return;
+			}
+			const dy =
+				evt.deltaMode === 1
+					? evt.deltaY * 32
+					: evt.deltaMode === 2
+						? evt.deltaY * viewerEl.clientHeight
+						: evt.deltaY;
+
+			if (!target || !viewerEl.contains(target)) {
+				evt.preventDefault();
+				viewerEl.scrollTop = Math.max(0, Math.min(maxScroll, viewerEl.scrollTop + dy));
+				return;
+			}
+
+			const beforeTop = viewerEl.scrollTop;
+			const canMove = (dy > 0 && beforeTop < maxScroll - 1) || (dy < 0 && beforeTop > 1);
+			if (!canMove) return;
+
+			let appliedFallback = false;
+			const applyIfStuck = () => {
+				if (appliedFallback || !viewerEl.isConnected) return;
+				appliedFallback = true;
+				if (Math.abs(viewerEl.scrollTop - beforeTop) < 0.5) {
+					viewerEl.scrollTop = Math.max(0, Math.min(maxScroll, beforeTop + dy));
+				}
+			};
+			requestAnimationFrame(applyIfStuck);
+			window.setTimeout(applyIfStuck, 32);
+		};
+		this.pdfWheelBodyEl = body;
+		this.boundPdfWheelHandler = wheelHandler;
+		body.addEventListener("wheel", wheelHandler, { passive: false });
+
+		let pagesDetected = false;
 		this.pdfMutationObserver = new MutationObserver(() => {
-			const hasPages = kickViewer(true);
-			if (hasPages) {
-				// Schedule one final post-page-layout kick and stop observing
-				const settleId = window.setTimeout(() => kickViewer(true), 160);
-				this.pdfKickTimers.push(settleId);
+			const embedEl = body.querySelector<HTMLElement>(".pdf-embed, .internal-embed");
+			if (embedEl && embedEl.style.height) {
+				embedEl.style.removeProperty("height");
+			}
+			const hasPages = Boolean(body.querySelector(".pdfViewer .page"));
+			const ready = normalizeEmbedAndFocus(!pagesDetected);
+			if (hasPages && !pagesDetected) {
+				pagesDetected = true;
+				const reflowTimer = window.setTimeout(() => {
+					this.triggerRealPdfResizeReflow(body, true);
+				}, 120);
+				this.pdfKickTimers.push(reflowTimer);
+			}
+			if (ready && this.pdfReflowDone) {
 				this.pdfMutationObserver?.disconnect();
 				this.pdfMutationObserver = null;
 			}
 		});
-		this.pdfMutationObserver.observe(body, { childList: true, subtree: true });
+		this.pdfMutationObserver.observe(body, {
+			childList: true,
+			subtree: true,
+			attributes: true,
+			attributeFilter: ["style"],
+		});
 
-		// Timed fallbacks covering animation end (350ms) and Obsidian PDF embed initDelay (300ms + 200ms debounce)
-		for (const delay of [220, 460, 820, 1300]) {
+		// Timed fallbacks covering Obsidian PDF embed initDelay (300ms) + large multi-page PDF loading
+		for (const delay of [480, 1150, 2300, 4000]) {
 			const id = window.setTimeout(() => {
-				kickViewer(delay <= 820);
+				const ready = normalizeEmbedAndFocus(delay <= 1150);
+				if (!ready || !this.pdfReflowDone) {
+					this.triggerRealPdfResizeReflow(body, !ready);
+				}
 			}, delay);
 			this.pdfKickTimers.push(id);
 		}
+		// Safety disconnect cap so MutationObserver never lingers
+		const capId = window.setTimeout(() => {
+			this.pdfMutationObserver?.disconnect();
+			this.pdfMutationObserver = null;
+		}, 6500);
+		this.pdfKickTimers.push(capId);
 	}
 
 	private ensureZoomOverlay(animated: boolean): void {
@@ -1596,7 +1744,8 @@ export class PresentationModal extends Component {
 		if (!keepZoomIndex) {
 			this.activeZoomIndex = -1;
 		}
-		this.ensureZoomOverlay(animated);
+		this.ensureZoomOverlay(false);
+		this.zoomOverlayEl?.addClass("is-pdf-zoom-overlay");
 		this.cleanupZoomResources();
 
 		if (!this.zoomContentEl) return;
@@ -1648,7 +1797,8 @@ export class PresentationModal extends Component {
 		const blobUrl = URL.createObjectURL(blob);
 
 		this.activeZoomIndex = -1;
-		this.ensureZoomOverlay(true);
+		this.ensureZoomOverlay(false);
+		this.zoomOverlayEl?.addClass("is-pdf-zoom-overlay");
 		this.cleanupZoomResources();
 		this.activePdfBlobUrl = blobUrl;
 
@@ -1714,6 +1864,7 @@ export class PresentationModal extends Component {
 		}
 
 		this.ensureZoomOverlay(animated);
+		this.zoomOverlayEl?.removeClass("is-pdf-zoom-overlay");
 		this.cleanupZoomResources(false);
 
 		if (this.zoomContentEl) {

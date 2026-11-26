@@ -1,6 +1,6 @@
 {
   "name": "slideflow",
-  "version": "2.15.1",
+  "version": "2.15.2",
   "description": "SlideFlow: keyboard-first Markdown slide presentation, live AST diffs across notes/sub-notes, and text/voice review comments.",
   "main": "main.js",
   "scripts": {

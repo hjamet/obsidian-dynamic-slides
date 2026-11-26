@@ -585,6 +585,12 @@ body.is-dynamic-slides-active {
 	transform: none;
 }
 
+.dynamic-slides-media-zoom-overlay.is-pdf-zoom-overlay {
+	animation: none !important;
+	transform: none !important;
+	backdrop-filter: none !important;
+}
+
 .dynamic-slides-media-zoom-overlay.is-closing {
 	opacity: 0 !important;
 	transform: scale(0.93) !important;
@@ -1362,6 +1368,7 @@ body.is-dynamic-slides-active {
 	min-height: 0;
 	width: 100%;
 	height: 100%;
+	box-sizing: border-box !important;
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
@@ -1418,11 +1425,19 @@ body.is-dynamic-slides-active {
 	position: absolute !important;
 	top: 0 !important;
 	bottom: 0 !important;
+	inset-inline-start: 0 !important;
 	inset-inline-end: 0 !important;
 	width: auto !important;
 	height: auto !important;
-	overflow: auto !important;
+	overflow-y: auto !important;
+	overflow-x: auto !important;
+	overscroll-behavior: contain !important;
+	pointer-events: auto !important;
 	outline: none !important;
+}
+
+.slideflow-pdf-frame-body .pdf-content-container.sidebarOpen .pdf-viewer-container {
+	inset-inline-start: var(--sidebar-width, 140px) !important;
 }
 
 .slideflow-pdf-frame-body iframe.slideflow-pdf-iframe {
