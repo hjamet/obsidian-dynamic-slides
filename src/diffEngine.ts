@@ -382,30 +382,36 @@ function computeOpcodes(a: string[], b: string[]): DiffOpcode[] {
 	return ops;
 }
 
-function wrapBlockSpan(block: string, isInsert: boolean): string {
+function diffUnitAttr(unitId?: string): string {
+	return unitId ? ` data-sf-diff-unit="${unitId}"` : "";
+}
+
+function wrapBlockSpan(block: string, isInsert: boolean, unitId?: string): string {
 	const tag = isInsert ? "ins" : "del";
 	const cls = isInsert ? "dv-ins" : "dv-del";
+	const attr = diffUnitAttr(unitId);
 	const parsedFence = parseFencedBlock(block);
 	if (parsedFence) {
 		if (parsedFence.lang) {
 			// Keep language-tagged fenced blocks (mermaid, chess-pgn, chess-study, dataview, code, etc.)
 			// renderable by Obsidian's MarkdownCodeBlockProcessor & syntax highlighter inside a diff container.
-			return `<div class="dv-block-${tag}">\n\n${block}\n\n</div>`;
+			return `<div class="dv-block-${tag}"${attr}>\n\n${block}\n\n</div>`;
 		}
-		return `<pre class="dv-pre-${tag}"><code>${escapeHtml(parsedFence.inner)}</code></pre>`;
+		return `<pre class="dv-pre-${tag}"${attr}><code>${escapeHtml(parsedFence.inner)}</code></pre>`;
 	}
 	// Preserve list / task / blockquote prefix outside inline span for single-line items
 	const prefixMatch = block.match(/^(\s*(?:>+\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+\.\s+))([\s\S]*)$/);
 	if (prefixMatch && !prefixMatch[2].includes("\n")) {
-		return `${prefixMatch[1]}<${tag} class="${cls}">${prefixMatch[2]}</${tag}>`;
+		return `${prefixMatch[1]}<${tag} class="${cls}"${attr}>${prefixMatch[2]}</${tag}>`;
 	}
-	return `<div class="dv-block-${tag}">\n\n${block}\n\n</div>`;
+	return `<div class="dv-block-${tag}"${attr}>\n\n${block}\n\n</div>`;
 }
 
 function diffTwoBlocks(
 	oldB: string,
 	newB: string,
-	blockDiffThreshold: number
+	blockDiffThreshold: number,
+	unitId?: string
 ): { out: string; ins: number; del: number } | null {
 	if (oldB === newB) return { out: newB, ins: 0, del: 0 };
 
@@ -442,7 +448,7 @@ function diffTwoBlocks(
 		if (newCallout) {
 			const oRest = oldCallout ? oldStripped.slice(oldCallout[1].length) : oldStripped;
 			const nRest = newStripped.slice(newCallout[1].length);
-			const sub = diffTwoBlocks(oRest, nRest, blockDiffThreshold);
+			const sub = diffTwoBlocks(oRest, nRest, blockDiffThreshold, unitId);
 			if (!sub) return null;
 			const reQuoted = `${newCallout[1]}${sub.out}`
 				.split("\n")
@@ -450,7 +456,7 @@ function diffTwoBlocks(
 				.join("\n");
 			return { out: reQuoted, ins: sub.ins, del: sub.del };
 		}
-		const sub = diffTwoBlocks(oldStripped, newStripped, blockDiffThreshold);
+		const sub = diffTwoBlocks(oldStripped, newStripped, blockDiffThreshold, unitId);
 		if (!sub) return null;
 		const reQuoted = sub.out
 			.split("\n")
@@ -476,6 +482,7 @@ function diffTwoBlocks(
 		return null;
 	}
 
+	const attr = diffUnitAttr(unitId);
 	let out = prefix;
 	let ins = 0;
 	let del = 0;
@@ -485,7 +492,7 @@ function diffTwoBlocks(
 		} else if (op.tag === "delete") {
 			const seg = aToks.slice(op.i1, op.i2).join("");
 			if (seg.trim()) {
-				out += `<del class="dv-del">${seg}</del>`;
+				out += `<del class="dv-del"${attr}>${seg}</del>`;
 				del++;
 			} else {
 				out += seg;
@@ -493,7 +500,7 @@ function diffTwoBlocks(
 		} else if (op.tag === "insert") {
 			const seg = bToks.slice(op.j1, op.j2).join("");
 			if (seg.trim()) {
-				out += `<ins class="dv-ins">${seg}</ins>`;
+				out += `<ins class="dv-ins"${attr}>${seg}</ins>`;
 				ins++;
 			} else {
 				out += seg;
@@ -502,14 +509,14 @@ function diffTwoBlocks(
 			const delSeg = aToks.slice(op.i1, op.i2).join("");
 			const insSeg = bToks.slice(op.j1, op.j2).join("");
 			if (delSeg.trim()) {
-				out += `<del class="dv-del">${delSeg}</del>`;
+				out += `<del class="dv-del"${attr}>${delSeg}</del>`;
 				del++;
 			}
 			if (delSeg.trim() && insSeg.trim()) {
 				out += " ";
 			}
 			if (insSeg.trim()) {
-				out += `<ins class="dv-ins">${insSeg}</ins>`;
+				out += `<ins class="dv-ins"${attr}>${insSeg}</ins>`;
 				ins++;
 			}
 		}
@@ -529,55 +536,76 @@ function titleSimilarity(a: string, b: string): number {
 	return inter / Math.max(setA.size, setB.size);
 }
 
-function diffSingleSlideMarkdown(
+interface SlideDiffUnit {
+	id: string | null;
+	oldText: string | null;
+	newText: string | null;
+	renderedParts: string[];
+	ins: number;
+	del: number;
+}
+
+function buildSlideDiffUnits(
 	oldSlideMd: string | null,
 	newSlideMd: string,
 	blockDiffThreshold: number
-): { diffMarkdown: string; addedCount: number; removedCount: number; hasChanges: boolean } {
+): SlideDiffUnit[] {
 	const cleanNew = newSlideMd.replace(/\r\n/g, "\n").trim();
+	const units: SlideDiffUnit[] = [];
+	let unitCounter = 0;
+	const nextUnitId = () => `u${unitCounter++}`;
+
 	if (oldSlideMd === null) {
-		// Newly added slide
 		const lines = cleanNew.split("\n");
 		const firstLine = lines[0] || "";
 		const headMatch = firstLine.match(/^(#{1,6})\s+(.+)$/);
-		const outParts: string[] = [];
-		let addedCount = 0;
 		let bodyLines = lines;
 		if (headMatch) {
-			outParts.push(`${headMatch[1]} <ins class="dv-ins">${headMatch[2].trim()}</ins>`);
-			addedCount++;
+			const headFull = `${headMatch[1]} ${headMatch[2].trim()}`;
+			units.push({
+				id: "head",
+				oldText: null,
+				newText: headFull,
+				renderedParts: [`${headMatch[1]} <ins class="dv-ins"${diffUnitAttr("head")}>${headMatch[2].trim()}</ins>`],
+				ins: 1,
+				del: 0,
+			});
 			bodyLines = lines.slice(1);
 		}
 		for (const b of splitSectionIntoBlocks(bodyLines)) {
-			outParts.push(wrapBlockSpan(b, true));
-			addedCount++;
+			const uid = nextUnitId();
+			units.push({
+				id: uid,
+				oldText: null,
+				newText: b,
+				renderedParts: [wrapBlockSpan(b, true, uid)],
+				ins: 1,
+				del: 0,
+			});
 		}
-		return {
-			diffMarkdown: outParts.join("\n\n"),
-			addedCount,
-			removedCount: 0,
-			hasChanges: addedCount > 0,
-		};
+		return units;
 	}
 
 	const cleanOld = oldSlideMd.replace(/\r\n/g, "\n").trim();
 	if (cleanOld === cleanNew) {
-		return {
-			diffMarkdown: cleanNew,
-			addedCount: 0,
-			removedCount: 0,
-			hasChanges: false,
-		};
+		if (cleanNew) {
+			units.push({
+				id: null,
+				oldText: cleanOld,
+				newText: cleanNew,
+				renderedParts: [cleanNew],
+				ins: 0,
+				del: 0,
+			});
+		}
+		return units;
 	}
 
-	const oldLines = cleanOld.split("\n");
-	const newLines = cleanNew.split("\n");
+	const oldLines = cleanOld.length > 0 ? cleanOld.split("\n") : [];
+	const newLines = cleanNew.length > 0 ? cleanNew.split("\n") : [];
 
 	let oldBodyLines = oldLines;
 	let newBodyLines = newLines;
-	const outParts: string[] = [];
-	let addedCount = 0;
-	let removedCount = 0;
 
 	const oldHead = (oldLines[0] || "").match(/^(#{1,6})\s+(.+)$/);
 	const newHead = (newLines[0] || "").match(/^(#{1,6})\s+(.+)$/);
@@ -586,24 +614,62 @@ function diffSingleSlideMarkdown(
 		newBodyLines = newLines.slice(1);
 		const oTitle = oldHead[2].trim();
 		const nTitle = newHead[2].trim();
+		const oFull = `${oldHead[1]} ${oTitle}`;
+		const nFull = `${newHead[1]} ${nTitle}`;
 		if (oTitle !== nTitle) {
-			const hDiff = diffTwoBlocks(oTitle, nTitle, blockDiffThreshold);
+			const hDiff = diffTwoBlocks(oTitle, nTitle, blockDiffThreshold, "head");
 			if (hDiff) {
-				outParts.push(`${newHead[1]} ${hDiff.out}`);
-				addedCount += hDiff.ins;
-				removedCount += hDiff.del;
+				units.push({
+					id: "head",
+					oldText: oFull,
+					newText: nFull,
+					renderedParts: [`${newHead[1]} ${hDiff.out}`],
+					ins: hDiff.ins,
+					del: hDiff.del,
+				});
 			} else {
-				outParts.push(`${newHead[1]} <del class="dv-del">${oTitle}</del> <ins class="dv-ins">${nTitle}</ins>`);
-				addedCount++;
-				removedCount++;
+				const attr = diffUnitAttr("head");
+				units.push({
+					id: "head",
+					oldText: oFull,
+					newText: nFull,
+					renderedParts: [`${newHead[1]} <del class="dv-del"${attr}>${oTitle}</del> <ins class="dv-ins"${attr}>${nTitle}</ins>`],
+					ins: 1,
+					del: 1,
+				});
 			}
 		} else {
-			outParts.push(`${newHead[1]} ${nTitle}`);
+			units.push({
+				id: null,
+				oldText: oFull,
+				newText: nFull,
+				renderedParts: [nFull],
+				ins: 0,
+				del: 0,
+			});
 		}
 	} else if (newHead) {
 		newBodyLines = newLines.slice(1);
-		outParts.push(`${newHead[1]} <ins class="dv-ins">${newHead[2].trim()}</ins>`);
-		addedCount++;
+		const nFull = `${newHead[1]} ${newHead[2].trim()}`;
+		units.push({
+			id: "head",
+			oldText: null,
+			newText: nFull,
+			renderedParts: [`${newHead[1]} <ins class="dv-ins"${diffUnitAttr("head")}>${newHead[2].trim()}</ins>`],
+			ins: 1,
+			del: 0,
+		});
+	} else if (oldHead && cleanNew.length === 0) {
+		oldBodyLines = oldLines.slice(1);
+		const oFull = `${oldHead[1]} ${oldHead[2].trim()}`;
+		units.push({
+			id: "head",
+			oldText: oFull,
+			newText: null,
+			renderedParts: [`${oldHead[1]} <del class="dv-del"${diffUnitAttr("head")}>${oldHead[2].trim()}</del>`],
+			ins: 0,
+			del: 1,
+		});
 	}
 
 	const oBlocks = splitSectionIntoBlocks(oldBodyLines);
@@ -613,51 +679,159 @@ function diffSingleSlideMarkdown(
 	for (const op of ops) {
 		if (op.tag === "equal") {
 			for (let k = op.j1; k < op.j2; k++) {
-				outParts.push(nBlocks[k]);
+				units.push({
+					id: null,
+					oldText: nBlocks[k],
+					newText: nBlocks[k],
+					renderedParts: [nBlocks[k]],
+					ins: 0,
+					del: 0,
+				});
 			}
 		} else if (op.tag === "delete") {
 			for (let k = op.i1; k < op.i2; k++) {
-				outParts.push(wrapBlockSpan(oBlocks[k], false));
-				removedCount++;
+				const uid = nextUnitId();
+				units.push({
+					id: uid,
+					oldText: oBlocks[k],
+					newText: null,
+					renderedParts: [wrapBlockSpan(oBlocks[k], false, uid)],
+					ins: 0,
+					del: 1,
+				});
 			}
 		} else if (op.tag === "insert") {
 			for (let k = op.j1; k < op.j2; k++) {
-				outParts.push(wrapBlockSpan(nBlocks[k], true));
-				addedCount++;
+				const uid = nextUnitId();
+				units.push({
+					id: uid,
+					oldText: null,
+					newText: nBlocks[k],
+					renderedParts: [wrapBlockSpan(nBlocks[k], true, uid)],
+					ins: 1,
+					del: 0,
+				});
 			}
 		} else if (op.tag === "replace") {
 			const delSlice = oBlocks.slice(op.i1, op.i2);
 			const insSlice = nBlocks.slice(op.j1, op.j2);
 			const pairCount = Math.min(delSlice.length, insSlice.length);
 			for (let p = 0; p < pairCount; p++) {
-				const inline = diffTwoBlocks(delSlice[p], insSlice[p], blockDiffThreshold);
+				const uid = nextUnitId();
+				const inline = diffTwoBlocks(delSlice[p], insSlice[p], blockDiffThreshold, uid);
 				if (inline) {
-					outParts.push(inline.out);
-					addedCount += inline.ins;
-					removedCount += inline.del;
+					units.push({
+						id: uid,
+						oldText: delSlice[p],
+						newText: insSlice[p],
+						renderedParts: [inline.out],
+						ins: inline.ins,
+						del: inline.del,
+					});
 				} else {
-					outParts.push(wrapBlockSpan(delSlice[p], false));
-					outParts.push(wrapBlockSpan(insSlice[p], true));
-					removedCount++;
-					addedCount++;
+					units.push({
+						id: uid,
+						oldText: delSlice[p],
+						newText: insSlice[p],
+						renderedParts: [
+							wrapBlockSpan(delSlice[p], false, uid),
+							wrapBlockSpan(insSlice[p], true, uid),
+						],
+						ins: 1,
+						del: 1,
+					});
 				}
 			}
 			for (let p = pairCount; p < delSlice.length; p++) {
-				outParts.push(wrapBlockSpan(delSlice[p], false));
-				removedCount++;
+				const uid = nextUnitId();
+				units.push({
+					id: uid,
+					oldText: delSlice[p],
+					newText: null,
+					renderedParts: [wrapBlockSpan(delSlice[p], false, uid)],
+					ins: 0,
+					del: 1,
+				});
 			}
 			for (let p = pairCount; p < insSlice.length; p++) {
-				outParts.push(wrapBlockSpan(insSlice[p], true));
-				addedCount++;
+				const uid = nextUnitId();
+				units.push({
+					id: uid,
+					oldText: null,
+					newText: insSlice[p],
+					renderedParts: [wrapBlockSpan(insSlice[p], true, uid)],
+					ins: 1,
+					del: 0,
+				});
 			}
 		}
 	}
 
+	return units;
+}
+
+export function diffSingleSlideMarkdown(
+	oldSlideMd: string | null,
+	newSlideMd: string,
+	blockDiffThreshold: number
+): { diffMarkdown: string; addedCount: number; removedCount: number; hasChanges: boolean } {
+	const units = buildSlideDiffUnits(oldSlideMd, newSlideMd, blockDiffThreshold);
+	const outParts: string[] = [];
+	let addedCount = 0;
+	let removedCount = 0;
+	for (const u of units) {
+		outParts.push(...u.renderedParts);
+		addedCount += u.ins;
+		removedCount += u.del;
+	}
 	return {
 		diffMarkdown: outParts.join("\n\n"),
 		addedCount,
 		removedCount,
 		hasChanges: addedCount > 0 || removedCount > 0,
+	};
+}
+
+/**
+ * Validates ONLY the selected diff unit IDs (`data-sf-diff-unit`) within a single slide,
+ * advancing those blocks from their old text to their new text while leaving all other
+ * unread diffs on the slide completely intact.
+ */
+export function applyBlockDiffValidations(
+	oldSlideMd: string | null,
+	newSlideMd: string,
+	unitIdsToValidate: Set<string>,
+	blockDiffThreshold: number
+): {
+	appliedCount: number;
+	updatedOldMarkdown: string;
+	nextDiff: { diffMarkdown: string; addedCount: number; removedCount: number; hasChanges: boolean };
+} {
+	const units = buildSlideDiffUnits(oldSlideMd, newSlideMd, blockDiffThreshold);
+	const nextOldParts: string[] = [];
+	let appliedCount = 0;
+
+	for (const u of units) {
+		if (u.id && unitIdsToValidate.has(u.id)) {
+			appliedCount++;
+			if (u.newText !== null) {
+				nextOldParts.push(u.newText);
+			}
+		} else {
+			if (u.oldText !== null) {
+				nextOldParts.push(u.oldText);
+			}
+		}
+	}
+
+	const updatedOldMarkdown = nextOldParts.join("\n\n").trim();
+	const nextOldInput =
+		oldSlideMd === null && updatedOldMarkdown.length === 0 ? null : updatedOldMarkdown;
+	const nextDiff = diffSingleSlideMarkdown(nextOldInput, newSlideMd, blockDiffThreshold);
+	return {
+		appliedCount,
+		updatedOldMarkdown,
+		nextDiff,
 	};
 }
 
@@ -681,15 +855,41 @@ function bodyWordSimilarity(oldBody: string, newBody: string): number {
 	return (2 * inter) / (setA.size + setB.size);
 }
 
-function buildDeletedSectionDiffMarkdown(slice: FlatSectionSlice): string {
+export function buildDeletedSectionDiffMarkdown(slice: FlatSectionSlice): string {
 	const outParts: string[] = [];
 	const hashes = "#".repeat(Math.min(6, Math.max(1, slice.level || 2)));
-	outParts.push(`${hashes} <del class="dv-del">${slice.title}</del>`);
+	outParts.push(`${hashes} <del class="dv-del"${diffUnitAttr("head")}>${slice.title}</del>`);
 	outParts.push(`<div class="slideflow-deleted-sections-title">Section removed since last review</div>`);
-	for (const b of splitSectionIntoBlocks(slice.ownLines)) {
-		outParts.push(wrapBlockSpan(b, false));
+	const blocks = splitSectionIntoBlocks(slice.ownLines);
+	for (let i = 0; i < blocks.length; i++) {
+		outParts.push(wrapBlockSpan(blocks[i], false, `u${i}`));
 	}
 	return outParts.join("\n\n");
+}
+
+export function buildDeletedMarkdownFromRaw(rawOldMarkdown: string): {
+	diffMarkdown: string;
+	bodyBlockCount: number;
+} {
+	const clean = rawOldMarkdown.replace(/\r\n/g, "\n").trim();
+	if (!clean) return { diffMarkdown: "", bodyBlockCount: 0 };
+	const lines = clean.split("\n");
+	const headMatch = (lines[0] || "").match(/^(#{1,6})\s+(.+)$/);
+	const outParts: string[] = [];
+	let bodyLines = lines;
+	if (headMatch) {
+		outParts.push(`${headMatch[1]} <del class="dv-del"${diffUnitAttr("head")}>${headMatch[2].trim()}</del>`);
+		bodyLines = lines.slice(1);
+	}
+	outParts.push(`<div class="slideflow-deleted-sections-title">Section removed since last review</div>`);
+	const blocks = splitSectionIntoBlocks(bodyLines);
+	for (let i = 0; i < blocks.length; i++) {
+		outParts.push(wrapBlockSpan(blocks[i], false, `u${i}`));
+	}
+	return {
+		diffMarkdown: outParts.join("\n\n"),
+		bodyBlockCount: blocks.length,
+	};
 }
 
 export function buildNoteDiffContext(
@@ -868,6 +1068,21 @@ export function buildNoteDiffContext(
 
 		const seenDel = seenSlides[delSlideKey];
 		if (seenDel && seenDel.hash === delHash) {
+			continue;
+		}
+		if (seenDel && seenDel.hash !== delHash) {
+			const remainingRaw = seenDel.text.replace(/\r\n/g, "\n").trim();
+			if (!remainingRaw) {
+				continue;
+			}
+			const remLines = remainingRaw.split("\n");
+			const remHead = (remLines[0] || "").match(/^(#{1,6})\s+(.+)$/);
+			const partialSlice: FlatSectionSlice = {
+				...o,
+				ownLines: remHead ? remLines.slice(1) : remLines,
+				ownMarkdown: remainingRaw,
+			};
+			unseenDeletedCandidates.push({ idx, slice: partialSlice, delSlideKey, delHash });
 			continue;
 		}
 

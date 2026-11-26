@@ -36,10 +36,13 @@ export interface CockpitBarState {
 	diffEnabled: boolean;
 	dirtySlidesCount: number;
 	currentSlideHasDiff: boolean;
+	readingFocusActive?: boolean;
 	currentSlideCommentsCount: number;
 	totalPendingCommentsCount: number;
 	directCliEnabled: boolean;
 }
+
+export type InternalLinkVisualState = "normal" | "dirty" | "already-open";
 
 export interface SlideRenderDecoration {
 	overrideMarkdown?: string;
@@ -306,6 +309,14 @@ export class PresentationModal extends Component {
 				".dynamic-slides-child-heading a.internal-link"
 			) as HTMLElement | null;
 			if (directChildLinkEl) {
+				if (
+					directChildLinkEl.classList.contains("slideflow-link-already-open") ||
+					directChildLinkEl.getAttribute("aria-disabled") === "true"
+				) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					return;
+				}
 				const href =
 					directChildLinkEl.getAttribute("data-href") ||
 					directChildLinkEl.getAttribute("href");
@@ -334,6 +345,14 @@ export class PresentationModal extends Component {
 
 			const linkEl = target.closest('.internal-link') as HTMLElement;
 			if (linkEl) {
+				if (
+					linkEl.classList.contains("slideflow-link-already-open") ||
+					linkEl.getAttribute("aria-disabled") === "true"
+				) {
+					evt.preventDefault();
+					evt.stopPropagation();
+					return;
+				}
 				const href = linkEl.getAttribute('data-href') || linkEl.getAttribute('href');
 				if (href) {
 					evt.preventDefault();
@@ -769,6 +788,12 @@ export class PresentationModal extends Component {
 	}
 
 	private activateLinkElement(linkEl: HTMLElement): boolean {
+		if (
+			linkEl.classList.contains("slideflow-link-already-open") ||
+			linkEl.getAttribute("aria-disabled") === "true"
+		) {
+			return false;
+		}
 		if (linkEl.classList.contains("internal-link")) {
 			const href = (linkEl.getAttribute("data-href") || linkEl.getAttribute("href") || "").trim();
 			if (!href) return false;
@@ -992,16 +1017,25 @@ export class PresentationModal extends Component {
 			this.queueBtnEl.style.display = "none";
 		}
 
+		const validateLabel = state.readingFocusActive ? "Validate block" : "Validate diff";
+		const validateTitle = state.readingFocusActive
+			? "Validate diff of selected block only (Ctrl+Enter)"
+			: "Validate slide diff (Ctrl+Enter)";
+
 		if (state.directCliEnabled) {
 			if (state.currentSlideHasDiff) {
 				this.copyBtnEl.style.display = "inline-flex";
-				this.copyBtnEl.innerHTML = `<span>Validate diff</span> <strong>Ctrl+↵</strong>`;
-				this.copyBtnEl.setAttribute("title", "Validate slide diff (Ctrl+Enter)");
+				this.copyBtnEl.innerHTML = `<span>${validateLabel}</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", validateTitle);
 			} else {
 				this.copyBtnEl.style.display = "none";
 			}
 		} else {
-			if (state.currentSlideHasDiff && state.totalPendingCommentsCount > 0) {
+			if (state.currentSlideHasDiff && state.readingFocusActive) {
+				this.copyBtnEl.style.display = "inline-flex";
+				this.copyBtnEl.innerHTML = `<span>Validate block</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", validateTitle);
+			} else if (state.currentSlideHasDiff && state.totalPendingCommentsCount > 0) {
 				this.copyBtnEl.style.display = "inline-flex";
 				this.copyBtnEl.innerHTML = `<span>Validate & Copy</span> <strong>Ctrl+↵</strong>`;
 				this.copyBtnEl.setAttribute("title", "Validate slide diff & copy all XML comments (Ctrl+Enter)");
@@ -1692,6 +1726,14 @@ export class PresentationModal extends Component {
 				}
 				const linkEl = target.closest(".internal-link") as HTMLElement | null;
 				if (linkEl) {
+					if (
+						linkEl.classList.contains("slideflow-link-already-open") ||
+						linkEl.getAttribute("aria-disabled") === "true"
+					) {
+						evt.preventDefault();
+						evt.stopPropagation();
+						return;
+					}
 					const href = linkEl.getAttribute("data-href") || linkEl.getAttribute("href");
 					if (href) {
 						evt.preventDefault();
@@ -2014,30 +2056,54 @@ export class PresentationModal extends Component {
 		}
 	}
 
-	public decorateModifiedInternalLinks(isDirtyHref: (href: string) => boolean): void {
-		if (!this.contentEl) return;
-		this.contentEl.querySelectorAll(".slideflow-link-dirty-badge").forEach((el) => el.remove());
-		const links = Array.from(
-			this.contentEl.querySelectorAll<HTMLElement>(
-				"a.internal-link, .slideflow-child-heading-linked-title[data-link-href]"
-			)
-		);
-		for (const linkEl of links) {
-			const href =
-				linkEl.getAttribute("data-href") ||
-				linkEl.getAttribute("data-link-href") ||
-				linkEl.getAttribute("href") ||
-				"";
-			if (!href) continue;
-			if (isDirtyHref(href)) {
-				linkEl.addClass("slideflow-link-has-diff");
-				const dot = document.createElement("span");
-				dot.className = "slideflow-link-dirty-badge";
-				dot.setAttribute("title", "Modified since last review (unread diff)");
-				dot.setAttribute("aria-label", "Modified since last review");
-				linkEl.appendChild(dot);
-			} else {
+	public decorateModifiedInternalLinks(
+		getLinkState: (href: string) => InternalLinkVisualState | boolean
+	): void {
+		const containers: HTMLElement[] = [];
+		if (this.contentEl) containers.push(this.contentEl);
+		if (this.zoomContentEl && this.isMediaZoomActive()) {
+			containers.push(this.zoomContentEl);
+		}
+		for (const root of containers) {
+			root.querySelectorAll(".slideflow-link-dirty-badge").forEach((el) => el.remove());
+			const links = Array.from(
+				root.querySelectorAll<HTMLElement>(
+					"a.internal-link, .slideflow-child-heading-linked-title[data-link-href]"
+				)
+			);
+			for (const linkEl of links) {
 				linkEl.removeClass("slideflow-link-has-diff");
+				linkEl.removeClass("slideflow-link-already-open");
+				linkEl.removeAttribute("aria-disabled");
+				linkEl.removeAttribute("data-slideflow-already-open");
+
+				const href =
+					linkEl.getAttribute("data-href") ||
+					linkEl.getAttribute("data-link-href") ||
+					linkEl.getAttribute("href") ||
+					"";
+				if (!href) continue;
+
+				const rawState = getLinkState(href);
+				const state: InternalLinkVisualState =
+					typeof rawState === "boolean" ? (rawState ? "dirty" : "normal") : rawState;
+
+				if (state === "already-open") {
+					linkEl.addClass("slideflow-link-already-open");
+					linkEl.setAttribute("aria-disabled", "true");
+					linkEl.setAttribute("data-slideflow-already-open", "true");
+					linkEl.setAttribute(
+						"title",
+						"Déjà ouvert à un niveau supérieur dans SlideFlow (Échap pour revenir)"
+					);
+				} else if (state === "dirty") {
+					linkEl.addClass("slideflow-link-has-diff");
+					const dot = document.createElement("span");
+					dot.className = "slideflow-link-dirty-badge";
+					dot.setAttribute("title", "Modified since last review (unread diff)");
+					dot.setAttribute("aria-label", "Modified since last review");
+					linkEl.appendChild(dot);
+				}
 			}
 		}
 	}
@@ -2545,7 +2611,8 @@ export class PresentationModal extends Component {
 	public async refreshSlideInPlace(
 		node: SectionNode,
 		sourcePath: string,
-		decoration?: SlideRenderDecoration
+		decoration?: SlideRenderDecoration,
+		overrideReadingFocusIndex?: number
 	): Promise<void> {
 		this.hideSelectionToolbar();
 		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
@@ -2591,8 +2658,12 @@ export class PresentationModal extends Component {
 		}
 
 		if (this.readingFocusActive && !this.isMediaZoomActive()) {
+			const targetFocusIdx =
+				typeof overrideReadingFocusIndex === "number"
+					? Math.max(0, overrideReadingFocusIndex)
+					: Math.max(0, this.readingFocusIndex);
 			this.restoreReadingFocusAfterRender(
-				Math.max(0, this.readingFocusIndex),
+				targetFocusIdx,
 				false,
 				prevFocusedLinkIdx >= 0 ? prevFocusedLinkIdx : undefined
 			);

@@ -906,6 +906,12 @@ function isActionableLinkCandidate(
 	contentEl?: HTMLElement | null
 ): boolean {
 	if (!linkEl.isConnected) return false;
+	if (
+		linkEl.classList.contains("slideflow-link-already-open") ||
+		linkEl.getAttribute("aria-disabled") === "true"
+	) {
+		return false;
+	}
 	if (linkEl.closest(".copy-code-button, .slideflow-selection-toolbar, .slideflow-comments-rail")) {
 		return false;
 	}

@@ -3068,6 +3068,43 @@ mark.slideflow-comment-mark.is-partial-in-link.is-failed {
 	pointer-events: none;
 }
 
+/* Already-open ancestor note link (prevents cyclic note loops A -> B -> A) */
+.dynamic-slides-content .internal-link.slideflow-link-already-open,
+.dynamic-slides-media-zoom-content .internal-link.slideflow-link-already-open,
+.dynamic-slides-content .slideflow-child-heading-linked-title.slideflow-link-already-open {
+	color: var(--text-muted) !important;
+	opacity: 0.68;
+	text-decoration: none !important;
+	border-bottom: 1px dashed var(--text-faint, rgba(128, 128, 128, 0.55));
+	background-color: var(--background-modifier-hover, rgba(128, 128, 128, 0.1));
+	padding: 0 5px 1px 5px;
+	border-radius: 5px;
+	cursor: default !important;
+	transition: none !important;
+}
+
+.dynamic-slides-content .internal-link.slideflow-link-already-open:hover,
+.dynamic-slides-media-zoom-content .internal-link.slideflow-link-already-open:hover,
+.dynamic-slides-content .slideflow-child-heading-linked-title.slideflow-link-already-open:hover {
+	color: var(--text-muted) !important;
+	opacity: 0.68;
+	text-decoration: none !important;
+	cursor: default !important;
+}
+
+.dynamic-slides-content .internal-link.slideflow-link-already-open::after,
+.dynamic-slides-media-zoom-content .internal-link.slideflow-link-already-open::after,
+.dynamic-slides-content .slideflow-child-heading-linked-title.slideflow-link-already-open::after {
+	content: " ↩ ouvert";
+	font-size: 0.72em;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	margin-left: 3px;
+	color: var(--text-faint, var(--text-muted));
+	opacity: 0.9;
+	pointer-events: none;
+}
+
 /* Section & child-heading unread diff dots inside slides (mirrors TOC dot semantics) */
 .slideflow-heading-diff-dot {
 	display: inline-block;

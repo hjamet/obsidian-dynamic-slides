@@ -150,6 +150,36 @@ export class BaselinesStore {
 	}
 
 	/**
+	 * Persists a partial block-level validation for a single slide without marking the entire slide
+	 * (or note) fully read. `partialOldMarkdown` becomes the new effective old baseline for this slide
+	 * so validated paragraphs disappear immediately and stay cleared on subsequent openings.
+	 */
+	public markSlidePartialSeen(
+		notePath: string,
+		slideKey: string,
+		partialOldMarkdown: string
+	): Promise<void> {
+		const norm = normalizeVaultPath(notePath);
+		const run = async (): Promise<void> => {
+			const data = await this.reload();
+			const entry = data.notes[norm];
+			if (!entry) return;
+			if (!entry.seenSlides) {
+				entry.seenSlides = {};
+			}
+			entry.seenSlides[slideKey] = {
+				hash: hashText(partialOldMarkdown),
+				text: partialOldMarkdown,
+				seenAt: new Date().toISOString(),
+			};
+			await this.saveLocked(data);
+		};
+		const chained = this.writeChain.then(run, run);
+		this.writeChain = chained.then(() => undefined, () => undefined);
+		return chained;
+	}
+
+	/**
 	 * Marks one slide as seen for future openings.
 	 */
 	public markSlideSeen(
