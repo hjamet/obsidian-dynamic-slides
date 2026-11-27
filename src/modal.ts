@@ -36,7 +36,6 @@ export interface CockpitBarState {
 	diffEnabled: boolean;
 	dirtySlidesCount: number;
 	currentSlideHasDiff: boolean;
-	readingFocusActive?: boolean;
 	currentSlideCommentsCount: number;
 	totalPendingCommentsCount: number;
 	directCliEnabled: boolean;
@@ -1054,25 +1053,16 @@ export class PresentationModal extends Component {
 			this.queueBtnEl.style.display = "none";
 		}
 
-		const validateLabel = state.readingFocusActive ? "Validate block" : "Validate diff";
-		const validateTitle = state.readingFocusActive
-			? "Validate diff of selected block only (Ctrl+Enter)"
-			: "Validate slide diff (Ctrl+Enter)";
-
 		if (state.directCliEnabled) {
 			if (state.currentSlideHasDiff) {
 				this.copyBtnEl.style.display = "inline-flex";
-				this.copyBtnEl.innerHTML = `<span>${validateLabel}</span> <strong>Ctrl+↵</strong>`;
-				this.copyBtnEl.setAttribute("title", validateTitle);
+				this.copyBtnEl.innerHTML = `<span>Validate diff</span> <strong>Ctrl+↵</strong>`;
+				this.copyBtnEl.setAttribute("title", "Validate slide diff (Ctrl+Enter)");
 			} else {
 				this.copyBtnEl.style.display = "none";
 			}
 		} else {
-			if (state.currentSlideHasDiff && state.readingFocusActive) {
-				this.copyBtnEl.style.display = "inline-flex";
-				this.copyBtnEl.innerHTML = `<span>Validate block</span> <strong>Ctrl+↵</strong>`;
-				this.copyBtnEl.setAttribute("title", validateTitle);
-			} else if (state.currentSlideHasDiff && state.totalPendingCommentsCount > 0) {
+			if (state.currentSlideHasDiff && state.totalPendingCommentsCount > 0) {
 				this.copyBtnEl.style.display = "inline-flex";
 				this.copyBtnEl.innerHTML = `<span>Validate & Copy</span> <strong>Ctrl+↵</strong>`;
 				this.copyBtnEl.setAttribute("title", "Validate slide diff & copy all XML comments (Ctrl+Enter)");
@@ -3031,8 +3021,7 @@ export class PresentationModal extends Component {
 	public async refreshSlideInPlace(
 		node: SectionNode,
 		sourcePath: string,
-		decoration?: SlideRenderDecoration,
-		overrideReadingFocusIndex?: number
+		decoration?: SlideRenderDecoration
 	): Promise<void> {
 		this.hideSelectionToolbar();
 		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
@@ -3088,12 +3077,8 @@ export class PresentationModal extends Component {
 		}
 
 		if (this.readingFocusActive && !this.isMediaZoomActive()) {
-			const targetFocusIdx =
-				typeof overrideReadingFocusIndex === "number"
-					? Math.max(0, overrideReadingFocusIndex)
-					: Math.max(0, this.readingFocusIndex);
 			this.restoreReadingFocusAfterRender(
-				targetFocusIdx,
+				Math.max(0, this.readingFocusIndex),
 				false,
 				prevFocusedLinkIdx >= 0 ? prevFocusedLinkIdx : undefined
 			);

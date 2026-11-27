@@ -56,10 +56,9 @@ export function buildChildHeadingsHtml(
 		.join("\n");
 }
 
-export function buildInlineDeletedHeadingHtml(item: { id?: string; title: string; level: number }): string {
+export function buildInlineDeletedHeadingHtml(item: { title: string; level: number }): string {
 	const inner = renderChildHeadingInnerHtml(item.title, false);
-	const idAttr = item.id ? ` data-deleted-id="${item.id}"` : "";
-	return `<div class="dynamic-slides-child-heading level-${item.level} is-deleted-child-heading is-inline-deleted-heading"${idAttr} title="Deleted title-only subsection — press Ctrl+Enter to validate"><del class="dv-del">${inner}</del></div>`;
+	return `<div class="dynamic-slides-child-heading level-${item.level} is-deleted-child-heading is-inline-deleted-heading" title="Deleted title-only subsection — press Ctrl+Enter to validate"><del class="dv-del">${inner}</del></div>`;
 }
 
 export function stripFrontmatterWithOffset(markdown: string): { text: string; strippedLines: number } {
