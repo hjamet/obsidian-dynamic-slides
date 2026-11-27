@@ -183,6 +183,13 @@ body.is-dynamic-slides-active {
 	color: #ffffff !important;
 }
 
+.slideflow-bottom-left-row {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: nowrap;
+}
+
 .dynamic-slides-toc-hover-toggle {
 	appearance: none;
 	-webkit-appearance: none;
@@ -198,6 +205,7 @@ body.is-dynamic-slides-active {
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16) !important;
+	white-space: nowrap;
 	user-select: none;
 	cursor: pointer;
 }
@@ -205,6 +213,40 @@ body.is-dynamic-slides-active {
 .dynamic-slides-toc-hover-toggle:hover {
 	border-color: var(--interactive-accent) !important;
 	color: var(--text-accent) !important;
+}
+
+.slideflow-validate-all-diffs-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.12s ease;
+	background: var(--background-secondary-alt, var(--background-secondary)) !important;
+	border: 1px solid rgba(21, 128, 61, 0.45) !important;
+	border-radius: 999px;
+	padding: 7px 14px;
+	height: auto;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--sf-diff-ins-fg, #15803d) !important;
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16) !important;
+	white-space: nowrap;
+	user-select: none;
+	cursor: pointer;
+}
+
+.slideflow-validate-all-diffs-btn:hover {
+	background-color: #15803d !important;
+	border-color: #15803d !important;
+	color: #ffffff !important;
+}
+
+.slideflow-validate-all-diffs-btn:active {
+	transform: scale(0.97);
 }
 
 /* Bottom-right Zoom Zone & Toolbar (slides smoothly from right only on hover) */

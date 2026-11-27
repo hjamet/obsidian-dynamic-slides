@@ -68,6 +68,7 @@ export class PresentationModal extends Component {
 	public onZoomChangeCallback?: (zoom: number) => void;
 	public onChildHeadingClickCallback?: (nodeId: string) => void;
 	public onToggleDiffClickCallback?: () => void;
+	public onValidateAllDiffsClickCallback?: () => void;
 	public onCommentTextClickCallback?: () => void;
 	public onCommentVoiceClickCallback?: () => void;
 	public onToggleHighlightClickCallback?: () => void;
@@ -87,6 +88,7 @@ export class PresentationModal extends Component {
 
 	// Bottom-left hover action controls (no emojis, English labels, bold shortcuts)
 	private diffToggleBtnEl: HTMLButtonElement;
+	private validateAllDiffsBtnEl: HTMLButtonElement;
 	private commentTextBtnEl: HTMLButtonElement;
 	private commentVoiceBtnEl: HTMLButtonElement;
 	private highlightBtnEl: HTMLButtonElement;
@@ -245,7 +247,9 @@ export class PresentationModal extends Component {
 			this.onCopyOneShotClickCallback?.();
 		});
 
-		this.hoverToggleBtnEl = leftStackEl.createEl("button", {
+		const bottomLeftRowEl = leftStackEl.createDiv({ cls: "slideflow-bottom-left-row" });
+
+		this.hoverToggleBtnEl = bottomLeftRowEl.createEl("button", {
 			text: "Table of contents",
 			cls: "dynamic-slides-toc-hover-toggle",
 			attr: { type: "button", "aria-label": "Toggle TOC" }
@@ -255,6 +259,21 @@ export class PresentationModal extends Component {
 			if (this.tocComp) {
 				this.tocComp.toggleSidebar();
 			}
+		});
+
+		this.validateAllDiffsBtnEl = bottomLeftRowEl.createEl("button", {
+			text: "Validate all diffs",
+			cls: "slideflow-validate-all-diffs-btn",
+			attr: {
+				type: "button",
+				"aria-label": "Validate all diffs in current note",
+				title: "Immediately validate all unread diffs in the current note"
+			}
+		});
+		this.validateAllDiffsBtnEl.style.display = "none";
+		this.validateAllDiffsBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onValidateAllDiffsClickCallback?.();
 		});
 
 		// Bottom-right Zoom Zone & Toolbar (slides smoothly in from the right on hover)
@@ -1034,8 +1053,12 @@ export class PresentationModal extends Component {
 				? `<span>Diff on</span> <strong>D</strong>`
 				: `<span>Diff off</span> <strong>D</strong>`;
 			this.diffToggleBtnEl.toggleClass("is-active", state.diffEnabled);
+			this.validateAllDiffsBtnEl.style.display = "inline-flex";
+			const countSuffix = state.dirtySlidesCount > 1 ? ` (${state.dirtySlidesCount})` : "";
+			this.validateAllDiffsBtnEl.setText(`Validate all diffs${countSuffix}`);
 		} else {
 			this.diffToggleBtnEl.style.display = "none";
+			this.validateAllDiffsBtnEl.style.display = "none";
 		}
 
 		if (state.currentSlideCommentsCount > 0) {

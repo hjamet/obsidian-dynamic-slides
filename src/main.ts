@@ -941,10 +941,14 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeSourcePath,
 			this.currentNode.title
 		);
+		const hasNoteDiff = Boolean(
+			this.activeDiffContext &&
+				(this.activeDiffContext.totalDirtySlides > 0 ||
+					this.activeDiffContext.deletedSections.length > 0 ||
+					Array.from(this.activeDiffContext.slideDiffs.values()).some((s) => s.hasChanges))
+		);
 		this.activeModal.updateCockpitBar({
-			hasNoteDiff: Boolean(
-				this.activeDiffContext && this.activeDiffContext.totalDirtySlides > 0
-			),
+			hasNoteDiff,
 			diffEnabled: this.diffEnabled,
 			dirtySlidesCount: this.activeDiffContext?.totalDirtySlides || 0,
 			currentSlideHasDiff: this.hasNodeUnreadDiff(this.currentNode),
@@ -1441,6 +1445,79 @@ export default class SlideFlowPlugin extends Plugin {
 		return "validated";
 	}
 
+	/**
+	 * Immediately validates all unread diffs of the currently displayed note in one click,
+	 * purging its entry from `_agents/unread_baselines.json`, removing any virtual deleted
+	 * slides from the active tree, and refreshing the current slide & TOC cleanly.
+	 */
+	private async validateAllNoteDiffs(): Promise<void> {
+		const hadContext = Boolean(this.activeDiffContext);
+		const hadBaseline = this.activeSourcePath
+			? this.baselinesStore.hasUnreadBaseline(this.activeSourcePath)
+			: false;
+		if (!hadContext && !hadBaseline) {
+			new Notice("No unread diffs in this note.");
+			return;
+		}
+
+		if (this.activeSourcePath) {
+			await this.baselinesStore.markEntireNoteRead(this.activeSourcePath);
+		}
+
+		const prevNode = this.currentNode;
+		const prevIdx = prevNode ? this.flatNodes.findIndex((n) => n.id === prevNode.id) : 0;
+		const wasOnVirtualDeleted = Boolean(prevNode?.isVirtualDeleted);
+
+		const virtualNodes = this.flatNodes
+			.filter((n) => n.isVirtualDeleted)
+			.sort((a, b) => b.level - a.level);
+		for (const vn of virtualNodes) {
+			this.removeVirtualDeletedNode(vn);
+		}
+
+		this.activeDiffContext = null;
+		this.diffEnabled = false;
+
+		let targetNode: SectionNode | null = prevNode;
+		const stillExists = Boolean(targetNode && this.flatNodes.some((n) => n.id === targetNode!.id));
+		if (wasOnVirtualDeleted || !stillExists || (targetNode && this.isSkippedEmptySlide(targetNode))) {
+			const minValidIdx = this.flatNodes.length > 1 ? 1 : 0;
+			let picked: SectionNode | null = null;
+			for (let i = Math.max(minValidIdx, prevIdx); i < this.flatNodes.length; i++) {
+				if (!this.isSkippedEmptySlide(this.flatNodes[i])) {
+					picked = this.flatNodes[i];
+					break;
+				}
+			}
+			if (!picked) {
+				for (let i = Math.min(prevIdx - 1, this.flatNodes.length - 1); i >= minValidIdx; i--) {
+					if (!this.isSkippedEmptySlide(this.flatNodes[i])) {
+						picked = this.flatNodes[i];
+						break;
+					}
+				}
+			}
+			targetNode = picked || this.flatNodes[0] || this.rootNode;
+		}
+
+		if (targetNode && targetNode !== prevNode) {
+			await this.goToNode(targetNode, "next", "start");
+		} else if (this.activeModal && this.currentNode) {
+			await this.activeModal.refreshSlideInPlace(
+				this.currentNode,
+				this.activeSourcePath,
+				this.buildSlideRenderDecoration(this.currentNode)
+			);
+			this.updateSlideCounter();
+			this.refreshAllActiveUI();
+		} else {
+			this.updateSlideCounter();
+			this.refreshAllActiveUI();
+		}
+
+		new Notice("All diffs in this note validated.");
+	}
+
 	private async startPresentation() {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!view) {
@@ -1539,6 +1616,7 @@ export default class SlideFlowPlugin extends Plugin {
 			}
 		};
 		this.activeModal.onToggleDiffClickCallback = () => this.toggleDiffMode();
+		this.activeModal.onValidateAllDiffsClickCallback = () => void this.validateAllNoteDiffs();
 		this.activeModal.onCommentTextClickCallback = () => this.openCommentModal(false);
 		this.activeModal.onCommentVoiceClickCallback = () => this.openCommentModal(true);
 		this.activeModal.onToggleHighlightClickCallback = () => void this.toggleMarkdownHighlight();
