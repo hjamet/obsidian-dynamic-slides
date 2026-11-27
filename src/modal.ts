@@ -71,9 +71,11 @@ export class PresentationModal extends Component {
 	public onToggleDiffClickCallback?: () => void;
 	public onCommentTextClickCallback?: () => void;
 	public onCommentVoiceClickCallback?: () => void;
+	public onToggleHighlightClickCallback?: () => void;
 	public onOpenQueueClickCallback?: () => void;
 	public onCopyOneShotClickCallback?: () => void;
 	public onSelectionCommentCallback?: (range: Range, startWithVoice: boolean) => void;
+	public onSelectionHighlightCallback?: (range: Range) => void;
 	public onHighlightCommentClickCallback?: (commentId: string, anchorRect: AnchorRect) => void;
 	public onMediaZoomOpenedCallback?: () => void;
 	public onMediaZoomClosedCallback?: () => void;
@@ -88,6 +90,7 @@ export class PresentationModal extends Component {
 	private diffToggleBtnEl: HTMLButtonElement;
 	private commentTextBtnEl: HTMLButtonElement;
 	private commentVoiceBtnEl: HTMLButtonElement;
+	private highlightBtnEl: HTMLButtonElement;
 	private queueBtnEl: HTMLButtonElement;
 	private copyBtnEl: HTMLButtonElement;
 
@@ -126,6 +129,16 @@ export class PresentationModal extends Component {
 	private zoomSlideComponent: Component | null = null;
 	private zoomedLiveSourceEl: HTMLElement | null = null;
 	private zoomedLivePlaceholder: Comment | null = null;
+	// Table Zoom row selector & keyboard row navigation (ArrowUp/ArrowDown, Tab/Enter, H/C/V)
+	private zoomTableRowIndex: number = -1;
+	private zoomTableRowEl: HTMLTableRowElement | null = null;
+	private zoomTableScrollEl: HTMLElement | null = null;
+	private zoomTableSelectEl: HTMLSelectElement | null = null;
+	private zoomTableCounterEl: HTMLElement | null = null;
+	private zoomTablePrevBtnEl: HTMLButtonElement | null = null;
+	private zoomTableNextBtnEl: HTMLButtonElement | null = null;
+	private zoomTableFocusedLinkIndex: number = -1;
+	private zoomTableFocusedLinkEl: HTMLElement | null = null;
 	private activePdfBlobUrl: string | null = null;
 	private pdfMutationObserver: MutationObserver | null = null;
 	private pdfKickTimers: number[] = [];
@@ -199,6 +212,16 @@ export class PresentationModal extends Component {
 		this.commentVoiceBtnEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
 			this.onCommentVoiceClickCallback?.();
+		});
+
+		this.highlightBtnEl = actionDockEl.createEl("button", {
+			cls: "slideflow-dock-btn slideflow-highlight-btn",
+			attr: { type: "button", title: "Toggle persistent ==highlight== in note (H)" }
+		});
+		this.highlightBtnEl.innerHTML = `<span>Highlight</span> <strong>H</strong>`;
+		this.highlightBtnEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.onToggleHighlightClickCallback?.();
 		});
 
 		this.queueBtnEl = actionDockEl.createEl("button", {
@@ -972,7 +995,21 @@ export class PresentationModal extends Component {
 			this.onSelectionCommentCallback?.(captured, true);
 		});
 
-		const estW = 190;
+		const highlightBtn = bar.createEl("button", {
+			cls: "slideflow-sel-btn slideflow-sel-highlight-btn",
+			attr: { type: "button", title: "Save ==highlight== in note (H)" },
+		});
+		highlightBtn.innerHTML = `<span>Highlight</span> <strong>H</strong>`;
+		highlightBtn.addEventListener("click", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const captured = this.pendingSelectionRange?.cloneRange() || range.cloneRange();
+			this.hideSelectionToolbar(true);
+			window.getSelection()?.removeAllRanges();
+			this.onSelectionHighlightCallback?.(captured);
+		});
+
+		const estW = 285;
 		const left = Math.max(12, Math.min(window.innerWidth - estW - 12, rect.right - estW));
 		const top = rect.bottom + 8 + 40 < window.innerHeight ? rect.bottom + 8 : Math.max(12, rect.top - 44);
 		bar.style.left = `${Math.round(left)}px`;
@@ -1377,6 +1414,350 @@ export class PresentationModal extends Component {
 		return Boolean(this.zoomContentEl?.querySelector(".dynamic-slides-zoom-pdf"));
 	}
 
+	public isTableZoomActive(): boolean {
+		return Boolean(this.zoomContentEl?.querySelector(".dynamic-slides-zoom-table table"));
+	}
+
+	public getZoomTableElement(): HTMLTableElement | null {
+		return this.zoomContentEl?.querySelector<HTMLTableElement>(".dynamic-slides-zoom-table table") ?? null;
+	}
+
+	public getZoomTableRows(): HTMLTableRowElement[] {
+		const tableEl = this.getZoomTableElement();
+		if (!tableEl) return [];
+		const tbodyRows = Array.from(tableEl.querySelectorAll<HTMLTableRowElement>("tbody tr"));
+		if (tbodyRows.length > 0) return tbodyRows;
+		return Array.from(tableEl.querySelectorAll<HTMLTableRowElement>("tr")).filter((tr) =>
+			Boolean(tr.querySelector("td"))
+		);
+	}
+
+	public getZoomTableRowIndex(): number {
+		return this.getZoomTableRowElement() ? this.zoomTableRowIndex : -1;
+	}
+
+	public getZoomTableRowElement(): HTMLTableRowElement | null {
+		if (
+			this.zoomTableRowEl &&
+			this.zoomTableRowEl.isConnected &&
+			this.zoomContentEl?.contains(this.zoomTableRowEl)
+		) {
+			return this.zoomTableRowEl;
+		}
+		return null;
+	}
+
+	public hasZoomTableRowSelection(): boolean {
+		return this.getZoomTableRowElement() !== null;
+	}
+
+	public hasZoomTableFocusedLink(): boolean {
+		return Boolean(
+			this.zoomTableFocusedLinkEl &&
+				this.zoomTableFocusedLinkEl.isConnected &&
+				this.zoomContentEl?.contains(this.zoomTableFocusedLinkEl)
+		);
+	}
+
+	public clearZoomTableFocusedLink(): void {
+		if (this.zoomTableFocusedLinkEl) {
+			this.zoomTableFocusedLinkEl.removeClass("slideflow-focused-link");
+			this.zoomTableFocusedLinkEl = null;
+		}
+		this.zoomTableFocusedLinkIndex = -1;
+	}
+
+	public stepZoomTableFocusedLink(direction: "next" | "prev"): boolean {
+		if (!this.isTableZoomActive()) return false;
+		const rowEl = this.getZoomTableRowElement();
+		if (!rowEl || !this.zoomContentEl) return false;
+		const links = collectActionableLinksInBlock(rowEl, this.zoomContentEl);
+		if (links.length === 0) {
+			this.clearZoomTableFocusedLink();
+			return false;
+		}
+		const liveIdx = this.zoomTableFocusedLinkEl ? links.indexOf(this.zoomTableFocusedLinkEl) : -1;
+		const nextIdx =
+			liveIdx === -1
+				? direction === "next"
+					? 0
+					: links.length - 1
+				: direction === "next"
+					? (liveIdx + 1) % links.length
+					: (liveIdx - 1 + links.length) % links.length;
+
+		if (this.zoomTableFocusedLinkEl && this.zoomTableFocusedLinkEl !== links[nextIdx]) {
+			this.zoomTableFocusedLinkEl.removeClass("slideflow-focused-link");
+		}
+		this.zoomTableFocusedLinkEl = links[nextIdx];
+		this.zoomTableFocusedLinkIndex = nextIdx;
+		this.zoomTableFocusedLinkEl.addClass("slideflow-focused-link");
+		try {
+			this.zoomTableFocusedLinkEl.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+		} catch {
+			// ignore
+		}
+		return true;
+	}
+
+	public activateZoomTableRowLink(): boolean {
+		if (!this.isTableZoomActive() || !this.zoomContentEl) return false;
+		const rowEl = this.getZoomTableRowElement();
+		if (!rowEl) return false;
+		if (
+			this.zoomTableFocusedLinkEl &&
+			this.zoomTableFocusedLinkEl.isConnected &&
+			rowEl.contains(this.zoomTableFocusedLinkEl)
+		) {
+			return this.activateLinkElement(this.zoomTableFocusedLinkEl);
+		}
+		const preferred = findPreferredLinkInBlock(rowEl, this.zoomContentEl);
+		if (preferred) {
+			return this.activateLinkElement(preferred);
+		}
+		return false;
+	}
+
+	public getActiveTableIndexInSlide(): number {
+		if (!this.contentEl) return 0;
+		const allTables = Array.from(this.contentEl.querySelectorAll<HTMLTableElement>("table"));
+		if (allTables.length <= 1) return 0;
+		const media = this.detectMediaElements();
+		const srcMedia = this.activeZoomIndex >= 0 ? media[this.activeZoomIndex] : null;
+		if (!srcMedia) return 0;
+		const srcTable =
+			srcMedia.tagName.toLowerCase() === "table"
+				? (srcMedia as HTMLTableElement)
+				: srcMedia.querySelector<HTMLTableElement>("table");
+		const idx = srcTable ? allTables.indexOf(srcTable) : -1;
+		return idx >= 0 ? idx : 0;
+	}
+
+	private resetTableZoomState(): void {
+		this.clearZoomTableFocusedLink();
+		if (this.zoomTableRowEl) {
+			this.zoomTableRowEl.removeClass("slideflow-table-row-selected");
+			this.zoomTableRowEl = null;
+		}
+		this.zoomTableRowIndex = -1;
+		this.zoomTableScrollEl = null;
+		this.zoomTableSelectEl = null;
+		this.zoomTableCounterEl = null;
+		this.zoomTablePrevBtnEl = null;
+		this.zoomTableNextBtnEl = null;
+	}
+
+	private syncTableZoomSelectorUI(): void {
+		const rows = this.getZoomTableRows();
+		const total = rows.length;
+		const idx = this.zoomTableRowEl && this.zoomTableRowEl.isConnected ? this.zoomTableRowIndex : -1;
+
+		if (this.zoomTableSelectEl) {
+			this.zoomTableSelectEl.value = String(idx);
+		}
+		if (this.zoomTableCounterEl) {
+			this.zoomTableCounterEl.setText(idx >= 0 ? `Row ${idx + 1} / ${total}` : `${total} rows`);
+		}
+		if (this.zoomTablePrevBtnEl) {
+			this.zoomTablePrevBtnEl.disabled = total === 0 || idx === 0;
+		}
+		if (this.zoomTableNextBtnEl) {
+			this.zoomTableNextBtnEl.disabled = total === 0 || (idx >= 0 && idx >= total - 1);
+		}
+	}
+
+	private scrollTableZoomRowIntoView(rowEl: HTMLTableRowElement): void {
+		const scroller = this.zoomTableScrollEl;
+		if (!scroller || !rowEl.isConnected) return;
+		const thead = this.getZoomTableElement()?.querySelector("thead");
+		const stickyHeaderH = thead ? thead.getBoundingClientRect().height : 0;
+		const scrollerRect = scroller.getBoundingClientRect();
+		const rowRect = rowEl.getBoundingClientRect();
+
+		const visibleTop = scrollerRect.top + stickyHeaderH + 10;
+		const visibleBottom = scrollerRect.bottom - 16;
+
+		if (rowRect.top < visibleTop) {
+			const delta = rowRect.top - visibleTop;
+			scroller.scrollTo({
+				top: Math.max(0, scroller.scrollTop + delta - 12),
+				behavior: "smooth",
+			});
+		} else if (rowRect.bottom > visibleBottom) {
+			const delta = rowRect.bottom - visibleBottom;
+			scroller.scrollTo({
+				top: scroller.scrollTop + delta + 12,
+				behavior: "smooth",
+			});
+		}
+	}
+
+	public selectTableZoomRow(index: number, scrollIntoView: boolean = true): boolean {
+		const rows = this.getZoomTableRows();
+		if (rows.length === 0) return false;
+		if (index < 0) {
+			this.clearTableZoomRowSelection();
+			return true;
+		}
+		const clamped = Math.max(0, Math.min(index, rows.length - 1));
+		const nextRow = rows[clamped];
+
+		if (this.zoomTableRowEl !== nextRow) {
+			this.clearZoomTableFocusedLink();
+		}
+		if (this.zoomTableRowEl && this.zoomTableRowEl !== nextRow) {
+			this.zoomTableRowEl.removeClass("slideflow-table-row-selected");
+		}
+		this.zoomTableRowEl = nextRow;
+		this.zoomTableRowIndex = clamped;
+		this.zoomTableRowEl.addClass("slideflow-table-row-selected");
+
+		if (scrollIntoView) {
+			this.scrollTableZoomRowIntoView(nextRow);
+		}
+		this.syncTableZoomSelectorUI();
+		return true;
+	}
+
+	public stepTableZoomRow(direction: "down" | "up"): boolean {
+		const rows = this.getZoomTableRows();
+		if (rows.length === 0) return false;
+
+		if (
+			document.activeElement instanceof HTMLElement &&
+			this.zoomOverlayEl?.contains(document.activeElement)
+		) {
+			try {
+				document.activeElement.blur();
+			} catch {
+				// ignore
+			}
+		}
+
+		let targetIdx: number;
+		const liveIdx = this.zoomTableRowEl ? rows.indexOf(this.zoomTableRowEl) : -1;
+		if (liveIdx === -1) {
+			const scroller = this.zoomTableScrollEl;
+			if (scroller && scroller.scrollTop > 12) {
+				const thead = this.getZoomTableElement()?.querySelector("thead");
+				const stickyH = thead ? thead.getBoundingClientRect().height : 0;
+				const topBound = scroller.getBoundingClientRect().top + stickyH + 4;
+				const firstVisible = rows.findIndex((r) => r.getBoundingClientRect().bottom > topBound);
+				targetIdx = firstVisible >= 0 ? firstVisible : 0;
+			} else {
+				targetIdx = direction === "down" ? 0 : rows.length - 1;
+			}
+		} else {
+			targetIdx =
+				direction === "down"
+					? Math.min(rows.length - 1, liveIdx + 1)
+					: Math.max(0, liveIdx - 1);
+		}
+
+		return this.selectTableZoomRow(targetIdx, true);
+	}
+
+	public clearTableZoomRowSelection(): void {
+		this.clearZoomTableFocusedLink();
+		if (this.zoomTableRowEl) {
+			this.zoomTableRowEl.removeClass("slideflow-table-row-selected");
+			this.zoomTableRowEl = null;
+		}
+		this.zoomTableRowIndex = -1;
+		this.syncTableZoomSelectorUI();
+	}
+
+	private buildTableRowOptionLabel(rowEl: HTMLTableRowElement, index: number): string {
+		const cells = Array.from(rowEl.children).filter(
+			(c) => c.tagName.toLowerCase() === "td" || c.tagName.toLowerCase() === "th"
+		) as HTMLElement[];
+		const cleanCell = (el: HTMLElement | undefined): string =>
+			(el?.textContent || "").replace(/\s+/g, " ").trim();
+
+		const first = cleanCell(cells[0]);
+		const second = cleanCell(cells[1]);
+		let summary = first || second || `Row ${index + 1}`;
+		if (first && second && first.length < 24) {
+			summary = `${first} · ${second}`;
+		}
+		if (summary.length > 58) {
+			summary = `${summary.slice(0, 57)}…`;
+		}
+		return `${index + 1}. ${summary}`;
+	}
+
+	private mountTableZoomSelectorBar(wrapper: HTMLElement, tableEl: HTMLTableElement): void {
+		const rows = this.getZoomTableRows();
+		const bar = document.createElement("div");
+		bar.className = "slideflow-table-selector-bar";
+		bar.addEventListener("click", (evt) => evt.stopPropagation());
+		bar.addEventListener("mousedown", (evt) => evt.stopPropagation());
+
+		const leftGroup = bar.createDiv({ cls: "slideflow-table-selector-controls" });
+
+		const prevBtn = leftGroup.createEl("button", {
+			cls: "slideflow-table-step-btn",
+			text: "↑",
+			attr: { type: "button", title: "Previous row (ArrowUp)", "aria-label": "Previous row" },
+		});
+		prevBtn.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.stepTableZoomRow("up");
+		});
+
+		const nextBtn = leftGroup.createEl("button", {
+			cls: "slideflow-table-step-btn",
+			text: "↓",
+			attr: { type: "button", title: "Next row (ArrowDown)", "aria-label": "Next row" },
+		});
+		nextBtn.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.stepTableZoomRow("down");
+		});
+
+		const selectEl = leftGroup.createEl("select", {
+			cls: "slideflow-table-row-select",
+			attr: { "aria-label": "Select table row", title: "Jump to a table row" },
+		});
+		const defaultOpt = document.createElement("option");
+		defaultOpt.value = "-1";
+		defaultOpt.textContent = rows.length > 0 ? `Row selector (${rows.length} rows)` : "Empty table";
+		selectEl.appendChild(defaultOpt);
+
+		rows.forEach((tr, idx) => {
+			const opt = document.createElement("option");
+			opt.value = String(idx);
+			opt.textContent = this.buildTableRowOptionLabel(tr, idx);
+			selectEl.appendChild(opt);
+		});
+
+		selectEl.addEventListener("change", () => {
+			const parsed = parseInt(selectEl.value, 10);
+			if (Number.isNaN(parsed) || parsed < 0) {
+				this.clearTableZoomRowSelection();
+			} else {
+				this.selectTableZoomRow(parsed, true);
+			}
+			selectEl.blur();
+		});
+
+		const counterEl = leftGroup.createSpan({
+			cls: "slideflow-table-row-count",
+			text: `${rows.length} rows`,
+		});
+
+		const hintsEl = bar.createDiv({ cls: "slideflow-table-hints" });
+		hintsEl.innerHTML = `<span><strong>↑/↓</strong> Row</span><span><strong>↵</strong> Open</span><span><strong>H</strong> Highlight</span><span><strong>C</strong> Comment</span>`;
+
+		wrapper.insertBefore(bar, wrapper.firstChild);
+
+		this.zoomTableSelectEl = selectEl;
+		this.zoomTableCounterEl = counterEl;
+		this.zoomTablePrevBtnEl = prevBtn;
+		this.zoomTableNextBtnEl = nextBtn;
+		this.syncTableZoomSelectorUI();
+	}
+
 	private getPdfScrollContainer(): HTMLElement | null {
 		if (!this.zoomContentEl) return null;
 		return this.zoomContentEl.querySelector<HTMLElement>(
@@ -1418,6 +1799,7 @@ export class PresentationModal extends Component {
 	}
 
 	private cleanupZoomResources(leaveClosingGhost: boolean = false): void {
+		this.resetTableZoomState();
 		this.restoreZoomedLiveElement(leaveClosingGhost);
 		if (this.pdfWheelBodyEl && this.boundPdfWheelHandler) {
 			this.pdfWheelBodyEl.removeEventListener("wheel", this.boundPdfWheelHandler);
@@ -1724,6 +2106,9 @@ export class PresentationModal extends Component {
 						return;
 					}
 				}
+				if (target.closest(".slideflow-table-selector-bar")) {
+					return;
+				}
 				const linkEl = target.closest(".internal-link") as HTMLElement | null;
 				if (linkEl) {
 					if (
@@ -1738,8 +2123,6 @@ export class PresentationModal extends Component {
 					if (href) {
 						evt.preventDefault();
 						evt.stopPropagation();
-						this.closeMediaZoom(false);
-						this.activeZoomIndex = -1;
 						this.onLinkClickCallback?.(href);
 						return;
 					}
@@ -1756,6 +2139,19 @@ export class PresentationModal extends Component {
 						} else {
 							this.onLinkClickCallback?.(href);
 						}
+						return;
+					}
+					if (href && href !== "#" && !/^javascript:/i.test(href)) {
+						return;
+					}
+				}
+				const clickedRow = target.closest(".dynamic-slides-zoom-table tbody tr") as HTMLTableRowElement | null;
+				if (clickedRow) {
+					const rows = this.getZoomTableRows();
+					const rowIdx = rows.indexOf(clickedRow);
+					if (rowIdx !== -1) {
+						evt.stopPropagation();
+						this.selectTableZoomRow(rowIdx, false);
 						return;
 					}
 				}
@@ -2010,7 +2406,16 @@ export class PresentationModal extends Component {
 				wrapper.appendChild(iframeEl);
 			} else if (isTable) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-table" });
-				wrapper.appendChild(clone);
+				const scrollBody = wrapper.createDiv({ cls: "slideflow-table-scroll-body" });
+				scrollBody.appendChild(clone);
+				this.zoomTableScrollEl = scrollBody;
+				const tableEl =
+					clone.tagName.toLowerCase() === "table"
+						? (clone as HTMLTableElement)
+						: clone.querySelector<HTMLTableElement>("table");
+				if (tableEl) {
+					this.mountTableZoomSelectorBar(wrapper, tableEl);
+				}
 			} else if (isMermaid || isSvg) {
 				const wrapper = this.zoomContentEl.createDiv({ cls: "dynamic-slides-zoom-mermaid" });
 				wrapper.appendChild(clone);
@@ -2510,6 +2915,10 @@ export class PresentationModal extends Component {
 			index: number;
 			scrollIntoView?: boolean;
 			focusedLinkIndex?: number;
+		},
+		restoreZoom?: {
+			zoomIndex: number;
+			tableRowIndex?: number;
 		}
 	) {
 		this.currentSourcePath = sourcePath;
@@ -2587,6 +2996,17 @@ export class PresentationModal extends Component {
 			this.activeZoomIndex = -1;
 		}
 
+		if (restoreZoom && restoreZoom.zoomIndex >= 0 && restoreZoom.zoomIndex < mediaElements.length) {
+			this.openMediaZoom(restoreZoom.zoomIndex, false);
+			if (
+				this.isTableZoomActive() &&
+				typeof restoreZoom.tableRowIndex === "number" &&
+				restoreZoom.tableRowIndex >= 0
+			) {
+				this.selectTableZoomRow(restoreZoom.tableRowIndex, true);
+			}
+		}
+
 		if (restoreReadingFocus !== undefined) {
 			this.readingFocusActive = restoreReadingFocus.active;
 			if (this.readingFocusActive && !this.isMediaZoomActive()) {
@@ -2618,6 +3038,8 @@ export class PresentationModal extends Component {
 		const prevScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
 		const wasZoomOpen = this.isMediaZoomActive();
 		const prevZoomIndex = this.activeZoomIndex;
+		const prevZoomTableRowIndex = this.getZoomTableRowIndex();
+		const prevZoomTableScrollTop = this.zoomTableScrollEl ? this.zoomTableScrollEl.scrollTop : 0;
 		const prevFocusedLinkIdx = this.getFocusedLinkIndex();
 
 		this.restoreZoomedLiveElement(false);
@@ -2653,6 +3075,14 @@ export class PresentationModal extends Component {
 
 		if (wasZoomOpen && prevZoomIndex >= 0 && prevZoomIndex < mediaElements.length) {
 			this.openMediaZoom(prevZoomIndex, false);
+			if (this.isTableZoomActive()) {
+				if (this.zoomTableScrollEl && prevZoomTableScrollTop > 0) {
+					this.zoomTableScrollEl.scrollTop = prevZoomTableScrollTop;
+				}
+				if (prevZoomTableRowIndex >= 0) {
+					this.selectTableZoomRow(prevZoomTableRowIndex, false);
+				}
+			}
 		} else if (wasZoomOpen) {
 			this.closeMediaZoom(false);
 		}

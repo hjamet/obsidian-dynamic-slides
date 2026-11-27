@@ -214,4 +214,65 @@ export class BaselinesStore {
 		this.writeChain = chained.then(() => undefined, () => undefined);
 		return chained;
 	}
+
+	/**
+	 * Mirrors an explicit user-triggered persistent Markdown highlight (`H` -> `==...==`) into an
+	 * existing unread baseline (and matching `seenSlides`) when the pre-toggle lines existed
+	 * verbatim in the baseline, preventing Henri's own highlight from spawning a fake unread diff.
+	 */
+	public syncLineReplacementsInBaseline(
+		notePath: string,
+		replacements: Array<{ before: string; after: string }>
+	): Promise<boolean> {
+		const norm = normalizeVaultPath(notePath);
+		if (replacements.length === 0) return Promise.resolve(false);
+		const run = async (): Promise<boolean> => {
+			const data = await this.reload();
+			const entry = data.notes[norm];
+			if (!entry) return false;
+
+			const applyToText = (raw: string): { text: string; changed: boolean } => {
+				const hasCrlf = raw.includes("\r\n");
+				const eol = hasCrlf ? "\r\n" : "\n";
+				const lines = raw.replace(/\r\n/g, "\n").split("\n");
+				let changed = false;
+				for (const rep of replacements) {
+					if (rep.before === rep.after) continue;
+					const idx = lines.indexOf(rep.before);
+					if (idx !== -1) {
+						lines[idx] = rep.after;
+						changed = true;
+					}
+				}
+				return { text: changed ? lines.join(eol) : raw, changed };
+			};
+
+			let anyChanged = false;
+			const baseRes = applyToText(entry.baseline);
+			if (baseRes.changed) {
+				entry.baseline = baseRes.text;
+				anyChanged = true;
+			}
+			if (entry.seenSlides) {
+				for (const key of Object.keys(entry.seenSlides)) {
+					const rec = entry.seenSlides[key];
+					if (rec && typeof rec.text === "string" && rec.text.length > 0) {
+						const seenRes = applyToText(rec.text);
+						if (seenRes.changed) {
+							rec.text = seenRes.text;
+							rec.hash = hashText(seenRes.text);
+							anyChanged = true;
+						}
+					}
+				}
+			}
+			if (anyChanged) {
+				await this.saveLocked(data);
+			}
+			return anyChanged;
+		};
+		const chained = this.writeChain.then(run, run);
+		this.writeChain = chained.then(() => undefined, () => undefined);
+		return chained;
+	}
 }

@@ -1290,14 +1290,133 @@ body.is-dynamic-slides-active {
 	display: none !important;
 }
 
-/* Safe-scroll Table Zoom Wrapper — centers small tables, scrolls from very top row on tall tables */
+/* Safe-scroll Table Zoom Wrapper — fixed row selector bar at top + sticky table header below */
 .dynamic-slides-zoom-table {
 	width: 100%;
 	height: 100%;
 	max-width: 100%;
 	max-height: 100%;
+	overflow: hidden;
+	padding: 0;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-start;
+	align-items: stretch;
+	gap: 10px;
+}
+
+.slideflow-table-selector-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	padding: 6px 56px 4px 20px;
+	flex-shrink: 0;
+	user-select: none !important;
+	-webkit-user-select: none !important;
+}
+
+.slideflow-table-selector-bar * {
+	user-select: none !important;
+	-webkit-user-select: none !important;
+}
+
+.slideflow-table-selector-controls {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.slideflow-table-step-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 30px;
+	height: 30px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border) !important;
+	background: var(--background-secondary) !important;
+	color: var(--text-normal) !important;
+	font-size: 0.9rem;
+	font-weight: 700;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	cursor: pointer;
+	box-shadow: none !important;
+	transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.slideflow-table-step-btn:hover:not(:disabled) {
+	background: var(--background-modifier-hover) !important;
+	border-color: var(--interactive-accent) !important;
+	color: var(--text-accent) !important;
+}
+
+.slideflow-table-step-btn:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
+.slideflow-table-row-select {
+	height: 30px;
+	min-width: 220px;
+	max-width: min(440px, 46vw);
+	padding: 0 28px 0 10px;
+	border-radius: 8px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: 0.84rem;
+	font-weight: 500;
+	cursor: pointer;
+	outline: none;
+	transition: border-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.slideflow-table-row-select:hover,
+.slideflow-table-row-select:focus {
+	border-color: rgba(59, 130, 246, 0.72);
+	box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
+}
+
+.slideflow-table-row-count {
+	font-size: 0.76rem;
+	font-weight: 700;
+	font-family: var(--font-monospace, inherit);
+	padding: 3px 9px;
+	border-radius: 999px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.slideflow-table-hints {
+	display: inline-flex;
+	align-items: center;
+	gap: 12px;
+	font-size: 0.75rem;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.slideflow-table-hints strong {
+	color: var(--text-normal);
+	font-weight: 700;
+	margin-right: 3px;
+}
+
+.slideflow-table-scroll-body {
+	flex: 1 1 0%;
+	min-height: 0;
+	width: 100%;
 	overflow: auto;
-	padding: 24px;
+	padding: 4px 20px 24px 20px;
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;
@@ -1305,7 +1424,7 @@ body.is-dynamic-slides-active {
 	align-items: flex-start;
 }
 
-.dynamic-slides-zoom-table > * {
+.slideflow-table-scroll-body > * {
 	margin: auto;
 	flex-shrink: 0;
 }
@@ -1461,12 +1580,15 @@ body.is-dynamic-slides-active {
 	background-color: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 12px;
-	overflow: hidden;
+	overflow: visible;
 	box-shadow: var(--shadow-s, 0 4px 12px rgba(0, 0, 0, 0.08));
 }
 
 .dynamic-slides-zoom-table th,
 .dynamic-slides-zoom-table thead tr th {
+	position: sticky;
+	top: 0;
+	z-index: 3;
 	background-color: var(--background-secondary-alt, var(--background-secondary));
 	color: var(--text-accent);
 	font-weight: 700;
@@ -1474,6 +1596,22 @@ body.is-dynamic-slides-active {
 	padding: 14px 18px;
 	border-bottom: 2px solid var(--background-modifier-border);
 	border-right: 1px solid var(--background-modifier-border);
+}
+
+.dynamic-slides-zoom-table thead tr:first-child th:first-child {
+	border-top-left-radius: 11px;
+}
+
+.dynamic-slides-zoom-table thead tr:first-child th:last-child {
+	border-top-right-radius: 11px;
+}
+
+.dynamic-slides-zoom-table tbody tr:last-child td:first-child {
+	border-bottom-left-radius: 11px;
+}
+
+.dynamic-slides-zoom-table tbody tr:last-child td:last-child {
+	border-bottom-right-radius: 11px;
 }
 
 .dynamic-slides-zoom-table th:last-child {
@@ -1485,6 +1623,7 @@ body.is-dynamic-slides-active {
 	border-bottom: 1px solid var(--background-modifier-border);
 	border-right: 1px solid var(--background-modifier-border);
 	color: var(--text-normal);
+	transition: background-color 0.12s ease;
 }
 
 .dynamic-slides-zoom-table td:last-child {
@@ -1495,8 +1634,57 @@ body.is-dynamic-slides-active {
 	border-bottom: none;
 }
 
-.dynamic-slides-zoom-table tr:nth-child(even) td {
+.dynamic-slides-zoom-table tbody tr:nth-child(even) td {
 	background-color: var(--background-primary-alt, rgba(0, 0, 0, 0.02));
+}
+
+.dynamic-slides-zoom-table tbody tr {
+	cursor: pointer;
+}
+
+.dynamic-slides-zoom-table tbody tr:hover td {
+	background-color: rgba(59, 130, 246, 0.06);
+}
+
+.dynamic-slides-zoom-table tbody tr.slideflow-table-row-selected td {
+	background-color: rgba(59, 130, 246, 0.14) !important;
+	border-top: 2px solid rgba(59, 130, 246, 0.72);
+	border-bottom: 2px solid rgba(59, 130, 246, 0.72);
+}
+
+.dynamic-slides-zoom-table tbody tr.slideflow-table-row-selected td:first-child {
+	box-shadow: inset 4px 0 0 #2563eb;
+}
+
+.theme-dark .dynamic-slides-zoom-table tbody tr:hover td {
+	background-color: rgba(96, 165, 250, 0.09);
+}
+
+.theme-dark .dynamic-slides-zoom-table tbody tr.slideflow-table-row-selected td {
+	background-color: rgba(96, 165, 250, 0.19) !important;
+	border-top-color: rgba(96, 165, 250, 0.8);
+	border-bottom-color: rgba(96, 165, 250, 0.8);
+}
+
+.theme-dark .dynamic-slides-zoom-table tbody tr.slideflow-table-row-selected td:first-child {
+	box-shadow: inset 4px 0 0 #60a5fa;
+}
+
+.dynamic-slides-zoom-table .slideflow-focused-link {
+	display: inline;
+	padding: 2px 6px;
+	margin: -2px -2px;
+	border-radius: 6px;
+	outline: 2px solid #f59e0b !important;
+	outline-offset: 2px;
+	background-color: rgba(245, 158, 11, 0.18) !important;
+	box-shadow: 0 2px 10px rgba(245, 158, 11, 0.24);
+	text-decoration: underline !important;
+}
+
+.theme-dark .dynamic-slides-zoom-table .slideflow-focused-link {
+	outline-color: #fbbf24 !important;
+	background-color: rgba(251, 191, 36, 0.24) !important;
 }
 
 /* Sub-note Indicator Card (mounted inside bottom-left hover stack above Action Dock) */
@@ -1645,6 +1833,29 @@ body.is-dynamic-slides-active {
 ::highlight(slideflow-selection) {
 	background-color: rgba(34, 197, 94, 0.28);
 	color: inherit;
+}
+
+/* Native persistent Obsidian ==highlight== (<mark>) styling in slides & zoomed tables —
+   vivid warm yellow marker, clearly distinct from amber underlined comment marks and green/red diffs */
+.dynamic-slides-content mark:not(.slideflow-comment-mark),
+.dynamic-slides-media-zoom-content mark:not(.slideflow-comment-mark) {
+	background: rgba(254, 240, 138, 0.78);
+	color: inherit;
+	padding: 1px 4px;
+	border-radius: 4px;
+	box-decoration-break: clone;
+	-webkit-box-decoration-break: clone;
+}
+
+.theme-dark .dynamic-slides-content mark:not(.slideflow-comment-mark),
+.theme-dark .dynamic-slides-media-zoom-content mark:not(.slideflow-comment-mark) {
+	background: rgba(250, 204, 21, 0.34);
+	color: inherit;
+}
+
+.slideflow-dock-btn.slideflow-highlight-btn:hover,
+.slideflow-sel-btn.slideflow-sel-highlight-btn:hover {
+	background-color: rgba(250, 204, 21, 0.24) !important;
 }
 
 /* Persistent clickable highlight for saved selection comments (amber — distinct from green/red diffs) */

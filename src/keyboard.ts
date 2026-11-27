@@ -12,6 +12,7 @@ export interface KeyboardNavigatorCallbacks {
 	onZoomReset?: () => void;
 	onOpenCommentText?: () => void;
 	onOpenCommentVoice?: () => void;
+	onToggleHighlight?: () => void;
 	onToggleDiff?: () => void;
 	onNextDiffSlide?: () => void;
 	onToggleReviewDrawer?: () => void;
@@ -194,6 +195,13 @@ export class KeyboardNavigator {
 				evt.preventDefault();
 				evt.stopPropagation();
 				this.callbacks.onOpenCommentVoice();
+				return;
+			}
+
+			if (lowerKey === "h" && this.callbacks.onToggleHighlight) {
+				evt.preventDefault();
+				evt.stopPropagation();
+				this.callbacks.onToggleHighlight();
 				return;
 			}
 

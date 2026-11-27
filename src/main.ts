@@ -28,9 +28,15 @@ import {
 	ExtractedCommentContext,
 	extractBlockContext,
 	extractSelectionContext,
+	extractTableRowContext,
 	extractVisibleSlideContext,
 	extractZoomContext,
 } from "./contextExtractor";
+import { captureSelectionAnchorSnippet } from "./commentHighlighter";
+import {
+	BlockHighlightTarget,
+	toggleMarkdownHighlightInSection,
+} from "./markdownHighlighter";
 import {
 	CliSessionBatch,
 	GENERAL_NOTE_PATH,
@@ -100,6 +106,8 @@ export interface DocumentStackFrame {
 	readingFocusActive?: boolean;
 	readingFocusIndex?: number;
 	focusedLinkIndex?: number;
+	zoomIndex?: number;
+	zoomTableRowIndex?: number;
 }
 
 export const DEFAULT_SETTINGS: SlideFlowSettings = {
@@ -1536,10 +1544,14 @@ export default class SlideFlowPlugin extends Plugin {
 		this.activeModal.onToggleDiffClickCallback = () => this.toggleDiffMode();
 		this.activeModal.onCommentTextClickCallback = () => this.openCommentModal(false);
 		this.activeModal.onCommentVoiceClickCallback = () => this.openCommentModal(true);
+		this.activeModal.onToggleHighlightClickCallback = () => void this.toggleMarkdownHighlight();
 		this.activeModal.onOpenQueueClickCallback = () => this.toggleReviewDrawer();
 		this.activeModal.onCopyOneShotClickCallback = () => void this.handleSlideCtrlEnter();
 		this.activeModal.onSelectionCommentCallback = (range: Range, startWithVoice: boolean) => {
 			this.openCommentModal(startWithVoice, range);
+		};
+		this.activeModal.onSelectionHighlightCallback = (range: Range) => {
+			void this.toggleMarkdownHighlight(range);
 		};
 		this.activeModal.onHighlightCommentClickCallback = (commentId: string, anchorRect: AnchorRect) => {
 			this.openEditCommentById(commentId, anchorRect);
@@ -1710,6 +1722,7 @@ export default class SlideFlowPlugin extends Plugin {
 			onResetZoom: () => this.activeModal?.resetZoom(),
 			onOpenCommentText: () => this.openCommentModal(false),
 			onOpenCommentVoice: () => this.openCommentModal(true),
+			onToggleHighlight: () => void this.toggleMarkdownHighlight(),
 			onToggleDiff: () => this.toggleDiffMode(),
 			onNextDiffSlide: () => this.jumpToNextDiffSlide(),
 			onToggleReviewDrawer: () => this.toggleReviewDrawer(),
@@ -1727,7 +1740,12 @@ export default class SlideFlowPlugin extends Plugin {
 	}
 
 	private handleTabKey(shiftKey: boolean): boolean {
-		if (!this.activeModal || !this.activeModal.isReadingFocusActive()) {
+		if (!this.activeModal) return false;
+		if (this.activeModal.isTableZoomActive() && this.activeModal.hasZoomTableRowSelection()) {
+			this.activeModal.stepZoomTableFocusedLink(shiftKey ? "prev" : "next");
+			return true;
+		}
+		if (!this.activeModal.isReadingFocusActive()) {
 			return false;
 		}
 		this.activeModal.stepFocusedLink(shiftKey ? "prev" : "next");
@@ -1736,10 +1754,23 @@ export default class SlideFlowPlugin extends Plugin {
 
 	private handleEnterKey(): boolean {
 		if (!this.activeModal) return false;
+		if (this.activeModal.isTableZoomActive() && this.activeModal.hasZoomTableRowSelection()) {
+			return this.activeModal.activateZoomTableRowLink();
+		}
 		return this.activeModal.activateReadingFocusLink();
 	}
 
 	private handleEscapeKey() {
+		if (this.activeModal?.isTableZoomActive()) {
+			if (this.activeModal.hasZoomTableFocusedLink()) {
+				this.activeModal.clearZoomTableFocusedLink();
+				return;
+			}
+			if (this.activeModal.hasZoomTableRowSelection()) {
+				this.activeModal.clearTableZoomRowSelection();
+				return;
+			}
+		}
 		if (this.activeModal?.isMediaZoomActive()) {
 			this.activeModal.closeMediaZoom(true);
 			return;
@@ -2248,6 +2279,252 @@ export default class SlideFlowPlugin extends Plugin {
 		new Notice(this.diffEnabled ? "Diff view enabled" : "Diff view hidden");
 	}
 
+	/**
+	 * Extracts visible plain text from a DOM Range or element while stripping deleted diff spans,
+	 * UI badges, and hidden MathJax/KaTeX assistive duplicates so Markdown matching stays exact.
+	 */
+	private extractCleanHighlightText(source: Range | HTMLElement): string {
+		const wrapper = document.createElement("div");
+		if (source instanceof Range) {
+			wrapper.appendChild(source.cloneContents());
+		} else {
+			wrapper.appendChild(source.cloneNode(true));
+		}
+		wrapper
+			.querySelectorAll(
+				"del, .dv-del, .dv-block-del, .dv-pre-del, .slideflow-deleted-sections, .slideflow-link-dirty-badge, .slideflow-heading-diff-dot, .copy-code-button, .slideflow-table-selector-bar, mjx-assistive-mml, .katex-mathml, .MJX_Assistive_MathML"
+			)
+			.forEach((el) => el.remove());
+
+		const blockTags = new Set(["p", "li", "div", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"]);
+		const parts: string[] = [];
+		const walk = (node: Node) => {
+			if (node.nodeType === Node.TEXT_NODE) {
+				parts.push(node.textContent || "");
+				return;
+			}
+			if (node.nodeType !== Node.ELEMENT_NODE) return;
+			const el = node as HTMLElement;
+			const tag = el.tagName.toLowerCase();
+			if (tag === "br") {
+				parts.push("\n");
+				return;
+			}
+			if (tag === "td" || tag === "th") {
+				for (const ch of Array.from(el.childNodes)) walk(ch);
+				parts.push(" ");
+				return;
+			}
+			const isBlock = blockTags.has(tag);
+			if (isBlock && parts.length > 0 && !parts[parts.length - 1].endsWith("\n")) {
+				parts.push("\n");
+			}
+			for (const ch of Array.from(el.childNodes)) walk(ch);
+			if (isBlock && parts.length > 0 && !parts[parts.length - 1].endsWith("\n")) {
+				parts.push("\n");
+			}
+		};
+		walk(wrapper);
+		return parts
+			.join("")
+			.replace(/[ \t]+\n/g, "\n")
+			.replace(/\n{2,}/g, "\n")
+			.trim();
+	}
+
+	/**
+	 * Toggles persistent Obsidian Markdown highlighting (`==...==`) directly in the source note
+	 * for the active selection, zoomed table row/table, or focused/hovered reading block (`H`).
+	 */
+	private async toggleMarkdownHighlight(explicitRange?: Range | null): Promise<void> {
+		if (!this.activeModal || !this.currentNode || !this.activeSourcePath) return;
+		if (this.currentNode.isVirtualDeleted) {
+			new Notice("Cannot highlight a deleted section.");
+			return;
+		}
+
+		const abstractFile = this.app.vault.getAbstractFileByPath(this.activeSourcePath);
+		if (!(abstractFile instanceof TFile)) {
+			new Notice("Active note file not found.");
+			return;
+		}
+
+		const activeRange = explicitRange ?? this.activeModal.getActiveSelectionRange();
+		let target: BlockHighlightTarget | null = null;
+
+		if (activeRange) {
+			const ancestorEl =
+				activeRange.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+					? (activeRange.commonAncestorContainer as HTMLElement)
+					: activeRange.commonAncestorContainer.parentElement;
+			if (ancestorEl?.closest("del, .dv-del, .dv-block-del, .dv-pre-del, .slideflow-deleted-sections")) {
+				new Notice("Cannot highlight deleted diff text.");
+				return;
+			}
+			if (ancestorEl?.closest("pre")) {
+				new Notice("Markdown ==highlight== is not supported inside code blocks.");
+				return;
+			}
+			const activeContainer = this.activeModal.isMediaZoomActive()
+				? this.activeModal.getZoomContentElement()
+				: this.activeModal.getContentElement();
+			const anchor = activeContainer
+				? captureSelectionAnchorSnippet(activeRange, activeContainer)
+				: { selectionQuote: "", selectionPrefix: "", selectionSuffix: "" };
+			const cleanText = this.extractCleanHighlightText(activeRange);
+			if (!cleanText) {
+				new Notice("Selection has no highlightable text.");
+				return;
+			}
+			this.activeModal.hideSelectionToolbar(true);
+			window.getSelection()?.removeAllRanges();
+			target = {
+				kind: "selection",
+				plainText: cleanText,
+				prefixText: anchor.selectionPrefix,
+				suffixText: anchor.selectionSuffix,
+			};
+		} else if (this.activeModal.isTableZoomActive()) {
+			const tableIndex = this.activeModal.getActiveTableIndexInSlide();
+			const rowEl = this.activeModal.getZoomTableRowElement();
+			if (rowEl) {
+				target = {
+					kind: "table_row",
+					tableIndex,
+					rowIndex: this.activeModal.getZoomTableRowIndex(),
+					plainText: this.extractCleanHighlightText(rowEl),
+				};
+			} else {
+				const tableEl = this.activeModal.getZoomTableElement();
+				if (tableEl) {
+					target = {
+						kind: "table",
+						tableIndex,
+						plainText: this.extractCleanHighlightText(tableEl),
+					};
+				}
+			}
+		} else if (this.activeModal.isMediaZoomActive()) {
+			new Notice("Highlight (H) applies to text selections, blocks, and tables.");
+			return;
+		} else {
+			const blockEl =
+				this.activeModal.getReadingFocusBlockElement() ??
+				this.activeModal.getHoveredBlockElement();
+			if (!blockEl) {
+				new Notice("Select text or focus a block (↑/↓) before pressing H to highlight.");
+				return;
+			}
+			if (
+				blockEl.classList.contains("dv-block-del") ||
+				blockEl.classList.contains("is-deleted-child-heading") ||
+				blockEl.classList.contains("is-inline-deleted-heading") ||
+				Boolean(blockEl.closest(".dv-block-del, .slideflow-deleted-sections"))
+			) {
+				new Notice("Cannot highlight deleted diff content.");
+				return;
+			}
+			if (blockEl.classList.contains("dynamic-slides-child-heading")) {
+				new Notice("Open the subsection to highlight its content.");
+				return;
+			}
+			const tag = blockEl.tagName.toLowerCase();
+			if (tag === "table") {
+				const allTables = Array.from(
+					this.activeModal.getContentElement().querySelectorAll<HTMLTableElement>("table")
+				);
+				const tableIndex = Math.max(0, allTables.indexOf(blockEl as HTMLTableElement));
+				target = {
+					kind: "table",
+					tableIndex,
+					plainText: this.extractCleanHighlightText(blockEl),
+					tagName: "table",
+				};
+			} else {
+				target = {
+					kind: "block",
+					tagName: tag,
+					plainText: this.extractCleanHighlightText(blockEl),
+				};
+			}
+		}
+
+		if (!target || !target.plainText) {
+			new Notice("Nothing highlightable at the current target.");
+			return;
+		}
+
+		const freshMarkdown = await this.readFreshMarkdownForFile(abstractFile);
+		const result = toggleMarkdownHighlightInSection(
+			freshMarkdown,
+			this.currentNode.lineStart,
+			this.currentNode.lineEnd,
+			target
+		);
+
+		if (!result.changed) {
+			new Notice(result.reason || "Could not toggle Markdown highlight.");
+			return;
+		}
+
+		// Record changed lines so an active unread baseline stays in sync with Henri's manual highlight
+		const lineReplacements: Array<{ before: string; after: string }> = [];
+		if (
+			typeof result.affectedLineStart === "number" &&
+			typeof result.affectedLineEnd === "number"
+		) {
+			const oldLines = freshMarkdown.replace(/\r\n/g, "\n").split("\n");
+			const newLines = result.updatedMarkdown.replace(/\r\n/g, "\n").split("\n");
+			for (let i = result.affectedLineStart; i <= result.affectedLineEnd; i++) {
+				if (oldLines[i] !== undefined && newLines[i] !== undefined && oldLines[i] !== newLines[i]) {
+					lineReplacements.push({ before: oldLines[i], after: newLines[i] });
+				}
+			}
+		}
+
+		this.activeLoadedMarkdown = result.updatedMarkdown;
+		await this.app.vault.modify(abstractFile, result.updatedMarkdown);
+
+		if (lineReplacements.length > 0 && this.baselinesStore.hasUnreadBaseline(abstractFile.path)) {
+			await this.baselinesStore
+				.syncLineReplacementsInBaseline(abstractFile.path, lineReplacements)
+				.catch((err) => console.error("[SlideFlow] Failed syncing highlight to baseline:", err));
+		}
+
+		const parsed = parseMarkdownSections(result.updatedMarkdown);
+		const prevNode = this.currentNode;
+		const prevDiffEnabled = this.diffEnabled;
+		this.rootNode = parsed.root;
+		this.flatNodes = parsed.flatNodes;
+
+		const diffInit = await this.computeDiffForLoadedNote(
+			abstractFile.path,
+			result.updatedMarkdown,
+			this.flatNodes
+		);
+		this.activeDiffContext = diffInit.ctx;
+		this.diffEnabled = diffInit.ctx ? prevDiffEnabled : false;
+
+		const matched = this.findMatchingNodeAfterReload(this.flatNodes, prevNode);
+		this.currentNode = this.resolveNavigableTarget(matched) || matched || this.rootNode;
+
+		if (this.activeModal && this.currentNode) {
+			await this.activeModal.refreshSlideInPlace(
+				this.currentNode,
+				this.activeSourcePath,
+				this.buildSlideRenderDecoration(this.currentNode)
+			);
+			this.updateSlideCounter();
+			this.refreshAllActiveUI();
+		}
+
+		new Notice(
+			result.action === "removed"
+				? "Highlight removed from note."
+				: "Highlight (==…==) saved to note."
+		);
+	}
+
 	private jumpToNextDiffSlide() {
 		const dirtyIds = this.getDirtyNodeIdSet();
 		if (!this.activeDiffContext || dirtyIds.size === 0) {
@@ -2320,13 +2597,28 @@ export default class SlideFlowPlugin extends Plugin {
 		if (!extracted && this.activeModal.isMediaZoomActive()) {
 			const zoomEl = this.activeModal.getZoomContentElement();
 			if (zoomEl) {
-				extracted = extractZoomContext(
-					zoomEl,
-					this.activeSourcePath,
-					this.currentNode.title,
-					this.activeModal.getActiveZoomIndex(),
-					this.currentNode.rawOwnMarkdown
-				);
+				const selectedRow = this.activeModal.isTableZoomActive()
+					? this.activeModal.getZoomTableRowElement()
+					: null;
+				const tableEl = selectedRow ? this.activeModal.getZoomTableElement() : null;
+				if (selectedRow && tableEl) {
+					extracted = extractTableRowContext(
+						selectedRow,
+						tableEl,
+						this.activeSourcePath,
+						this.currentNode.title,
+						this.activeModal.getActiveZoomIndex(),
+						this.activeModal.getZoomTableRowIndex()
+					);
+				} else {
+					extracted = extractZoomContext(
+						zoomEl,
+						this.activeSourcePath,
+						this.currentNode.title,
+						this.activeModal.getActiveZoomIndex(),
+						this.currentNode.rawOwnMarkdown
+					);
+				}
 			}
 		}
 
@@ -3061,6 +3353,10 @@ export default class SlideFlowPlugin extends Plugin {
 			this.activeModal.scrollPdfZoom("down", 0.45);
 			return;
 		}
+		if (this.activeModal?.isTableZoomActive()) {
+			this.activeModal.stepTableZoomRow("down");
+			return;
+		}
 		if (this.activeModal?.isMediaZoomActive()) {
 			return;
 		}
@@ -3070,6 +3366,10 @@ export default class SlideFlowPlugin extends Plugin {
 	private fastJumpPrev() {
 		if (this.activeModal?.isPdfZoomActive()) {
 			this.activeModal.scrollPdfZoom("up", 0.45);
+			return;
+		}
+		if (this.activeModal?.isTableZoomActive()) {
+			this.activeModal.stepTableZoomRow("up");
 			return;
 		}
 		if (this.activeModal?.isMediaZoomActive()) {
@@ -3197,6 +3497,12 @@ export default class SlideFlowPlugin extends Plugin {
 					readingFocusActive: this.activeModal?.isReadingFocusActive() ?? false,
 					readingFocusIndex: this.activeModal?.getReadingFocusIndex() ?? -1,
 					focusedLinkIndex: this.activeModal?.getFocusedLinkIndex() ?? -1,
+					zoomIndex: this.activeModal?.isMediaZoomActive()
+						? this.activeModal.getActiveZoomIndex()
+						: -1,
+					zoomTableRowIndex: this.activeModal?.isTableZoomActive()
+						? this.activeModal.getZoomTableRowIndex()
+						: -1,
 				});
 			}
 
@@ -3314,6 +3620,15 @@ export default class SlideFlowPlugin extends Plugin {
 							focusedLinkIndex:
 								typeof parentFrame.focusedLinkIndex === "number" && parentFrame.focusedLinkIndex >= 0
 									? parentFrame.focusedLinkIndex
+									: undefined,
+					  }
+					: undefined,
+				typeof parentFrame.zoomIndex === "number" && parentFrame.zoomIndex >= 0
+					? {
+							zoomIndex: parentFrame.zoomIndex,
+							tableRowIndex:
+								typeof parentFrame.zoomTableRowIndex === "number" && parentFrame.zoomTableRowIndex >= 0
+									? parentFrame.zoomTableRowIndex
 									: undefined,
 					  }
 					: undefined

@@ -45,6 +45,7 @@ const SKIP_CLASS_LIST = [
 	"slideflow-selection-toolbar",
 	"slideflow-link-dirty-badge",
 	"slideflow-comments-rail",
+	"slideflow-table-selector-bar",
 ];
 
 function shouldSkipElement(el: HTMLElement, mode: "current" | "old", checkLiveVisibility: boolean): boolean {
@@ -395,6 +396,76 @@ export function extractZoomContext(
 		hadDiff,
 		oldExcerpt: hadDiff ? oldText : undefined,
 		anchorRect: null,
+	};
+}
+
+/**
+ * 2b. Portée LIGNE DE TABLEAU ZOOMÉ : extrait uniquement la ligne sélectionnée (avec l'en-tête
+ * du tableau pour un contexte Markdown parfaitement lisible) sans embarquer les 40+ autres lignes.
+ */
+export function extractTableRowContext(
+	rowEl: HTMLTableRowElement,
+	tableEl: HTMLTableElement,
+	notePath: string,
+	sectionHeading: string,
+	activeZoomIndex: number,
+	rowIndex: number
+): ExtractedCommentContext {
+	const serializeRowCells = (tr: HTMLTableRowElement, mode: "current" | "old"): string[] => {
+		const cells = Array.from(tr.children).filter(
+			(c) => c.tagName.toLowerCase() === "th" || c.tagName.toLowerCase() === "td"
+		) as HTMLElement[];
+		return cells.map((cell) =>
+			serializeNode(cell, mode, false)
+				.replace(/\s*\n\s*/g, " ")
+				.replace(/\|/g, "\\|")
+				.trim()
+		);
+	};
+
+	const headerRow = tableEl.querySelector("thead tr") as HTMLTableRowElement | null;
+	const buildTableMd = (mode: "current" | "old"): string => {
+		const dataCells = serializeRowCells(rowEl, mode);
+		if (dataCells.length === 0) return "";
+		const headerCells = headerRow ? serializeRowCells(headerRow, mode) : [];
+		const colCount = Math.max(dataCells.length, headerCells.length);
+		const pad = (r: string[]) => {
+			const out = [...r];
+			while (out.length < colCount) out.push("");
+			return `| ${out.join(" | ")} |`;
+		};
+		if (headerCells.length > 0) {
+			return [
+				pad(headerCells),
+				`| ${Array(colCount).fill("---").join(" | ")} |`,
+				pad(dataCells),
+			].join("\n");
+		}
+		return pad(dataCells);
+	};
+
+	const currentText = cleanExtractedText(buildTableMd("current")) || cleanExtractedText(rowEl.textContent || "[Table row]");
+	let oldText: string | null = null;
+	let hadDiff = false;
+	if (rowEl.querySelector("ins.dv-ins, del.dv-del")) {
+		oldText = cleanExtractedText(buildTableMd("old"));
+		hadDiff = oldText !== currentText;
+	}
+
+	const rect = rowEl.getBoundingClientRect();
+	return {
+		scopeType: "zoom",
+		scopeLabel: `Zoom · Table Row ${rowIndex + 1}`,
+		contextKey: `zoom-row:${notePath}::${sectionHeading}::${activeZoomIndex}::${rowIndex}::${hashText(currentText)}`,
+		excerpt: currentText,
+		hadDiff,
+		oldExcerpt: hadDiff ? oldText : undefined,
+		anchorRect: {
+			left: rect.left,
+			top: rect.top,
+			right: rect.right,
+			bottom: rect.bottom,
+		},
 	};
 }
 
